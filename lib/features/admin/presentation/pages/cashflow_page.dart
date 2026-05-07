@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
+import '../../../../core/services/excel_export_service.dart';
 import '../../../../core/services/pdf_export_service.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
@@ -73,6 +74,11 @@ class _CashflowPageState extends State<CashflowPage>
       appBar: AppBar(
         title: const Text('Caja'),
         actions: [
+          IconButton(
+            tooltip: 'Exportar Excel',
+            icon: const Icon(Icons.table_chart),
+            onPressed: () => _exportExcel(aid),
+          ),
           IconButton(
             tooltip: 'Exportar PDF',
             icon: const Icon(Icons.picture_as_pdf),
@@ -323,6 +329,51 @@ class _CashflowPageState extends State<CashflowPage>
         ),
       ],
     );
+  }
+
+  Future<void> _exportExcel(String aid) async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Generando Excel…')),
+    );
+    try {
+      final docs = await FirebaseFirestore.instance
+          .collection('cashflow')
+          .where('associationId', isEqualTo: aid)
+          .where('fecha',
+              isGreaterThanOrEqualTo: Timestamp.fromDate(_periodStart))
+          .orderBy('fecha', descending: true)
+          .get();
+      final movs = docs.docs.map(CashflowMovement.fromFirestore).toList();
+      final assocName =
+          await ExcelExportService.instance.loadAssociationName(aid);
+      final periodLabel = {
+            'day': 'Hoy',
+            'week': 'Esta semana',
+            'month': 'Este mes',
+            'year': 'Este año',
+          }[_period] ??
+          'Período';
+      final bytes = ExcelExportService.instance.buildCashflowReport(
+        associationName: assocName,
+        movements: movs,
+        periodStart: _periodStart,
+        periodEnd: DateTime.now(),
+        periodLabel: periodLabel,
+      );
+      await ExcelExportService.instance.share(
+        bytes,
+        fileName:
+            'caja_${aid}_${DateFormat('yyyyMMdd').format(DateTime.now())}.xlsx',
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Error generando Excel: $e'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    }
   }
 
   Future<void> _exportPdf(String aid) async {
