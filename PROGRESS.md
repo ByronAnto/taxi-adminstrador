@@ -67,8 +67,12 @@ git log --oneline | head -15
   de período (Día/Semana/Mes/Año) + FAB "Movimiento".
 - **Export PDF A4 márgenes 2.5cm** con logo + colores de la asociación
   (botón en AppBar de Caja).
+- **Export Excel (.xlsx)** con 3 hojas (Resumen + Movimientos +
+  Categorías) usando `syncfusion_flutter_xlsio`. Botón "Excel" en AppBar.
 - `PdfExportService` — Roboto via PdfGoogleFonts, encabezado con logo,
   KPIs, tabla, breakdown por categoría, paginación.
+- `ExcelExportService` — montos formateados como moneda
+  `"$"#,##0.00`, encabezados con fondo primaryColor, autoFitColumn.
 
 ### Fase 5 — Notificaciones + Eventos Quito ✅
 - `NotificationsPage` para que admin cree avisos (audiencia
@@ -173,10 +177,7 @@ Rama: `main`. **No pushé a remoto** (no tengo permiso explícito).
    las reglas Firestore ya están — solo falta el frontend web. Puede ir
    en `client_web/` o como proyecto separado. La operadora ya ve y
    asigna desde la app móvil.
-3. **Excel export** (alternativa al PDF): no lo añadí porque el PDF cubre
-   el requerimiento principal. Si quieres Excel también se agrega con
-   `excel: ^4.0.6` o `syncfusion_flutter_xlsio`.
-4. **Análisis con períodos extendidos** (trimestre/semestre/año): la
+3. **Análisis con períodos extendidos** (trimestre/semestre): la
    pantalla Caja ya soporta Día/Semana/Mes/Año. Si quieres también
    trimestre/semestre, son 2 ChoiceChip más + 2 case más en
    `_periodStart`.
@@ -223,6 +224,7 @@ flutter build apk --debug
 ```yaml
 pdf: ^3.11.3
 printing: ^5.14.2
+syncfusion_flutter_xlsio: ^30.1.42
 ```
 
 `flutter pub get` ya corrió.
@@ -242,7 +244,7 @@ funcionalmente completa para los 13 puntos que pediste:
 | 4. Reporte conductor 1-click | ✅ +1 carrera + stats |
 | 5. Operadora asigna en walkie + métricas | ✅ AssignTripModal + métricas |
 | 6. Caja admin (ingresos/egresos diario/semanal) | ✅ CashflowPage |
-| 7. Análisis contable + export PDF A4 + branding | ✅ PdfExportService |
+| 7. Análisis contable + export PDF A4 + Excel + branding | ✅ PdfExportService + ExcelExportService |
 | 8. Conductores desactivados | ✅ disabledByAdmin status |
 | 9. Switch general activo/inactivo | ✅ AvailabilityToggle |
 | 10. Switch general independiente del walkie | ✅ confirmado en código |
