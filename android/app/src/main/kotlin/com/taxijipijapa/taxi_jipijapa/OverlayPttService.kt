@@ -15,6 +15,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -48,6 +49,7 @@ class OverlayPttService : Service() {
     private var overlayView: View? = null
     private var buttonView: ImageView? = null
     private val handler = Handler(Looper.getMainLooper())
+    private var wakeLock: PowerManager.WakeLock? = null
 
     private var pttActivated = false
     private var isDragging = false
@@ -68,6 +70,21 @@ class OverlayPttService : Service() {
             startForeground(NOTIFICATION_ID, notification)
         }
 
+        // Wake lock parcial — mantiene el CPU activo mientras el overlay está
+        // corriendo, evitando que Doze mode mate el isolate de Flutter (donde
+        // vive Agora). Sin esto, en background después de unos minutos el
+        // PTT puede dejar de transmitir aunque el botón siga visible.
+        try {
+            val pm = getSystemService(POWER_SERVICE) as PowerManager
+            wakeLock = pm.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK,
+                "TaxiJipijapa::OverlayPttWakeLock"
+            ).apply {
+                setReferenceCounted(false)
+                acquire(10 * 60 * 1000L) // 10 min, se renueva periódicamente
+            }
+        } catch (_: Exception) {}
+
         // Register for state updates from Flutter
         PttBridge.onUpdateButtonState = { state ->
             handler.post { updateButtonVisualState(state) }
@@ -85,6 +102,10 @@ class OverlayPttService : Service() {
     }
 
     override fun onDestroy() {
+        try {
+            wakeLock?.takeIf { it.isHeld }?.release()
+        } catch (_: Exception) {}
+        wakeLock = null
         removeFloatingButton()
         PttBridge.onUpdateButtonState = null
         PttBridge.sendOverlayClosed()
@@ -275,6 +296,12 @@ class OverlayPttService : Service() {
                 "transmitting" -> {
                     setColor(Color.parseColor("#B71C1C"))
                     setStroke(dpToPx(2), Color.parseColor("#F44336"))
+                }
+                "error" -> {
+                    // Borde rojo intermitente visual: gris oscuro con borde rojo
+                    // brillante. Se diferencia claramente de "transmitting".
+                    setColor(Color.parseColor("#424242"))
+                    setStroke(dpToPx(3), Color.parseColor("#FF1744"))
                 }
                 else -> {
                     setColor(Color.parseColor("#1B5E20"))

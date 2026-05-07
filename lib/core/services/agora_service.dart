@@ -489,6 +489,14 @@ class AgoraService {
   Future<void> overlayActivate(String channelId) async {
     _log('🟢 overlayActivate — conectando al canal: $channelId');
 
+    // Si _engine quedó null pero _isInitialized true (estado inconsistente
+    // tras un crash/destroy parcial), forzar reset para volver a init bien.
+    if (_isInitialized && _engine == null) {
+      _log('⚠️ Estado inconsistente: _isInitialized=true pero _engine=null. Reset.');
+      _isInitialized = false;
+      _isInChannel = false;
+    }
+
     if (!_isInitialized) {
       await initialize(channelHint: channelId);
     }
@@ -496,12 +504,14 @@ class AgoraService {
     if (!_isInChannel || _currentChannelId != channelId) {
       await joinChannel(channelId);
 
-      // Esperar confirmación de join (máx 5 segundos)
-      for (int i = 0; i < 50 && !_isInChannel; i++) {
+      // Esperar confirmación de join. Aumentado a 8s porque el callback
+      // onJoinChannelSuccess puede tardar más cuando la app está en
+      // background o la red es lenta (modo rural).
+      for (int i = 0; i < 80 && !_isInChannel; i++) {
         await Future.delayed(const Duration(milliseconds: 100));
       }
       if (!_isInChannel) {
-        throw Exception('Timeout al unirse al canal');
+        throw Exception('Timeout (8s) al unirse al canal');
       }
     }
 
@@ -518,13 +528,25 @@ class AgoraService {
   }
 
   /// PTT instantáneo: solo enciende el mic (engine ya conectado al canal).
+  /// Si por alguna razón perdimos la conexión al canal, intentamos
+  /// reconectar antes de unmute. Si falla, lanza excepción para que la UI
+  /// muestre feedback al usuario (botón rojo de error).
   Future<void> quickPttStart(String channelId) async {
     _log('⚡ quickPttStart — unmute mic (canal persistente)');
-    if (!_isInChannel) {
-      _log('⚠️ quickPttStart: no está en canal, reconectando...');
-      await overlayActivate(channelId);
+    if (!_isInChannel || _engine == null) {
+      _log('⚠️ quickPttStart: no está en canal (engine=$_engine, '
+          'isInChannel=$_isInChannel), reconectando...');
+      try {
+        await overlayActivate(channelId);
+      } catch (e) {
+        _log('❌ quickPttStart: reconexión falló: $e');
+        rethrow;
+      }
     }
     await unmuteMic();
+    if (!_isMicPublishing) {
+      throw Exception('No se pudo activar el micrófono');
+    }
     _log('⚡ quickPttStart LISTO — transmitiendo');
   }
 

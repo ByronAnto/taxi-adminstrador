@@ -132,20 +132,29 @@ class OverlayPttService {
   Future<void> _handlePttDown() async {
     if (_activeChannelId == null) {
       _log('Sin canal activo, ignorando PTT');
+      await _updateButtonState('error');
       return;
     }
 
     _isPttActive = true;
     _log('PTT DOWN → unmute mic (instantáneo)');
+    // Feedback inmediato: mientras Agora abre el mic, mostramos amarillo
+    // (connecting). Si el unmute es exitoso pasa a rojo (transmitting).
+    await _updateButtonState('connecting');
 
     try {
       await _agoraService.quickPttStart(_activeChannelId!);
       await _updateButtonState('transmitting');
       _log('PTT activo — transmitiendo');
     } catch (e) {
-      _log('Error iniciando PTT: $e');
+      _log('❌ Error iniciando PTT: $e');
       _isPttActive = false;
-      await _updateButtonState('idle');
+      // El usuario ve botón rojo de error y entiende que no se transmitió.
+      // En 1.5s vuelve a verde para que pueda reintentar.
+      await _updateButtonState('error');
+      Future.delayed(const Duration(milliseconds: 1500), () async {
+        if (!_isPttActive) await _updateButtonState('idle');
+      });
     }
   }
 
