@@ -31,6 +31,13 @@ class AccountBlockedPage extends StatelessWidget {
         final user = state.user;
         final canPay = user.canUploadPayment;
         final isAdminDisabled = user.status == UserStatus.disabledByAdmin;
+        // Cuando es el admin del grupo el que está bloqueado por mora, el
+        // flujo no es "subir comprobante" sino "contactar al proveedor del
+        // software". Los admins no pagan vía el formulario de pagos del
+        // conductor — pagan al operador del SaaS (Byron) por fuera.
+        final isAdminWithExpiredSub =
+            user.role == AppConstants.roleAdmin &&
+                user.status == UserStatus.paymentBlocked;
 
         return Scaffold(
           appBar: AppBar(
@@ -58,7 +65,9 @@ class AccountBlockedPage extends StatelessWidget {
                   Icon(
                     isAdminDisabled
                         ? Icons.person_off_outlined
-                        : Icons.lock_outline,
+                        : isAdminWithExpiredSub
+                            ? Icons.event_busy
+                            : Icons.lock_outline,
                     size: 80,
                     color: AppTheme.errorColor,
                   ),
@@ -66,7 +75,9 @@ class AccountBlockedPage extends StatelessWidget {
                   Text(
                     isAdminDisabled
                         ? 'Tu cuenta fue desactivada'
-                        : 'Pago pendiente',
+                        : isAdminWithExpiredSub
+                            ? 'Suscripción vencida'
+                            : 'Pago pendiente',
                     textAlign: TextAlign.center,
                     style: const TextStyle(
                       fontSize: 22,
@@ -78,10 +89,15 @@ class AccountBlockedPage extends StatelessWidget {
                     isAdminDisabled
                         ? 'El administrador de tu asociación desactivó tu cuenta. '
                             'Contáctalo para restaurar el acceso.'
-                        : 'Para seguir usando ${AppConstants.appName} debes '
-                            'completar el pago de tu cuota. Sube un comprobante '
-                            'y el administrador lo aprobará para reactivar tu '
-                            'cuenta.',
+                        : isAdminWithExpiredSub
+                            ? 'La suscripción de ${AppConstants.appName} de tu '
+                                'asociación venció. Contacta a tu proveedor del '
+                                'software para renovar el plan y reactivar el '
+                                'acceso de todos los socios.'
+                            : 'Para seguir usando ${AppConstants.appName} debes '
+                                'completar el pago de tu cuota. Sube un '
+                                'comprobante y el administrador lo aprobará '
+                                'para reactivar tu cuenta.',
                     textAlign: TextAlign.center,
                     style: TextStyle(
                       fontSize: 15,
@@ -90,7 +106,7 @@ class AccountBlockedPage extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(height: 32),
-                  if (canPay) ...[
+                  if (canPay && !isAdminWithExpiredSub) ...[
                     ElevatedButton.icon(
                       onPressed: () => context.push('/my-payments'),
                       icon: const Icon(Icons.upload_file),
@@ -127,8 +143,13 @@ class AccountBlockedPage extends StatelessWidget {
                           const SizedBox(width: 12),
                           Expanded(
                             child: Text(
-                              'No puedes subir comprobante mientras tu cuenta '
-                              'esté desactivada. Habla con el administrador.',
+                              isAdminWithExpiredSub
+                                  ? 'Una vez que tu proveedor renueve la '
+                                      'suscripción, todos los socios y tu '
+                                      'cuenta se reactivarán automáticamente.'
+                                  : 'No puedes subir comprobante mientras tu '
+                                      'cuenta esté desactivada. Habla con el '
+                                      'administrador.',
                               style: TextStyle(
                                 color: Colors.orange.shade900,
                                 fontSize: 13,

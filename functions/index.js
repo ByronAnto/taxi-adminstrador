@@ -1540,14 +1540,20 @@ async function _runSubscriptionCheck() {
       else summary.associationsReactivated++;
     }
 
-    // Recorrer conductores de esta asociación.
-    const driversSnap = await db
+    // Recorrer conductores Y admins de esta asociación.
+    // Cuando la suscripción caduca, TODOS (admins y socios) deben quedar
+    // bloqueados con el mismo flujo (paymentPending → paymentBlocked).
+    // El mensaje al admin difiere en la app: dice "contacta a tu proveedor
+    // para renovar la suscripción" en vez de "sube comprobante".
+    // Las operadoras también se bloquean — sin admin/operadora la asociación
+    // no opera.
+    const usersSnap = await db
       .collection("users")
       .where("associationId", "==", aDoc.id)
-      .where("role", "==", "conductor")
+      .where("role", "in", ["conductor", "admin", "operadora"])
       .get();
 
-    for (const uDoc of driversSnap.docs) {
+    for (const uDoc of usersSnap.docs) {
       const u = uDoc.data();
       const currentStatus = u.status || "active";
 
@@ -1593,6 +1599,59 @@ async function _runSubscriptionCheck() {
 
   return summary;
 }
+
+// ───────────────────────────────────────────────────────────────────
+//  addCoAdmin — sube a un conductor a admin SIN degradar al admin actual.
+//  Permite tener múltiples admins en la misma asociación.
+//  Solo el admin actual o super-admin pueden invocar.
+// ───────────────────────────────────────────────────────────────────
+
+exports.addCoAdmin = onCall({}, async (request) => {
+  const auth = requireAuth(request);
+  const callerEmail = auth.token.email || "";
+  const isSuper = SUPER_ADMIN_EMAILS.includes(callerEmail);
+
+  const { targetUid } = request.data || {};
+  if (!targetUid) {
+    throw new HttpsError("invalid-argument", "targetUid es obligatorio.");
+  }
+
+  const targetSnap = await db.collection("users").doc(targetUid).get();
+  if (!targetSnap.exists) {
+    throw new HttpsError("not-found", "Usuario destino no existe.");
+  }
+  const target = targetSnap.data();
+
+  // Solo el admin actual de esa asociación o super-admin pueden promover.
+  if (!isSuper) {
+    const callerSnap = await db.collection("users").doc(auth.uid).get();
+    if (!callerSnap.exists) {
+      throw new HttpsError("permission-denied", "Caller no existe.");
+    }
+    const caller = callerSnap.data();
+    if (
+      caller.role !== "admin" ||
+      caller.associationId !== target.associationId ||
+      (caller.status || "active") !== "active"
+    ) {
+      throw new HttpsError(
+        "permission-denied",
+        "Solo el admin activo de esa asociación o super-admin puede agregar co-admins.",
+      );
+    }
+  }
+
+  if (target.role === "admin") {
+    return { ok: true, alreadyAdmin: true };
+  }
+
+  await targetSnap.ref.update({
+    role: "admin",
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  return { ok: true, uid: targetUid, newRole: "admin" };
+});
 
 exports.checkSubscriptions = onSchedule(
   {
