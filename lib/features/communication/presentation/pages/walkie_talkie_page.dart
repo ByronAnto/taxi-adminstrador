@@ -21,7 +21,6 @@ import '../../../trips/presentation/widgets/assign_trip_modal.dart';
 import '../../../trips/presentation/widgets/quick_street_assign_modal.dart';
 import '../../data/models/channel_model.dart';
 import '../bloc/communication_bloc.dart';
-import '../widgets/audio_history_tile.dart';
 import '../widgets/stand_queue_bar.dart';
 
 /// Página de walkie-talkie con PTT estilo Zello.
@@ -488,7 +487,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             // despacho estilo cooperativa.
             const StandQueueBar(),
             if (state.isPttLocked && _radioPower.isOn) _buildSpeakerBanner(state),
-            Expanded(child: _buildMessageList(state)),
+            // Espacio expandido — el historial vive en el tab "Chat".
+            Expanded(child: _buildRadioCenter()),
             _buildAudioControls(state),
           ],
         );
@@ -729,150 +729,30 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     );
   }
 
-  Widget _buildMessageList(CommunicationLoaded state) {
-    if (state.activeChannelId == null) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.radio, size: 64, color: Colors.grey[300]),
-            const SizedBox(height: 16),
-            Text(
-              'Selecciona un canal',
-              style: TextStyle(color: Colors.grey[500], fontSize: 16),
-            ),
-          ],
-        ),
-      );
-    }
-
-    // Audios locales del historial (24h, en este celular).
-    final audios = LocalAudioHistoryService.instance
-        .entriesForChannel(state.activeChannelId!);
-
-    // Mensajes de texto (Firestore). Los de voz legacy con audioBase64 ya
-    // no se reproducen — el historial local los reemplaza.
-    final texts = state.activeMessages
-        .where((m) => m.type == 'texto')
-        .toList();
-
-    if (audios.isEmpty && texts.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.mic_none, size: 64, color: Colors.grey[300]),
-            const SizedBox(height: 16),
-            Text(
-              'Sin mensajes recientes',
-              style: TextStyle(color: Colors.grey[500], fontSize: 16),
-            ),
-            const SizedBox(height: 8),
-            Text(
-              'Mantén presionado el botón para hablar',
-              style: TextStyle(color: Colors.grey[400], fontSize: 14),
-            ),
-          ],
-        ),
-      );
-    }
-
-    // Combinar audios + textos ordenados por fecha desc (más reciente arriba).
-    final items = <_HistoryItem>[
-      ...audios.map((a) => _HistoryItem.audio(a)),
-      ...texts.map((t) => _HistoryItem.text(t)),
-    ]..sort((a, b) => b.at.compareTo(a.at));
-
-    return ListView.builder(
-      padding: const EdgeInsets.all(16),
-      itemCount: items.length,
-      reverse: false,
-      itemBuilder: (context, index) {
-        final item = items[index];
-        if (item.audio != null) {
-          final isMe = item.audio!.speakerId == _currentUser?.uid;
-          return AudioHistoryTile(
-            entry: item.audio!,
-            isMe: isMe,
-            onDelete: () async {
-              await LocalAudioHistoryService.instance
-                  .deleteEntry(item.audio!.id);
-              if (mounted) setState(() {});
-            },
-          );
-        }
-        return _buildMessageTile(item.text!);
-      },
-    );
-  }
-
-  Widget _buildMessageTile(MessageModel message) {
-    final isMe = message.senderId == _currentUser?.uid;
-    IconData typeIcon;
-    Widget content;
-
-    if (message.type == 'voz') {
-      typeIcon = Icons.mic;
-      // Audio en tiempo real — el mensaje solo muestra metadatos
-      content = Row(
+  /// Centro del walkie-talkie cuando no hay nadie hablando: solo espacio
+  /// vacío con un recordatorio de dónde ver el historial. La idea es que
+  /// el botón PTT sea el protagonista visual.
+  Widget _buildRadioCenter() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.graphic_eq, size: 20, color: AppTheme.secondaryColor),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Container(
-              height: 4,
-              decoration: BoxDecoration(
-                color: AppTheme.secondaryColor.withValues(alpha: 0.3),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
+          Icon(Icons.radio, size: 80, color: Colors.grey.shade300),
+          const SizedBox(height: 16),
           Text(
-            '${message.durationSeconds ?? 0}s',
-            style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+            'Mantén presionado el botón para hablar',
+            style: TextStyle(color: Colors.grey.shade600, fontSize: 14),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Historial de audios y mensajes en el tab Chat',
+            style: TextStyle(
+              color: Colors.grey.shade500,
+              fontSize: 12,
+              fontStyle: FontStyle.italic,
+            ),
           ),
         ],
-      );
-    } else {
-      typeIcon = Icons.message;
-      content = Text(
-        message.text ?? '',
-        style: const TextStyle(fontSize: 14),
-      );
-    }
-
-    return Card(
-      margin: const EdgeInsets.only(bottom: 8),
-      color: isMe ? AppTheme.primaryColor.withValues(alpha: 0.1) : null,
-      child: Padding(
-        padding: const EdgeInsets.all(12),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(typeIcon, size: 16, color: AppTheme.textSecondary),
-                const SizedBox(width: 8),
-                Text(
-                  isMe ? 'Tú' : message.senderName,
-                  style: TextStyle(
-                    fontWeight: FontWeight.w600,
-                    fontSize: 14,
-                    color: isMe ? AppTheme.secondaryColor : null,
-                  ),
-                ),
-                const Spacer(),
-                Text(
-                  _formatTime(message.createdAt),
-                  style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            content,
-          ],
-        ),
       ),
     );
   }
@@ -1600,22 +1480,4 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     );
   }
 
-  String _formatTime(DateTime dateTime) {
-    return '${dateTime.hour.toString().padLeft(2, '0')}:'
-        '${dateTime.minute.toString().padLeft(2, '0')}';
-  }
-}
-
-/// Item interno de la lista combinada audio + texto del historial del canal.
-class _HistoryItem {
-  final AudioHistoryEntry? audio;
-  final MessageModel? text;
-  final DateTime at;
-
-  _HistoryItem._({this.audio, this.text, required this.at});
-
-  factory _HistoryItem.audio(AudioHistoryEntry e) =>
-      _HistoryItem._(audio: e, at: e.startedAt);
-  factory _HistoryItem.text(MessageModel m) =>
-      _HistoryItem._(text: m, at: m.createdAt);
 }

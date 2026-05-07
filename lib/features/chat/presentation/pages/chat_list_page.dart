@@ -9,6 +9,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:uuid/uuid.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
+import '../../../communication/presentation/widgets/radio_history_view.dart';
 import '../../data/models/chat_model.dart';
 import '../bloc/chat_bloc.dart';
 
@@ -20,9 +21,11 @@ class ChatListPage extends StatefulWidget {
   State<ChatListPage> createState() => _ChatListPageState();
 }
 
-class _ChatListPageState extends State<ChatListPage> {
+class _ChatListPageState extends State<ChatListPage>
+    with SingleTickerProviderStateMixin {
   final _searchController = TextEditingController();
   String _searchQuery = '';
+  late final TabController _tabs = TabController(length: 2, vsync: this);
 
   @override
   void initState() {
@@ -59,37 +62,60 @@ class _ChatListPageState extends State<ChatListPage> {
   @override
   void dispose() {
     _searchController.dispose();
+    _tabs.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(title: const Text('Mensajes')),
-      body: Column(
+      appBar: AppBar(
+        title: const Text('Mensajes'),
+        bottom: TabBar(
+          controller: _tabs,
+          tabs: const [
+            Tab(icon: Icon(Icons.chat_bubble_outline), text: 'Privados'),
+            Tab(icon: Icon(Icons.radio), text: 'Radio'),
+          ],
+        ),
+      ),
+      body: TabBarView(
+        controller: _tabs,
         children: [
-          // Search bar
-          Padding(
-            padding: const EdgeInsets.all(12),
-            child: TextField(
-              controller: _searchController,
-              decoration: InputDecoration(
-                hintText: 'Buscar conversación...',
-                prefixIcon: const Icon(Icons.search),
-                filled: true,
-                fillColor: AppTheme.surfaceColor,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(24),
-                  borderSide: BorderSide.none,
-                ),
-              ),
-              onChanged: (v) => setState(() => _searchQuery = v.toLowerCase()),
-            ),
-          ),
+          // ── Tab 1: chats privados 1-a-1 ──
+          _buildPrivateChatsTab(),
+          // ── Tab 2: historial de audios + textos del canal del radio ──
+          const RadioHistoryView(),
+        ],
+      ),
+    );
+  }
 
-          // Chat room list
-          Expanded(
-            child: BlocBuilder<ChatBloc, ChatState>(
+  Widget _buildPrivateChatsTab() {
+    return Column(
+      children: [
+        // Search bar
+        Padding(
+          padding: const EdgeInsets.all(12),
+          child: TextField(
+            controller: _searchController,
+            decoration: InputDecoration(
+              hintText: 'Buscar conversación...',
+              prefixIcon: const Icon(Icons.search),
+              filled: true,
+              fillColor: AppTheme.surfaceColor,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(24),
+                borderSide: BorderSide.none,
+              ),
+            ),
+            onChanged: (v) =>
+                setState(() => _searchQuery = v.toLowerCase()),
+          ),
+        ),
+        // Chat room list
+        Expanded(
+          child: BlocBuilder<ChatBloc, ChatState>(
               builder: (context, state) {
                 if (state is ChatLoading) {
                   return const Center(child: CircularProgressIndicator());
@@ -135,9 +161,8 @@ class _ChatListPageState extends State<ChatListPage> {
                     child: Text('Inicia una conversación'));
               },
             ),
-          ),
-        ],
-      ),
+        ),
+      ],
     );
   }
 
