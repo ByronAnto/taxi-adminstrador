@@ -1,0 +1,38 @@
+version: 2
+updates:
+  # Flutter/Dart (pub)
+  - package-ecosystem: pub
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - dart
+    groups:
+      firebase:
+        patterns:
+          - "firebase_*"
+          - "cloud_*"
+      ui:
+        patterns:
+          - "flutter_*"
+          - "cached_*"
+          - "shimmer"
+          - "fl_chart"
+      audio:
+        patterns:
+          - "record"
+          - "audioplayers"
+
+  # GitHub Actions
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - ci

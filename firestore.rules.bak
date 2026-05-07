@@ -1,0 +1,281 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===== FUNCIONES AUXILIARES =====
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserRole() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && getUserRole() == 'admin';
+    }
+
+    function isOperatorOrAdmin() {
+      return isAuthenticated() && getUserRole() in ['admin', 'operadora'];
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Super-admin del SaaS (proveedor). Por email mientras el custom
+    // claim `superAdmin` no se haya propagado a tu JWT.
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'brealpeaymara@gmail.com'
+        || request.auth.token.get('superAdmin', false) == true
+      );
+    }
+
+    // Slug de la asociación a la que pertenece el caller (custom claim).
+    function myAssociationId() {
+      return request.auth.token.get('associationId', '');
+    }
+
+    // Devuelve true si el lock PTT del documento `data` está expirado
+    // (más de 35s desde que se tomó). Coincide con ChannelModel.isLockExpired.
+    function pttLockExpired(data) {
+      return !('speakerLockedAt' in data) || data.speakerLockedAt == null
+        || request.time > data.speakerLockedAt + duration.value(35, 's');
+    }
+
+    // El lock está libre o expirado
+    function pttLockAvailable(data) {
+      return !('currentSpeakerId' in data) || data.currentSpeakerId == null
+        || data.currentSpeakerId == ''
+        || pttLockExpired(data);
+    }
+
+    // ===== ASOCIACIONES (SaaS multi-tenant) =====
+    //
+    // - read: super-admin ve todas; el resto solo la suya.
+    // - write: solo super-admin (las edita desde su panel o las crean
+    //   las Cloud Functions con privilegios de Admin SDK).
+    match /associations/{aid} {
+      allow read: if isSuperAdmin() || (isAuthenticated() && myAssociationId() == aid);
+      allow write: if isSuperAdmin();
+    }
+
+    // ===== PLANES DE PRECIOS =====
+    //
+    // Lectura abierta a autenticados (admins necesitan ver planes para
+    // upgrade). Escritura solo super-admin.
+    match /pricingTiers/{tid} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin();
+    }
+
+    // ===== USUARIOS =====
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      allow update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ===== CONDUCTORES =====
+    match /drivers/{driverId} {
+      allow read: if isAuthenticated();
+      // Solo operadora/admin crean registros de conductor
+      allow create: if isOperatorOrAdmin();
+      // El conductor puede actualizar su ubicacion/estado; admin puede todo
+      allow update: if isOwner(resource.data.userId) || isOperatorOrAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ===== VEHICULOS =====
+    match /vehicles/{vehicleId} {
+      allow read: if isAuthenticated();
+      // Solo operadora/admin registran vehículos
+      allow create: if isOperatorOrAdmin();
+      allow update: if isOwner(resource.data.driverId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ===== VIAJES =====
+    match /trips/{tripId} {
+      allow read: if isAuthenticated();
+      allow create: if isOperatorOrAdmin();
+      allow update: if isOwner(resource.data.driverId) || isOperatorOrAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ===== PAGOS =====
+    match /payments/{paymentId} {
+      allow read: if isAuthenticated();
+      allow create: if isOperatorOrAdmin();
+      allow update: if isOwner(resource.data.driverId) || isOperatorOrAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ===== GASTOS =====
+    match /expenses/{expenseId} {
+      allow read: if isAuthenticated();
+      // Conductores crean sus propios gastos
+      allow create: if isAuthenticated()
+        && request.resource.data.driverId == request.auth.uid;
+      allow update: if isOwner(resource.data.driverId) || isAdmin();
+      allow delete: if isOwner(resource.data.driverId) || isAdmin();
+    }
+
+    // ===== CANALES (Walkie-Talkie) =====
+    //
+    // Update se permite en tres escenarios disjuntos:
+    //   A. Admin/operadora editan metadatos.
+    //   B. Cambio de PTT lock (currentSpeaker*, speakerLockedAt) — solo
+    //      el speaker actual o si expiró pueden tomar/soltar el lock.
+    //   C. Cambio de membresía (memberIds) — auth.uid se añade o se quita
+    //      a sí mismo (join/leave); admin/operadora pueden modificarla libre.
+    match /channels/{channelId} {
+      allow read: if isAuthenticated();
+      allow create: if isOperatorOrAdmin();
+
+      allow update: if isAdmin()
+        || _isPttLockUpdate()
+        || _isMemberIdsSelfUpdate();
+
+      allow delete: if isAdmin();
+    }
+
+    // Solo cambian campos del lock PTT y la transición es válida.
+    function _isPttLockUpdate() {
+      return isAuthenticated()
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['currentSpeakerId', 'currentSpeakerName', 'speakerLockedAt'])
+        && _isValidLockTransition();
+    }
+
+    function _isValidLockTransition() {
+      let newSpeaker = request.resource.data.get('currentSpeakerId', null);
+      let oldSpeaker = resource.data.get('currentSpeakerId', null);
+
+      // Tomar el lock: solo si el canal está libre/expirado y el nuevo
+      // speaker es el propio usuario.
+      let isTake = newSpeaker == request.auth.uid
+        && pttLockAvailable(resource.data)
+        && request.resource.data.currentSpeakerName is string
+        && request.resource.data.speakerLockedAt == request.time;
+
+      // Liberar el lock: el speaker actual lo libera, o ya estaba expirado.
+      let isRelease = newSpeaker == null
+        && request.resource.data.get('currentSpeakerName', null) == null
+        && request.resource.data.get('speakerLockedAt', null) == null
+        && (oldSpeaker == request.auth.uid || pttLockExpired(resource.data));
+
+      return isTake || isRelease;
+    }
+
+    // Solo cambia memberIds y el cambio afecta solo al propio uid.
+    function _isMemberIdsSelfUpdate() {
+      let keys = request.resource.data.diff(resource.data).affectedKeys();
+      return isAuthenticated()
+        && keys.hasOnly(['memberIds'])
+        && (
+          isOperatorOrAdmin()
+          || (
+            // Join: añade su propio uid
+            !(request.auth.uid in resource.data.memberIds)
+            && request.auth.uid in request.resource.data.memberIds
+          )
+          || (
+            // Leave: quita su propio uid
+            request.auth.uid in resource.data.memberIds
+            && !(request.auth.uid in request.resource.data.memberIds)
+          )
+        );
+    }
+
+    // ===== MENSAJES DE CANAL (top-level, walkie-talkie) =====
+    //
+    // Para crear: el sender debe ser auth.uid, el canal debe existir,
+    // y el canal debe ser público o el usuario miembro del canal.
+    // Compatibilidad con canales antiguos: si el documento no tiene los
+    // campos `type` o `memberIds`, se asume público y memberIds vacío.
+    match /messages/{messageId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated()
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.channelId is string
+        && exists(/databases/$(database)/documents/channels/$(request.resource.data.channelId))
+        && (
+          get(/databases/$(database)/documents/channels/$(request.resource.data.channelId))
+            .data.get('type', 'publico') == 'publico'
+          || request.auth.uid in get(/databases/$(database)/documents/channels/$(request.resource.data.channelId))
+            .data.get('memberIds', [])
+          || isOperatorOrAdmin()
+        );
+      allow update: if false;
+      allow delete: if isAdmin();
+    }
+
+    // ===== CHAT ROOMS =====
+    match /chat_rooms/{roomId} {
+      allow read: if isAuthenticated()
+        && request.auth.uid in resource.data.participantIds;
+      allow create: if isAuthenticated()
+        && request.auth.uid in request.resource.data.participantIds;
+      allow update: if isAuthenticated()
+        && request.auth.uid in resource.data.participantIds;
+      allow delete: if false;
+
+      // Mensajes del chat (subcollection)
+      match /messages/{messageId} {
+        allow read: if isAuthenticated()
+          && request.auth.uid in
+              get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.participantIds;
+        allow create: if isAuthenticated()
+          && request.resource.data.senderId == request.auth.uid
+          && request.auth.uid in
+              get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.participantIds;
+        // Solo se permite marcar isRead (no editar contenido)
+        allow update: if isAuthenticated()
+          && request.auth.uid in
+              get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.participantIds
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt']);
+        allow delete: if false;
+      }
+    }
+
+    // ===== EMERGENCIAS =====
+    match /emergencies/{emergencyId} {
+      allow read: if isAuthenticated();
+      // Cualquier conductor puede crear una emergencia para sí mismo
+      allow create: if isAuthenticated()
+        && request.resource.data.driverId == request.auth.uid;
+      // Solo operadora/admin puede resolver; conductor puede cancelar la suya
+      allow update: if isOwner(resource.data.driverId) || isOperatorOrAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ===== COMPETITOR TRIPS (competencia) =====
+    match /competitor_trips/{tripId} {
+      allow read: if isAuthenticated();
+      // Solo operadora/admin registran competencia
+      allow create: if isOperatorOrAdmin();
+      allow update: if isOperatorOrAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ===== PARADAS DE TAXI =====
+    match /taxi_stands/{standId} {
+      allow read: if isAuthenticated();
+      allow create: if isOperatorOrAdmin();
+      allow update: if isOperatorOrAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // ===== INCENTIVOS =====
+    match /incentives/{incentiveId} {
+      allow read: if isAuthenticated();
+      allow create: if isAdmin();
+      allow update: if isAdmin();
+      allow delete: if isAdmin();
+    }
+  }
+}

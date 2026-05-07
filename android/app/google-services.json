@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1043852093355",
+    "project_id": "taxis-f0f51",
+    "storage_bucket": "taxis-f0f51.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1043852093355:android:3bd4c7db85cc3fecea54ee",
+        "android_client_info": {
+          "package_name": "com.taxijipijapa.taxi_jipijapa"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBFYlXimpu6endXqPaELR3OpnO-DUYLYmI"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

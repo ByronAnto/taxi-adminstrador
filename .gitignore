@@ -1,0 +1,86 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# ======================== SECURITY ========================
+# Archivos de entorno con secretos
+.env
+.env.*
+!.env.example
+env.local
+
+# Android local properties (contiene GOOGLE_MAPS_API_KEY y SDK paths)
+android/local.properties
+**/local.properties
+
+# iOS secrets xcconfig (contiene API keys)
+ios/Flutter/Secrets.xcconfig
+ios/Flutter/Secrets*.xcconfig
+!ios/Flutter/Secrets.xcconfig.example
+
+# Service accounts (Firebase Admin / GCP)
+**/service-account*.json
+**/firebase-adminsdk*.json
+
+# Keystores y certificados
+*.jks
+*.keystore
+*.p12
+*.key
+*.pem
+
+# Debug symbols (contienen mapas de ofuscación)
+build/debug-info/
+
+# Logs runtime
+flutter_*.log
+
+# Functions: secretos de Firebase Functions
+functions/.runtimeconfig.json
+functions/.secret.local
+
+# Google Services (contiene API keys — considerar excluir en proyectos públicos)
+# android/app/google-services.json
+# ios/Runner/GoogleService-Info.plist

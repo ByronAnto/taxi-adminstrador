@@ -1,0 +1,63 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function isImage() {
+      return request.resource.contentType.matches('image/.*');
+    }
+
+    function maxFileSize() {
+      // 5 MB
+      return request.resource.size < 5 * 1024 * 1024;
+    }
+
+    // ─── Imágenes asociadas a usuarios (perfil, vehículo, licencia) ───
+    // Path: users/{uid}/{archivo}
+    match /users/{uid}/{allPaths=**} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(uid) && isImage() && maxFileSize();
+      allow delete: if isOwner(uid);
+    }
+
+    // ─── Path histórico de registros (deprecado) ───
+    // El flujo nuevo NO sube fotos durante el alta. Se suben después
+    // del login a `users/{uid}/...` en la pantalla "Pending approval".
+    // Este path queda solo para compat de docs antiguos; cerrado.
+    match /registros/{cedula}/{allPaths=**} {
+      allow read: if isAuthenticated();
+      allow write: if false;
+    }
+
+    // ─── Comprobantes de pago ───
+    // Path: payment_proofs/{uid}/{archivo}
+    // El conductor sube su comprobante; cualquier autenticado de la
+    // asociación lo puede ver (admin valida).
+    match /payment_proofs/{uid}/{allPaths=**} {
+      allow read: if isAuthenticated();
+      allow write: if isOwner(uid) && isImage() && maxFileSize();
+      // El cron de purgado borra desde el Admin SDK, no requiere regla.
+    }
+
+    // ─── Logos y assets de las asociaciones ───
+    // Path: associations/{aid}/{archivo}
+    // Lectura pública (logo aparece al login). Escritura solo admin
+    // (validado por Cloud Function, no aquí).
+    match /associations/{aid}/{allPaths=**} {
+      allow read: if true;
+      allow write: if isAuthenticated() && isImage() && maxFileSize();
+    }
+
+    // Por defecto, denegar
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}

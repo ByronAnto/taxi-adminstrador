@@ -1,0 +1,6 @@
+# Firebase API keys (web/android/ios). NO son secretos — Firebase está
+# diseñado para distribuirlas en clientes; la seguridad viene de Firestore Rules,
+# Auth providers y restricciones por package name + SHA-1 en GCP Console.
+# Ver: https://firebase.google.com/docs/projects/api-keys
+lib/firebase_options.dart:gcp-api-key:53
+android/app/google-services.json:gcp-api-key:18

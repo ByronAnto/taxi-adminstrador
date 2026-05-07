@@ -1,0 +1,325 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===== HELPERS BÁSICOS =====
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    // Lee del JWT (custom claim sincronizado por el trigger syncUserClaims).
+    // Si por alguna razón no estuviera presente, devuelve cadena vacía.
+    function getRole() {
+      return isAuthenticated() ? request.auth.token.get('role', '') : '';
+    }
+
+    function getStatus() {
+      return isAuthenticated() ? request.auth.token.get('status', '') : '';
+    }
+
+    function isActive() {
+      return isAuthenticated() && getStatus() == 'active';
+    }
+
+    function isAdmin() {
+      return isActive() && getRole() == 'admin';
+    }
+
+    function isOperatorOrAdmin() {
+      return isActive() && getRole() in ['admin', 'operadora'];
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    // Super-admin del SaaS. Se reconoce por email O por custom claim.
+    function isSuperAdmin() {
+      return isAuthenticated() && (
+        request.auth.token.email == 'brealpeaymara@gmail.com'
+        || request.auth.token.get('superAdmin', false) == true
+      );
+    }
+
+    // Slug de la asociación a la que pertenece el caller (custom claim).
+    function myAssociationId() {
+      return isAuthenticated() ? request.auth.token.get('associationId', '') : '';
+    }
+
+    // Compatibilidad con docs legacy sin associationId: se asumen 'jipijapa'
+    // (la primera asociación del SaaS, antes de la migración multi-tenant).
+    function docTenant(data) {
+      return data.get('associationId', 'jipijapa');
+    }
+
+    // ¿El doc pertenece al tenant del caller? Super-admin pasa siempre.
+    function sameTenant(data) {
+      return isSuperAdmin() || docTenant(data) == myAssociationId();
+    }
+
+    // ¿El payload entrante declara el tenant del caller?
+    function sameTenantOnCreate() {
+      return isSuperAdmin()
+        || request.resource.data.get('associationId', '') == myAssociationId();
+    }
+
+    // ===== PTT LOCK (walkie-talkie) =====
+
+    function pttLockExpired(data) {
+      return !('speakerLockedAt' in data) || data.speakerLockedAt == null
+        || request.time > data.speakerLockedAt + duration.value(35, 's');
+    }
+
+    function pttLockAvailable(data) {
+      return !('currentSpeakerId' in data) || data.currentSpeakerId == null
+        || data.currentSpeakerId == ''
+        || pttLockExpired(data);
+    }
+
+    // ===== ASOCIACIONES (SaaS multi-tenant) =====
+    match /associations/{aid} {
+      allow read: if isSuperAdmin()
+        || (isAuthenticated() && myAssociationId() == aid);
+      allow write: if isSuperAdmin();
+    }
+
+    // ===== PLANES DE PRECIOS =====
+    // Lectura abierta a autenticados (admins necesitan ver planes).
+    match /pricingTiers/{tid} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin();
+    }
+
+    // ===== USUARIOS =====
+    // - Cada uno SIEMPRE puede leer/actualizar su propio doc (necesario
+    //   para PendingApprovalPage incluso cuando aún no está activo).
+    // - El resto del listado solo se ve dentro del mismo tenant.
+    // - Crear: solo el propio uid (registro).
+    // - Borrar: admin del mismo tenant o super-admin.
+    match /users/{userId} {
+      allow read: if isOwner(userId)
+        || isSuperAdmin()
+        || (isActive() && sameTenant(resource.data));
+
+      allow create: if isAuthenticated()
+        && request.auth.uid == userId
+        && (
+          isSuperAdmin()
+          || request.resource.data.get('associationId', '') != ''
+        );
+
+      allow update: if isOwner(userId)
+        || isSuperAdmin()
+        || (isAdmin() && sameTenant(resource.data));
+
+      allow delete: if isSuperAdmin()
+        || (isAdmin() && sameTenant(resource.data));
+    }
+
+    // ===== CONDUCTORES =====
+    match /drivers/{driverId} {
+      allow read: if isActive() && sameTenant(resource.data);
+      allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
+      allow update: if (isOwner(resource.data.userId) && sameTenant(resource.data))
+        || (isOperatorOrAdmin() && sameTenant(resource.data));
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== VEHICULOS =====
+    match /vehicles/{vehicleId} {
+      allow read: if isActive() && sameTenant(resource.data);
+      allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
+      allow update: if (isOwner(resource.data.driverId) && sameTenant(resource.data))
+        || (isAdmin() && sameTenant(resource.data));
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== VIAJES =====
+    match /trips/{tripId} {
+      allow read: if isActive() && sameTenant(resource.data);
+      allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
+      allow update: if (isOwner(resource.data.driverId) && sameTenant(resource.data))
+        || (isOperatorOrAdmin() && sameTenant(resource.data));
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== PAGOS =====
+    // - Conductor: ve los suyos y crea reportes propios (estado pending).
+    // - Operadora/admin: ven todos los del tenant y validan/rechazan.
+    match /payments/{paymentId} {
+      allow read: if isActive() && (
+        isOwner(resource.data.driverId) || isOperatorOrAdmin()
+      ) && sameTenant(resource.data);
+
+      allow create: if isActive() && sameTenantOnCreate() && (
+        // Conductor reporta su propio pago
+        (isOwner(request.resource.data.get('driverId', '')))
+        || isOperatorOrAdmin()
+      );
+
+      allow update: if isActive() && sameTenant(resource.data) && (
+        isOwner(resource.data.driverId) || isOperatorOrAdmin()
+      );
+
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== GASTOS =====
+    match /expenses/{expenseId} {
+      allow read: if isActive() && sameTenant(resource.data) && (
+        isOwner(resource.data.driverId) || isOperatorOrAdmin()
+      );
+      allow create: if isActive() && sameTenantOnCreate()
+        && request.resource.data.driverId == request.auth.uid;
+      allow update: if isActive() && sameTenant(resource.data) && (
+        isOwner(resource.data.driverId) || isAdmin()
+      );
+      allow delete: if isActive() && sameTenant(resource.data) && (
+        isOwner(resource.data.driverId) || isAdmin()
+      );
+    }
+
+    // ===== CANALES (Walkie-Talkie) =====
+    match /channels/{channelId} {
+      allow read: if isActive() && sameTenant(resource.data);
+      allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
+
+      allow update: if sameTenant(resource.data) && (
+        isAdmin()
+        || _isPttLockUpdate()
+        || _isMemberIdsSelfUpdate()
+      );
+
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    function _isPttLockUpdate() {
+      return isActive()
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['currentSpeakerId', 'currentSpeakerName', 'speakerLockedAt'])
+        && _isValidLockTransition();
+    }
+
+    function _isValidLockTransition() {
+      let newSpeaker = request.resource.data.get('currentSpeakerId', null);
+      let oldSpeaker = resource.data.get('currentSpeakerId', null);
+
+      let isTake = newSpeaker == request.auth.uid
+        && pttLockAvailable(resource.data)
+        && request.resource.data.currentSpeakerName is string
+        && request.resource.data.speakerLockedAt == request.time;
+
+      let isRelease = newSpeaker == null
+        && request.resource.data.get('currentSpeakerName', null) == null
+        && request.resource.data.get('speakerLockedAt', null) == null
+        && (oldSpeaker == request.auth.uid || pttLockExpired(resource.data));
+
+      return isTake || isRelease;
+    }
+
+    function _isMemberIdsSelfUpdate() {
+      let keys = request.resource.data.diff(resource.data).affectedKeys();
+      return isActive()
+        && keys.hasOnly(['memberIds'])
+        && (
+          isOperatorOrAdmin()
+          || (
+            !(request.auth.uid in resource.data.memberIds)
+            && request.auth.uid in request.resource.data.memberIds
+          )
+          || (
+            request.auth.uid in resource.data.memberIds
+            && !(request.auth.uid in request.resource.data.memberIds)
+          )
+        );
+    }
+
+    // ===== MENSAJES DE CANAL (top-level, walkie-talkie) =====
+    // El canal pertenece al tenant. Validamos que el sender sea del mismo
+    // tenant que el canal y miembro/admin para escribir.
+    match /messages/{messageId} {
+      allow read: if isActive() && sameTenant(resource.data);
+
+      allow create: if isActive()
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.channelId is string
+        && exists(/databases/$(database)/documents/channels/$(request.resource.data.channelId))
+        && sameTenantOnCreate()
+        && docTenant(get(/databases/$(database)/documents/channels/$(request.resource.data.channelId)).data) == myAssociationId()
+        && (
+          get(/databases/$(database)/documents/channels/$(request.resource.data.channelId))
+            .data.get('type', 'publico') == 'publico'
+          || request.auth.uid in get(/databases/$(database)/documents/channels/$(request.resource.data.channelId))
+            .data.get('memberIds', [])
+          || isOperatorOrAdmin()
+        );
+
+      allow update: if false;
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== CHAT ROOMS =====
+    // Permanece basado en participantIds (no por tenant); un room privado
+    // 1-a-1 entre usuarios del mismo tenant es la práctica normal.
+    match /chat_rooms/{roomId} {
+      allow read: if isAuthenticated()
+        && request.auth.uid in resource.data.participantIds;
+      allow create: if isAuthenticated()
+        && request.auth.uid in request.resource.data.participantIds;
+      allow update: if isAuthenticated()
+        && request.auth.uid in resource.data.participantIds;
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if isAuthenticated()
+          && request.auth.uid in
+              get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.participantIds;
+        allow create: if isAuthenticated()
+          && request.resource.data.senderId == request.auth.uid
+          && request.auth.uid in
+              get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.participantIds;
+        allow update: if isAuthenticated()
+          && request.auth.uid in
+              get(/databases/$(database)/documents/chat_rooms/$(roomId)).data.participantIds
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['isRead', 'readAt']);
+        allow delete: if false;
+      }
+    }
+
+    // ===== EMERGENCIAS =====
+    match /emergencies/{emergencyId} {
+      allow read: if isActive() && sameTenant(resource.data);
+      allow create: if isActive() && sameTenantOnCreate()
+        && request.resource.data.driverId == request.auth.uid;
+      allow update: if isActive() && sameTenant(resource.data) && (
+        isOwner(resource.data.driverId) || isOperatorOrAdmin()
+      );
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== COMPETITOR TRIPS =====
+    match /competitor_trips/{tripId} {
+      allow read: if isActive() && sameTenant(resource.data);
+      allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
+      allow update: if isOperatorOrAdmin() && sameTenant(resource.data);
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== PARADAS DE TAXI =====
+    match /taxi_stands/{standId} {
+      allow read: if isActive() && sameTenant(resource.data);
+      allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
+      allow update: if isOperatorOrAdmin() && sameTenant(resource.data);
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== INCENTIVOS =====
+    match /incentives/{incentiveId} {
+      allow read: if isActive() && sameTenant(resource.data);
+      allow create: if isAdmin() && sameTenantOnCreate();
+      allow update: if isAdmin() && sameTenant(resource.data);
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+  }
+}

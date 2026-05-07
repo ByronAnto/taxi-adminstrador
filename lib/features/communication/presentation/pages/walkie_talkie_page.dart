@@ -1,0 +1,1145 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:uuid/uuid.dart';
+import '../../../../core/constants/app_constants.dart';
+import '../../../../core/theme/app_theme.dart';
+import '../../../../core/services/agora_service.dart';
+import '../../../../core/services/connectivity_service.dart';
+import '../../../../core/services/driver_location_service.dart';
+import '../../../../core/services/radio_foreground_service.dart';
+import '../../../../core/services/overlay_ptt_service.dart';
+import '../../../auth/presentation/bloc/auth_bloc.dart';
+import '../../../auth/data/models/user_model.dart';
+import '../../data/models/channel_model.dart';
+import '../bloc/communication_bloc.dart';
+
+/// Página de walkie-talkie con PTT estilo Zello.
+/// Canal bloqueado: solo un usuario puede hablar a la vez.
+class WalkieTalkiePage extends StatefulWidget {
+  const WalkieTalkiePage({super.key});
+
+  @override
+  State<WalkieTalkiePage> createState() => _WalkieTalkiePageState();
+}
+
+class _WalkieTalkiePageState extends State<WalkieTalkiePage>
+    with WidgetsBindingObserver {
+  bool _isRecording = false;
+  bool _isMuted = false;
+  DateTime? _recordingStartTime;
+  Timer? _recordingTimer;
+  Timer? _durationTimer;
+  int _recordingSeconds = 0;
+
+  final _agoraService = AgoraService.instance;
+  final _radioService = RadioForegroundService.instance;
+  final _connectivity = ConnectivityService.instance;
+  final _overlayService = OverlayPttService.instance;
+  final _locationService = DriverLocationService.instance;
+
+  /// true cuando no hay internet O el conductor está en modo Desconectado
+  bool _isOffline = false;
+
+  /// true solo cuando el conductor está en modo Desconectado (estado manual)
+  bool _isDriverOffline = false;
+
+  /// Último channelId al que nos unimos en Agora (para detectar cambios)
+  String? _lastAgoraChannelId;
+
+  /// Duración máxima de grabación en segundos (seguridad anti-mic abierto)
+  static const int _maxRecordingSeconds = 60;
+
+  UserModel? get _currentUser {
+    final authState = context.read<AuthBloc>().state;
+    if (authState is AuthAuthenticated) return authState.user;
+    return null;
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    // Inicializar servicio de radio en segundo plano
+    _radioService.init();
+    // Inicializar Agora RTC Engine (audio tiempo real)
+    _agoraService.initialize().catchError((e) {
+      debugPrint('Error inicializando Agora: $e');
+    });
+    // Monitorear conectividad
+    _isOffline = !_connectivity.isConnected || !_locationService.isOnline;
+    _isDriverOffline = !_locationService.isOnline;
+    _connectivity.addListener(_onConnectivityChanged);
+    _locationService.addListener(_onDriverLocationChanged);
+    // Iniciar la observación de canales
+    context.read<CommunicationBloc>().add(ChannelsWatchStarted());
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _connectivity.removeListener(_onConnectivityChanged);
+    _locationService.removeListener(_onDriverLocationChanged);
+    _recordingTimer?.cancel();
+    _durationTimer?.cancel();
+    // Destruir engine completamente al salir de la página del radio
+    // para liberar la sesión de audio del SO
+    _agoraService.destroyEngine();
+    // Detener servicio de segundo plano al salir del radio
+    _radioService.stopService();
+    super.dispose();
+  }
+
+  /// Maneja cambios de ciclo de vida: destruye el engine Agora cuando la app
+  /// va a segundo plano para liberar la sesión de audio del SO.
+  /// Esto es CRÍTICO para que Android no reporte "en llamada" a otras apps.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      // Si estaba grabando, forzar stop PTT
+      if (_isRecording) {
+        _recordingTimer?.cancel();
+        _durationTimer?.cancel();
+        _isRecording = false;
+        _recordingSeconds = 0;
+        _recordingStartTime = null;
+        // Liberar lock PTT en Firestore
+        final commState = context.read<CommunicationBloc>().state;
+        if (commState is CommunicationLoaded &&
+            commState.activeChannelId != null) {
+          final user = _currentUser;
+          if (user != null) {
+            context.read<CommunicationBloc>().add(
+                  PttUnlockRequested(
+                    channelId: commState.activeChannelId!,
+                    userId: user.uid,
+                  ),
+                );
+          }
+        }
+      }
+      // El observer global en main.dart ya destruye el engine
+      // pero por seguridad también lo hacemos aquí
+      debugPrint('📱 WalkieTalkie: App en background → engine destruido por global observer');
+    } else if (state == AppLifecycleState.resumed) {
+      // Al volver de background, re-inicializar engine y reconectar
+      _reconnectAfterResume();
+      debugPrint('📱 WalkieTalkie: App resumed → reconectando Agora');
+      if (mounted) setState(() {});
+    }
+  }
+
+  /// Reconecta Agora después de que la app vuelve de background.
+  /// El engine fue destruido al ir a background, así que debe
+  /// re-inicializarse y reconectar al canal activo.
+  Future<void> _reconnectAfterResume() async {
+    try {
+      // Re-inicializar engine (fue destruido en background)
+      await _agoraService.initialize();
+
+      // Reconectar al canal activo
+      final commState = context.read<CommunicationBloc>().state;
+      String? channelToRejoin;
+
+      if (commState is CommunicationLoaded &&
+          commState.activeChannelId != null) {
+        channelToRejoin = commState.activeChannelId;
+      } else {
+        // Intentar usar el canal guardado antes de destroy
+        channelToRejoin = _agoraService.lastChannelBeforeDestroy;
+      }
+
+      if (channelToRejoin != null) {
+        _lastAgoraChannelId = channelToRejoin;
+        await _agoraService.joinChannel(channelToRejoin);
+        debugPrint('✅ Reconectado a canal: $channelToRejoin tras resume');
+      }
+    } catch (e) {
+      debugPrint('Error reconectando Agora tras resume: $e');
+    }
+  }
+
+  /// Reacciona a cambios de conectividad: desconecta/reconecta Agora.
+  void _onConnectivityChanged() {
+    if (!mounted) return;
+    final wasOffline = _isOffline;
+    _isOffline = !_connectivity.isConnected || !_locationService.isOnline;
+
+    setState(() {});
+
+    if (_isOffline && !wasOffline) {
+      // ── Se perdió la conexión ──
+      // Si estaba grabando PTT, detenerlo
+      if (_isRecording) {
+        final currentState = context.read<CommunicationBloc>().state;
+        if (currentState is CommunicationLoaded) {
+          _stopPtt(currentState);
+        }
+      }
+      // Salir de Agora
+      _agoraService.leaveChannel().catchError((_) {});
+      _lastAgoraChannelId = null;
+    } else if (!_isOffline && wasOffline) {
+      // ── Conexión restaurada ──
+      // Reconectar Agora al canal activo
+      final currentState = context.read<CommunicationBloc>().state;
+      if (currentState is CommunicationLoaded &&
+          currentState.activeChannelId != null) {
+        _lastAgoraChannelId = currentState.activeChannelId;
+        _agoraService
+            .joinChannel(currentState.activeChannelId!)
+            .catchError((e) {
+          debugPrint('Error Agora rejoin tras reconexión: $e');
+        });
+      }
+    }
+  }
+
+  /// Reacciona a cambios del estado online/offline del conductor
+  /// (cuando el conductor elige "Desconectado" desde el diálogo de status).
+  void _onDriverLocationChanged() {
+    if (!mounted) return;
+    final wasOffline = _isOffline;
+    _isDriverOffline = !_locationService.isOnline;
+    _isOffline = !_connectivity.isConnected || _isDriverOffline;
+
+    setState(() {});
+
+    if (_isOffline && !wasOffline) {
+      // ── Conductor pasó a modo Desconectado ──
+      debugPrint('📻 WalkieTalkie: Conductor OFFLINE → desconectando Agora');
+      if (_isRecording) {
+        final currentState = context.read<CommunicationBloc>().state;
+        if (currentState is CommunicationLoaded) {
+          _stopPtt(currentState);
+        }
+      }
+      _agoraService.leaveChannel().catchError((_) {});
+      _lastAgoraChannelId = null;
+    } else if (!_isOffline && wasOffline) {
+      // ── Conductor volvió a estar online ──
+      debugPrint('📻 WalkieTalkie: Conductor ONLINE → reconectando Agora');
+      final currentState = context.read<CommunicationBloc>().state;
+      if (currentState is CommunicationLoaded &&
+          currentState.activeChannelId != null) {
+        _lastAgoraChannelId = currentState.activeChannelId;
+        _agoraService
+            .joinChannel(currentState.activeChannelId!)
+            .catchError((e) {
+          debugPrint('Error Agora rejoin tras conductor online: $e');
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return BlocConsumer<CommunicationBloc, CommunicationState>(
+      listener: (context, state) {
+        if (state is CommunicationError) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(state.message),
+              backgroundColor: AppTheme.errorColor,
+            ),
+          );
+        }
+        if (state is CommunicationLoaded && state.pttLockDenied) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text(
+                '${state.pttSpeakerName ?? "Alguien"} está hablando. Espera tu turno.',
+              ),
+              backgroundColor: Colors.orange,
+              duration: const Duration(seconds: 2),
+            ),
+          );
+        }
+        // === Foreground service: mantener radio en segundo plano ===
+        if (state is CommunicationLoaded) {
+          final channelName = state.activeChannel?.name;
+          final channelId = state.activeChannelId;
+
+          // === Agora: unirse/salir del canal de audio en tiempo real ===
+          if (channelId != null && channelId != _lastAgoraChannelId) {
+            _lastAgoraChannelId = channelId;
+            _agoraService.joinChannel(channelId).catchError((e) {
+              debugPrint('Error Agora joinChannel: $e');
+            });
+          } else if (channelId == null && _lastAgoraChannelId != null) {
+            _lastAgoraChannelId = null;
+            _agoraService.leaveChannel().catchError((e) {
+              debugPrint('Error Agora leaveChannel: $e');
+            });
+          }
+
+          if (channelName != null) {
+            // Iniciar o actualizar el servicio de segundo plano
+            if (!_radioService.isRunning) {
+              _radioService.startService(channelName);
+            }
+            // Actualizar notificación según estado PTT
+            if (state.isPttLocked && state.pttSpeakerName != null) {
+              _radioService.showSpeaking(channelName, state.pttSpeakerName!);
+            } else {
+              _radioService.showListening(channelName);
+            }
+          } else if (_radioService.isRunning) {
+            // No hay canal activo, detener servicio
+            _radioService.stopService();
+          }
+        }
+      },
+      builder: (context, state) {
+        if (state is CommunicationLoading) {
+          return const Center(child: CircularProgressIndicator());
+        }
+
+        if (state is! CommunicationLoaded) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(Icons.wifi_off, size: 64, color: Colors.grey[300]),
+                const SizedBox(height: 16),
+                Text(
+                  'Conectando al radio...',
+                  style: TextStyle(color: Colors.grey[500], fontSize: 16),
+                ),
+              ],
+            ),
+          );
+        }
+
+        return Column(
+          children: [
+            // Banner de sin conexión dentro del walkie-talkie
+            if (_isOffline) _buildOfflineBanner(),
+            _buildChannelSelector(state),
+            if (state.isPttLocked) _buildSpeakerBanner(state),
+            Expanded(child: _buildMessageList(state)),
+            _buildAudioControls(state),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Banner de sin conexión / modo desconectado en el walkie-talkie.
+  Widget _buildOfflineBanner() {
+    final bool noInternet = !_connectivity.isConnected;
+    final String message = _isDriverOffline && !noInternet
+        ? 'Modo Desconectado · Radio deshabilitado'
+        : 'Sin conexión · Radio deshabilitado';
+    final IconData icon = _isDriverOffline && !noInternet
+        ? Icons.power_settings_new
+        : Icons.wifi_off_rounded;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+      color: _isDriverOffline && !noInternet
+          ? Colors.orange.shade800
+          : Colors.red.shade800,
+      child: Row(
+        children: [
+          Icon(icon, color: Colors.white, size: 20),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              message,
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
+            ),
+          ),
+          if (noInternet)
+            GestureDetector(
+              onTap: () => _connectivity.retry(),
+              child: const Icon(Icons.refresh, color: Colors.white70, size: 20),
+            ),
+        ],
+      ),
+    );
+  }
+
+  /// Banner que muestra quién está hablando (estilo Zello)
+  Widget _buildSpeakerBanner(CommunicationLoaded state) {
+    final isMe = state.pttSpeakerId == _currentUser?.uid;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
+      color: isMe ? AppTheme.successColor : Colors.orange.shade700,
+      child: Row(
+        children: [
+          Icon(
+            Icons.mic,
+            color: Colors.white,
+            size: 20,
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              isMe
+                  ? 'Estás hablando...'
+                  : '${state.pttSpeakerName ?? "Alguien"} está hablando...',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+                fontSize: 14,
+              ),
+            ),
+          ),
+          if (!isMe)
+            const Icon(Icons.lock, color: Colors.white, size: 16),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildChannelSelector(CommunicationLoaded state) {
+    // Solo admin/operadora pueden crear canales (lo exigen las reglas Firestore).
+    final role = _currentUser?.role;
+    final canCreateChannel =
+        role == AppConstants.roleAdmin || role == AppConstants.roleOperator;
+    final itemCount = state.channels.length + (canCreateChannel ? 1 : 0);
+
+    return Container(
+      height: 56,
+      color: AppTheme.secondaryColor,
+      child: ListView.builder(
+        scrollDirection: Axis.horizontal,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        itemCount: itemCount,
+        itemBuilder: (context, index) {
+          if (canCreateChannel && index == state.channels.length) {
+            return Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 4),
+              child: ActionChip(
+                avatar: const Icon(Icons.add, size: 18, color: Colors.white),
+                label: const Text(
+                  'Nuevo',
+                  style: TextStyle(color: Colors.white, fontSize: 12),
+                ),
+                backgroundColor: Colors.white24,
+                onPressed: () => _showCreateChannelDialog(),
+              ),
+            );
+          }
+
+          final channel = state.channels[index];
+          final isSelected = channel.uid == state.activeChannelId;
+
+          return Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4),
+            child: ChoiceChip(
+              label: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (channel.type == 'privado')
+                    const Padding(
+                      padding: EdgeInsets.only(right: 4),
+                      child: Icon(Icons.lock, size: 14),
+                    ),
+                  Text(channel.name, style: const TextStyle(fontSize: 12)),
+                  if (channel.isLocked && !channel.isLockExpired)
+                    const Padding(
+                      padding: EdgeInsets.only(left: 4),
+                      child: Icon(Icons.mic, size: 14, color: Colors.red),
+                    ),
+                ],
+              ),
+              selected: isSelected,
+              selectedColor: AppTheme.primaryColor,
+              onSelected: (selected) {
+                context.read<CommunicationBloc>().add(
+                      ChannelSelected(selected ? channel.uid : null),
+                    );
+              },
+            ),
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildMessageList(CommunicationLoaded state) {
+    if (state.activeChannelId == null) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.radio, size: 64, color: Colors.grey[300]),
+            const SizedBox(height: 16),
+            Text(
+              'Selecciona un canal',
+              style: TextStyle(color: Colors.grey[500], fontSize: 16),
+            ),
+          ],
+        ),
+      );
+    }
+
+    if (state.activeMessages.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.mic_none, size: 64, color: Colors.grey[300]),
+            const SizedBox(height: 16),
+            Text(
+              'Sin mensajes recientes',
+              style: TextStyle(color: Colors.grey[500], fontSize: 16),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Mantén presionado el botón para hablar',
+              style: TextStyle(color: Colors.grey[400], fontSize: 14),
+            ),
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      padding: const EdgeInsets.all(16),
+      itemCount: state.activeMessages.length,
+      reverse: false,
+      itemBuilder: (context, index) {
+        final message = state.activeMessages[index];
+        return _buildMessageTile(message);
+      },
+    );
+  }
+
+  Widget _buildMessageTile(MessageModel message) {
+    final isMe = message.senderId == _currentUser?.uid;
+    IconData typeIcon;
+    Widget content;
+
+    if (message.type == 'voz') {
+      typeIcon = Icons.mic;
+      // Audio en tiempo real — el mensaje solo muestra metadatos
+      content = Row(
+        children: [
+          Icon(Icons.graphic_eq, size: 20, color: AppTheme.secondaryColor),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Container(
+              height: 4,
+              decoration: BoxDecoration(
+                color: AppTheme.secondaryColor.withValues(alpha: 0.3),
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '${message.durationSeconds ?? 0}s',
+            style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+          ),
+        ],
+      );
+    } else {
+      typeIcon = Icons.message;
+      content = Text(
+        message.text ?? '',
+        style: const TextStyle(fontSize: 14),
+      );
+    }
+
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      color: isMe ? AppTheme.primaryColor.withValues(alpha: 0.1) : null,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(typeIcon, size: 16, color: AppTheme.textSecondary),
+                const SizedBox(width: 8),
+                Text(
+                  isMe ? 'Tú' : message.senderName,
+                  style: TextStyle(
+                    fontWeight: FontWeight.w600,
+                    fontSize: 14,
+                    color: isMe ? AppTheme.secondaryColor : null,
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  _formatTime(message.createdAt),
+                  style: const TextStyle(color: AppTheme.textSecondary, fontSize: 12),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            content,
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildAudioControls(CommunicationLoaded state) {
+    final user = _currentUser;
+    final hasChannel = state.activeChannelId != null;
+    final isLockedByOther = state.isPttLocked &&
+        state.pttSpeakerId != user?.uid;
+    // Bloquear PTT completamente si no hay internet o overlay activo
+    final canPtt = hasChannel && !isLockedByOther && !_isOffline && !_overlayService.isActive;
+
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.1),
+            blurRadius: 10,
+            offset: const Offset(0, -2),
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // PTT button grande estilo Zello — centrado
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+          // PTT (Push-to-Talk) Button — Zello style
+          // Uses Listener instead of GestureDetector for INSTANT response
+          // (0ms delay vs ~500ms long-press delay).
+          Listener(
+            onPointerDown: canPtt
+                ? (_) => _startPtt(state)
+                : _isOffline
+                    ? (_) => _showOfflineWarning()
+                    : null,
+            onPointerUp: hasChannel
+                ? (_) => _stopPttSafe(state)
+                : null,
+            onPointerCancel: hasChannel
+                ? (_) => _stopPttSafe(state)
+                : null,
+            child: AnimatedContainer(
+              duration: const Duration(milliseconds: 150),
+              width: _isRecording ? 150 : 130,
+              height: _isRecording ? 150 : 130,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: LinearGradient(
+                  begin: Alignment.topLeft,
+                  end: Alignment.bottomRight,
+                  colors: !hasChannel || _isOffline
+                      ? [Colors.grey[400]!, Colors.grey[500]!]
+                      : _overlayService.isActive
+                          ? [Colors.teal[600]!, Colors.teal[700]!]
+                          : isLockedByOther
+                              ? [Colors.grey[600]!, Colors.grey[700]!]
+                              : _isRecording
+                                  ? [AppTheme.errorColor, AppTheme.errorColor.withValues(alpha: 0.8)]
+                                  : [AppTheme.primaryColor, AppTheme.primaryColor.withValues(alpha: 0.85)],
+                ),
+                boxShadow: [
+                  BoxShadow(
+                    color: (_isRecording
+                            ? AppTheme.errorColor
+                            : AppTheme.primaryColor)
+                        .withValues(alpha: _isRecording ? 0.6 : 0.3),
+                    blurRadius: _isRecording ? 30 : 12,
+                    spreadRadius: _isRecording ? 8 : 2,
+                  ),
+                ],
+              ),
+              child: Column(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  Icon(
+                    _isOffline
+                        ? Icons.wifi_off_rounded
+                        : _overlayService.isActive
+                        ? Icons.surround_sound
+                        : isLockedByOther
+                        ? Icons.lock
+                        : _isRecording
+                            ? Icons.mic
+                            : Icons.mic_none,
+                    color: isLockedByOther
+                        ? Colors.white54
+                        : Colors.white,
+                    size: _isRecording ? 52 : 44,
+                  ),
+                  const SizedBox(height: 4),
+                  if (_overlayService.isActive)
+                    const Text(
+                      'PTT Flotante',
+                      style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w500),
+                    )
+                  else if (_isOffline)
+                    const Text(
+                      'Sin red',
+                      style: TextStyle(color: Colors.white54, fontSize: 11),
+                    )
+                  else if (isLockedByOther)
+                    const Text(
+                      'Ocupado',
+                      style: TextStyle(color: Colors.white54, fontSize: 11),
+                    )
+                  else if (_isRecording)
+                    Text(
+                      '${_recordingSeconds}s',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    )
+                  else
+                    const Text(
+                      'Mantener',
+                      style: TextStyle(
+                        color: Colors.white70,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          // Botones secundarios debajo
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+            children: [
+              // Mute button — silenciar audio remoto (Agora)
+              IconButton(
+                onPressed: () {
+                  setState(() => _isMuted = !_isMuted);
+                  _agoraService.setRemoteAudioMuted(_isMuted);
+                },
+                icon: Icon(
+                  _isMuted ? Icons.volume_off : Icons.volume_up,
+                  color: _isMuted ? AppTheme.errorColor : AppTheme.secondaryColor,
+                ),
+                iconSize: 28,
+              ),
+              // Overlay PTT — botón flotante sobre todas las apps
+              IconButton(
+                onPressed: hasChannel
+                    ? () => _toggleOverlay(state)
+                    : null,
+                icon: Icon(
+                  _overlayService.isActive
+                      ? Icons.stop_circle_outlined
+                      : Icons.surround_sound,
+                  color: _overlayService.isActive
+                      ? AppTheme.errorColor
+                      : hasChannel
+                          ? AppTheme.secondaryColor
+                          : Colors.grey,
+                ),
+                iconSize: 28,
+                tooltip: _overlayService.isActive
+                    ? 'Desactivar PTT flotante'
+                    : 'Activar PTT flotante',
+              ),
+              // Enviar texto button (bloqueado sin internet)
+              IconButton(
+                onPressed: hasChannel && !_isOffline
+                    ? () => _showTextMessageDialog(state)
+                    : _isOffline
+                        ? () => _showOfflineWarning()
+                        : null,
+                icon: Icon(
+                  Icons.message,
+                  color: hasChannel && !_isOffline
+                      ? AppTheme.secondaryColor
+                      : Colors.grey,
+                ),
+                iconSize: 28,
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  // === PTT Actions ===
+
+  /// Activa/desactiva el botón PTT flotante sobre todas las apps.
+  Future<void> _toggleOverlay(CommunicationLoaded state) async {
+    if (_overlayService.isActive) {
+      // ── Desactivar overlay ──
+      await _overlayService.stop();
+      // Re-inicializar engine para uso en esta página
+      await _agoraService.initialize();
+      if (state.activeChannelId != null) {
+        _lastAgoraChannelId = state.activeChannelId;
+        await _agoraService.joinChannel(state.activeChannelId!);
+      }
+      if (mounted) setState(() {});
+      return;
+    }
+
+    // ── Activar overlay ──
+    if (state.activeChannelId == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Selecciona un canal primero'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+
+    // Verificar permiso de overlay
+    final hasPermission = await _overlayService.hasPermission();
+    if (!hasPermission) {
+      // Solicitar permiso (abre configuración de Android)
+      await _overlayService.requestPermission();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'Activa "Mostrar sobre otras apps" para ${AppConstants.appName} y vuelve.',
+            ),
+            duration: Duration(seconds: 5),
+          ),
+        );
+      }
+      return;
+    }
+
+    // Destruir engine actual (el overlay gestiona su propio ciclo)
+    await _agoraService.destroyEngine();
+    _lastAgoraChannelId = null;
+
+    // Iniciar overlay (conecta Agora al canal automáticamente)
+    final started = await _overlayService.start(state.activeChannelId!);
+    if (started && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text(
+            '🎙️ PTT Flotante activado — conectado al canal, PTT instantáneo',
+          ),
+          backgroundColor: Colors.green,
+          duration: Duration(seconds: 3),
+        ),
+      );
+      setState(() {});
+    }
+  }
+
+  /// Muestra aviso cuando se intenta PTT sin internet o en modo desconectado.
+  void _showOfflineWarning() {
+    if (!mounted) return;
+    final String msg = _isDriverOffline
+        ? 'Estás en modo Desconectado. Cambia tu estado para usar el radio.'
+        : 'Sin conexión a internet. Verifique su WiFi o datos móviles.';
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(msg),
+        backgroundColor: _isDriverOffline ? Colors.orange : Colors.red,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+    HapticFeedback.heavyImpact();
+  }
+
+  /// Safe wrapper that guards against calling stop when not recording
+  void _stopPttSafe(CommunicationLoaded state) {
+    if (!_isRecording) return;
+    _stopPtt(state);
+  }
+
+  Future<void> _startPtt(CommunicationLoaded state) async {
+    final user = _currentUser;
+    if (user == null || state.activeChannelId == null) return;
+    if (_isRecording) return; // Prevent double-start
+
+    // Verificar permiso de micrófono
+    final hasPermission = await _agoraService.hasMicPermission();
+    if (!hasPermission) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Se requiere permiso de micrófono para hablar'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+      }
+      return;
+    }
+
+    setState(() {
+      _isRecording = true;
+      _recordingSeconds = 0;
+    });
+
+    // Contador de duración visible en el botón
+    _durationTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted || !_isRecording) {
+        timer.cancel();
+        return;
+      }
+      setState(() => _recordingSeconds = timer.tick);
+    });
+
+    // Timeout de seguridad: auto-detener tras _maxRecordingSeconds
+    _recordingTimer = Timer(Duration(seconds: _maxRecordingSeconds), () {
+      if (_isRecording && mounted) {
+        final currentState = context.read<CommunicationBloc>().state;
+        if (currentState is CommunicationLoaded) {
+          _stopPtt(currentState);
+        }
+      }
+    });
+
+    _recordingStartTime = DateTime.now();
+
+    // 🔔 Feedback háptico + sonido al iniciar PTT
+    HapticFeedback.mediumImpact();
+    SystemSound.play(SystemSoundType.click);
+
+    // Intentar adquirir el lock PTT en Firestore
+    if (!mounted) return;
+    context.read<CommunicationBloc>().add(
+          PttLockRequested(
+            channelId: state.activeChannelId!,
+            userId: user.uid,
+            userName: '${user.name} ${user.lastname}',
+          ),
+        );
+
+    // ── AGORA: Desmutear mic → audio en tiempo real a todos ──
+    try {
+      await _agoraService.unmuteMic();
+    } catch (e) {
+      _recordingTimer?.cancel();
+      _durationTimer?.cancel();
+      setState(() {
+        _isRecording = false;
+        _recordingSeconds = 0;
+      });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error al activar micrófono: $e'),
+            backgroundColor: AppTheme.errorColor,
+          ),
+        );
+      }
+    }
+  }
+
+  Future<void> _stopPtt(CommunicationLoaded state) async {
+    final user = _currentUser;
+    if (user == null || state.activeChannelId == null) return;
+
+    // Inmediatamente marcamos como no transmitiendo
+    _recordingTimer?.cancel();
+    _durationTimer?.cancel();
+    final durationSeconds = _recordingStartTime != null
+        ? DateTime.now().difference(_recordingStartTime!).inSeconds
+        : 0;
+    setState(() {
+      _isRecording = false;
+      _recordingSeconds = 0;
+    });
+
+    // ── AGORA: Mutear mic → dejar de transmitir ──
+    try {
+      await _agoraService.muteMic();
+      // 🔔 Feedback háptico al soltar PTT
+      HapticFeedback.lightImpact();
+    } catch (e) {
+      // Silenciar error — ya dejamos de grabar en la UI
+    }
+
+    // Enviar mensaje ligero a Firestore (solo metadatos, sin audio base64)
+    // para que quede registro en el historial del canal.
+    if (durationSeconds >= 1 && mounted) {
+      context.read<CommunicationBloc>().add(
+            ChannelMessageSendRequested(
+              MessageModel(
+                uid: const Uuid().v4(),
+                channelId: state.activeChannelId!,
+                senderId: user.uid,
+                senderName: '${user.name} ${user.lastname}',
+                type: 'voz',
+                durationSeconds: durationSeconds,
+                createdAt: DateTime.now(),
+              ),
+            ),
+          );
+    }
+
+    _recordingStartTime = null;
+
+    // Liberar el lock del canal en Firestore
+    if (mounted) {
+      context.read<CommunicationBloc>().add(
+            PttUnlockRequested(
+              channelId: state.activeChannelId!,
+              userId: user.uid,
+            ),
+          );
+    }
+  }
+
+  /// Con Agora, el audio de voz se transmite en tiempo real.
+  /// Los mensajes de voz en el historial son solo metadatos (duración).
+  /// Los mensajes antiguos con audioBase64 ya no se reproducen.
+
+  void _showCreateChannelDialog() {
+    final user = _currentUser;
+    if (user == null) return;
+
+    final nameController = TextEditingController();
+    String channelType = 'publico';
+
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: const Text('Nuevo Canal'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameController,
+                decoration: const InputDecoration(
+                  labelText: 'Nombre del canal',
+                  prefixIcon: Icon(Icons.tag),
+                ),
+              ),
+              const SizedBox(height: 16),
+              RadioGroup<String>(
+                groupValue: channelType,
+                onChanged: (v) {
+                  setDialogState(() => channelType = v ?? channelType);
+                },
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: RadioListTile<String>(
+                        title: const Text('Público', style: TextStyle(fontSize: 14)),
+                        value: 'publico',
+                      ),
+                    ),
+                    Expanded(
+                      child: RadioListTile<String>(
+                        title: const Text('Privado', style: TextStyle(fontSize: 14)),
+                        value: 'privado',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () {
+                if (nameController.text.isNotEmpty) {
+                  context.read<CommunicationBloc>().add(
+                        ChannelCreateRequested(
+                          ChannelModel(
+                            uid: const Uuid().v4(),
+                            name: nameController.text.trim(),
+                            type: channelType,
+                            createdBy: user.uid,
+                            memberIds: [user.uid],
+                            createdAt: DateTime.now(),
+                          ),
+                        ),
+                      );
+                  Navigator.pop(ctx);
+                }
+              },
+              child: const Text('Crear'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showTextMessageDialog(CommunicationLoaded state) {
+    final user = _currentUser;
+    if (user == null || state.activeChannelId == null) return;
+
+    final messageController = TextEditingController();
+    final activeChannel = state.channels.firstWhere(
+      (c) => c.uid == state.activeChannelId,
+      orElse: () => state.channels.first,
+    );
+
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Mensaje a ${activeChannel.name}'),
+        content: TextField(
+          controller: messageController,
+          maxLines: 3,
+          decoration: const InputDecoration(
+            hintText: 'Escribe tu mensaje...',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              if (messageController.text.isNotEmpty) {
+                context.read<CommunicationBloc>().add(
+                      ChannelMessageSendRequested(
+                        MessageModel(
+                          uid: const Uuid().v4(),
+                          channelId: state.activeChannelId!,
+                          senderId: user.uid,
+                          senderName: '${user.name} ${user.lastname}',
+                          type: 'texto',
+                          text: messageController.text.trim(),
+                          createdAt: DateTime.now(),
+                        ),
+                      ),
+                    );
+                Navigator.pop(ctx);
+              }
+            },
+            child: const Text('Enviar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  String _formatTime(DateTime dateTime) {
+    return '${dateTime.hour.toString().padLeft(2, '0')}:'
+        '${dateTime.minute.toString().padLeft(2, '0')}';
+  }
+}
