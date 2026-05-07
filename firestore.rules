@@ -22,6 +22,18 @@ service cloud.firestore {
       return isAuthenticated() && getStatus() == 'active';
     }
 
+    /// Conductor que está bloqueado por mora pero puede subir comprobante
+    /// para reactivarse. Es el único caso donde un usuario "no active"
+    /// puede escribir documentos (solamente pagos propios).
+    function canPayWhileBlocked() {
+      return isAuthenticated() && getStatus() == 'paymentBlocked';
+    }
+
+    /// Cubre tanto active como paymentBlocked (para acciones de pago).
+    function canSubmitPayment() {
+      return isActive() || canPayWhileBlocked();
+    }
+
     function isAdmin() {
       return isActive() && getRole() == 'admin';
     }
@@ -146,20 +158,23 @@ service cloud.firestore {
 
     // ===== PAGOS =====
     // - Conductor: ve los suyos y crea reportes propios (estado pending).
+    //   Si está paymentBlocked, AÚN puede subir comprobante (es la única
+    //   acción permitida cuando está bloqueado por mora).
     // - Operadora/admin: ven todos los del tenant y validan/rechazan.
     match /payments/{paymentId} {
-      allow read: if isActive() && (
+      allow read: if canSubmitPayment() && (
         isOwner(resource.data.driverId) || isOperatorOrAdmin()
       ) && sameTenant(resource.data);
 
-      allow create: if isActive() && sameTenantOnCreate() && (
-        // Conductor reporta su propio pago
-        (isOwner(request.resource.data.get('driverId', '')))
+      allow create: if sameTenantOnCreate() && (
+        // Conductor reporta su propio pago (incluso si paymentBlocked).
+        (canSubmitPayment() && isOwner(request.resource.data.get('driverId', '')))
         || isOperatorOrAdmin()
       );
 
-      allow update: if isActive() && sameTenant(resource.data) && (
-        isOwner(resource.data.driverId) || isOperatorOrAdmin()
+      allow update: if sameTenant(resource.data) && (
+        (canSubmitPayment() && isOwner(resource.data.driverId))
+        || isOperatorOrAdmin()
       );
 
       allow delete: if isAdmin() && sameTenant(resource.data);
@@ -320,6 +335,61 @@ service cloud.firestore {
       allow create: if isAdmin() && sameTenantOnCreate();
       allow update: if isAdmin() && sameTenant(resource.data);
       allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== CASHFLOW (ingresos/egresos del admin) =====
+    // Solo admin del tenant puede leer/escribir. Operadoras NO ven números.
+    match /cashflow/{movId} {
+      allow read: if (isAdmin() || isSuperAdmin()) && sameTenant(resource.data);
+      allow create: if isAdmin() && sameTenantOnCreate();
+      allow update: if isAdmin() && sameTenant(resource.data);
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== MÉTRICAS DE OPERADORA (asignaciones diarias) =====
+    // Lectura: operadora dueña + admins del tenant. Escritura: la propia
+    // operadora cuando asigna una carrera (FieldValue.increment).
+    match /operadora_metrics/{metricId} {
+      allow read: if sameTenant(resource.data) && (
+        isOperatorOrAdmin() || isOwner(resource.data.operatorId)
+      );
+      allow create, update: if isActive() && sameTenantOnCreate()
+        && request.resource.data.operatorId == request.auth.uid;
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== NOTIFICACIONES (admin → conductores/operadoras) =====
+    // Documentos creados por admins; cualquier autenticado del mismo
+    // tenant puede leerlas (filtradas por audiencia en cliente).
+    match /notifications/{notifId} {
+      allow read: if isActive() && sameTenant(resource.data);
+      allow create: if isAdmin() && sameTenantOnCreate();
+      allow update: if isAdmin() && sameTenant(resource.data);
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== EVENTOS DE QUITO (cron Gemini, lectura pública) =====
+    // Compartidos entre asociaciones — solo lectura para autenticados.
+    // Escritura: solo Cloud Functions (admin SDK) o super-admin.
+    match /eventsQuito/{eventId} {
+      allow read: if isAuthenticated();
+      allow write: if isSuperAdmin();
+    }
+
+    // ===== SOLICITUDES DE CARRERA (clientes) =====
+    // Por ahora solo lectura/asignación por operadora/admin. La creación
+    // desde el portal cliente queda pendiente Fase 6.
+    match /tripRequests/{reqId} {
+      allow read: if isOperatorOrAdmin() && sameTenant(resource.data);
+      allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
+      allow update: if isOperatorOrAdmin() && sameTenant(resource.data);
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== ANALYTICS (precomputado por cron, solo admin del tenant lo lee) =====
+    match /analytics/{analyticsId} {
+      allow read: if (isAdmin() || isSuperAdmin()) && sameTenant(resource.data);
+      allow write: if isSuperAdmin();
     }
   }
 }

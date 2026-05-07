@@ -24,6 +24,7 @@ const SUPER_ADMIN_EMAILS = ["brealpeaymara@gmail.com"];
 
 const AGORA_APP_ID = defineSecret("AGORA_APP_ID");
 const AGORA_APP_CERTIFICATE = defineSecret("AGORA_APP_CERTIFICATE");
+const GEMINI_API_KEY = defineSecret("GEMINI_API_KEY");
 
 // ───────────────────────────────────────────────────────────────────
 //  Helpers
@@ -1613,3 +1614,212 @@ exports.checkSubscriptionsNow = onCall({}, async (request) => {
   const summary = await _runSubscriptionCheck();
   return { ok: true, ...summary };
 });
+
+// ───────────────────────────────────────────────────────────────────
+//  fetchQuitoEvents — cron diario 06:00 ECU.
+//  Pregunta a Gemini qué eventos públicos masivos hay hoy en Quito y los
+//  guarda en eventsQuito/{yyyy-mm-dd}. La app los muestra para que los
+//  conductores anticipen aglomeraciones (conciertos, partidos, marchas).
+//
+//  Requiere secret GEMINI_API_KEY: `firebase functions:secrets:set GEMINI_API_KEY`
+//  Si la key no está configurada, la función hace log y termina sin error.
+// ───────────────────────────────────────────────────────────────────
+
+async function _fetchEventsFromGemini(apiKey, dateLabel) {
+  const prompt = `Eres un asistente para conductores de taxi en Quito, Ecuador.
+Responde SOLO con un JSON válido (sin markdown, sin explicación) que liste
+los eventos públicos masivos previstos para HOY (${dateLabel}) en Quito que
+puedan generar aglomeración de gente o tráfico. Incluye: conciertos, partidos
+de fútbol del Estadio Olímpico Atahualpa, Casa de la Cultura, marchas
+sindicales, feriados religiosos, ferias, festivales, eventos en el Coliseo
+Rumiñahui, eventos universitarios.
+
+Formato exacto:
+{"events":[{"name":string,"venue":string,"startTime":string ISO8601 EC,"type":"concierto"|"deporte"|"teatro"|"marcha"|"feria"|"otro","expectedAttendance":"baja"|"media"|"alta","approxLocation":{"lat":number,"lng":number}}]}
+
+Si no hay eventos conocidos, devuelve {"events":[]}. NO inventes datos. Si
+no estás seguro, omite el evento.`;
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
+  const body = {
+    contents: [{ parts: [{ text: prompt }] }],
+    generationConfig: {
+      temperature: 0.2,
+      responseMimeType: "application/json",
+    },
+  };
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Gemini API ${res.status}: ${text.slice(0, 200)}`);
+  }
+  const data = await res.json();
+  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+  let parsed;
+  try {
+    parsed = JSON.parse(text);
+  } catch (e) {
+    throw new Error(`Gemini respuesta no es JSON válido: ${text.slice(0, 200)}`);
+  }
+  return Array.isArray(parsed.events) ? parsed.events : [];
+}
+
+async function _runFetchQuitoEvents(apiKey) {
+  const now = new Date();
+  const dateKey = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`;
+  const dateLabel = now.toLocaleDateString("es-EC", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "America/Guayaquil",
+  });
+
+  if (!apiKey) {
+    console.warn("fetchQuitoEvents: GEMINI_API_KEY no configurada, skip.");
+    return { ok: false, reason: "no-api-key", dateKey };
+  }
+
+  let events = [];
+  try {
+    events = await _fetchEventsFromGemini(apiKey, dateLabel);
+  } catch (e) {
+    console.error("fetchQuitoEvents: error Gemini:", e.message);
+    // Guardar igual el doc para que el cliente sepa que ya se intentó.
+    await db.collection("eventsQuito").doc(dateKey).set(
+      {
+        date: dateKey,
+        events: [],
+        error: e.message,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true }
+    );
+    return { ok: false, reason: "gemini-error", dateKey, error: e.message };
+  }
+
+  await db.collection("eventsQuito").doc(dateKey).set({
+    date: dateKey,
+    events,
+    error: null,
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  return { ok: true, dateKey, count: events.length };
+}
+
+exports.fetchQuitoEvents = onSchedule(
+  {
+    schedule: "0 6 * * *", // 06:00 todos los días
+    timeZone: "America/Guayaquil",
+    secrets: [GEMINI_API_KEY],
+    timeoutSeconds: 120,
+    memory: "256MiB",
+    retryCount: 1,
+  },
+  async () => {
+    const summary = await _runFetchQuitoEvents(GEMINI_API_KEY.value());
+    console.log("fetchQuitoEvents:", JSON.stringify(summary));
+    return summary;
+  }
+);
+
+exports.fetchQuitoEventsNow = onCall(
+  { secrets: [GEMINI_API_KEY] },
+  async (request) => {
+    requireSuperAdmin(request);
+    const summary = await _runFetchQuitoEvents(GEMINI_API_KEY.value());
+    return summary;
+  }
+);
+
+// ───────────────────────────────────────────────────────────────────
+//  dispatchScheduledNotifications — cron cada 5 min.
+//  Toma `notifications/{}` con scheduledAt <= now y status='scheduled' y
+//  dispara FCM a los tokens de la audiencia. Marca status='dispatched'.
+//
+//  Schema esperado en notifications/{}:
+//    { associationId, title, body, audience: 'all'|'drivers'|'operadoras',
+//      scheduledAt: Timestamp|null, status: 'scheduled'|'dispatched'|'failed',
+//      createdBy, createdAt }
+// ───────────────────────────────────────────────────────────────────
+
+async function _runDispatchScheduledNotifications() {
+  const now = new Date();
+  const snap = await db
+    .collection("notifications")
+    .where("status", "==", "scheduled")
+    .where("scheduledAt", "<=", now)
+    .limit(50)
+    .get();
+
+  let dispatched = 0;
+  let failed = 0;
+
+  for (const d of snap.docs) {
+    const n = d.data();
+    try {
+      // Audiencia → query users del tenant filtrado por rol.
+      let usersQuery = db
+        .collection("users")
+        .where("associationId", "==", n.associationId)
+        .where("status", "==", "active");
+      if (n.audience === "drivers") {
+        usersQuery = usersQuery.where("role", "==", "conductor");
+      } else if (n.audience === "operadoras") {
+        usersQuery = usersQuery.where("role", "==", "operadora");
+      }
+      const usersSnap = await usersQuery.get();
+      const tokens = [];
+      for (const u of usersSnap.docs) {
+        const fcm = u.data().fcmToken;
+        if (typeof fcm === "string" && fcm.length > 0) tokens.push(fcm);
+      }
+      if (tokens.length > 0) {
+        // Importar messaging on-demand para no romper deploys donde no se usa.
+        const { getMessaging } = require("firebase-admin/messaging");
+        await getMessaging().sendEachForMulticast({
+          tokens,
+          notification: { title: n.title || "Aviso", body: n.body || "" },
+          data: { type: "admin_notification", notifId: d.id },
+        });
+      }
+      await d.ref.update({
+        status: "dispatched",
+        dispatchedAt: FieldValue.serverTimestamp(),
+        recipientsCount: tokens.length,
+      });
+      dispatched++;
+    } catch (e) {
+      console.error("dispatch notif", d.id, e.message);
+      await d.ref.update({
+        status: "failed",
+        error: e.message,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      failed++;
+    }
+  }
+  return { ok: true, scanned: snap.size, dispatched, failed };
+}
+
+exports.dispatchScheduledNotifications = onSchedule(
+  {
+    schedule: "*/5 * * * *",
+    timeZone: "America/Guayaquil",
+    timeoutSeconds: 120,
+    memory: "256MiB",
+    retryCount: 1,
+  },
+  async () => {
+    const summary = await _runDispatchScheduledNotifications();
+    console.log("dispatchScheduledNotifications:", JSON.stringify(summary));
+    return summary;
+  }
+);
+

@@ -7,6 +7,7 @@ import '../../../../core/theme/app_theme.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/widgets/availability_toggle.dart';
+import '../../../../core/widgets/payment_pending_banner.dart';
 import '../../../map/presentation/pages/map_page.dart';
 import '../../../communication/presentation/pages/walkie_talkie_page.dart';
 import '../../../trips/presentation/pages/trips_page.dart';
@@ -92,9 +93,11 @@ class _HomePageState extends State<HomePage> {
               ),
             ],
           ),
-          body: IndexedStack(
-            index: _currentIndex,
-            children: pages,
+          body: PaymentPendingBanner.wrap(
+            IndexedStack(
+              index: _currentIndex,
+              children: pages,
+            ),
           ),
           bottomNavigationBar: BottomNavigationBar(
             currentIndex: _currentIndex,
@@ -328,6 +331,12 @@ class _HomePageState extends State<HomePage> {
           Icons.people,
           AppTheme.successColor,
           () => context.push('/users'),
+        ),
+        _buildQuickAction(
+          'Caja',
+          Icons.account_balance_wallet,
+          Colors.teal,
+          () => context.push('/cashflow'),
         ),
         _buildQuickAction(
           'Config. Cobros',

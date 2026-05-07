@@ -8,6 +8,7 @@ import 'core/theme/app_theme.dart';
 import 'core/constants/app_constants.dart';
 import 'core/services/connectivity_service.dart';
 import 'core/services/agora_service.dart';
+import 'core/services/current_user_context.dart';
 import 'core/services/driver_location_service.dart';
 import 'core/services/overlay_ptt_service.dart';
 import 'core/services/radio_power_service.dart';
@@ -164,6 +165,13 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                 debugPrint(
                     '📍 [Main] User: ${user.uid}, role=${user.role}, '
                     'numVeh=${user.numeroVehiculo}, placa=${user.placa}');
+                // Mantener contexto global del usuario actual para filtrar
+                // queries multi-tenant en datasources sin pasar AuthBloc.
+                CurrentUserContext.instance.set(
+                  uid: user.uid,
+                  associationId: user.associationId,
+                  role: user.role,
+                );
                 // Inicializar GPS para conductores y admins con vehículo
                 if (user.role == AppConstants.roleDriver ||
                     (user.role == AppConstants.roleAdmin &&
@@ -178,6 +186,7 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                   );
                 }
               } else if (state is AuthUnauthenticated) {
+                CurrentUserContext.instance.clear();
                 locationService.reset();
               }
             },

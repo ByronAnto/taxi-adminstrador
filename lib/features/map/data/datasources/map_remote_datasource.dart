@@ -3,6 +3,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../users/data/models/driver_model.dart';
 import '../models/taxi_stand_model.dart';
 import '../../../../core/constants/app_constants.dart';
+import '../../../../core/services/current_user_context.dart';
 
 class MapRemoteDatasource {
   final FirebaseFirestore _firestore;
@@ -16,17 +17,22 @@ class MapRemoteDatasource {
   CollectionReference get _taxiStandsRef =>
       _firestore.collection(AppConstants.taxiStandsCollection);
 
-  Stream<List<DriverModel>> watchActiveDriverLocations() {
-    // Solo filtrar por isActive en la query (single field index automático).
-    // El filtro de status != 'desconectado' se hace client-side para
-    // evitar requerir un composite index manual en Firestore.
-    return _driversRef
-        .where('isActive', isEqualTo: true)
-        .snapshots()
-        .map((snapshot) => snapshot.docs
-            .map((doc) => DriverModel.fromFirestore(doc))
-            .where((d) => d.status != AppConstants.statusOffline)
-            .toList());
+  /// Stream de conductores activos. Si se pasa [associationId], filtra por
+  /// tenant — necesario para cumplir las reglas Firestore (sameTenant).
+  /// El filtro de status != 'desconectado' se hace client-side para evitar
+  /// requerir un composite index manual.
+  Stream<List<DriverModel>> watchActiveDriverLocations({
+    String? associationId,
+  }) {
+    final aid = associationId ?? CurrentUserContext.instance.associationId;
+    Query query = _driversRef.where('isActive', isEqualTo: true);
+    if (aid != null && aid.isNotEmpty) {
+      query = query.where('associationId', isEqualTo: aid);
+    }
+    return query.snapshots().map((snapshot) => snapshot.docs
+        .map((doc) => DriverModel.fromFirestore(doc))
+        .where((d) => d.status != AppConstants.statusOffline)
+        .toList());
   }
 
   Future<void> updateDriverLocation(String driverId, double latitude, double longitude) async {
