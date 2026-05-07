@@ -5,6 +5,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../../core/constants/app_constants.dart';
+import '../../../../core/services/stand_queue_service.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/models/trip_model.dart';
@@ -48,6 +49,7 @@ class _QuickStreetAssignModalState extends State<QuickStreetAssignModal> {
     required String associationId,
     required String operatorId,
     required String operatorName,
+    required String driverDocId,
     required String driverUserId,
     required String driverName,
     required String vehicleNumber,
@@ -83,6 +85,11 @@ class _QuickStreetAssignModalState extends State<QuickStreetAssignModal> {
           .collection('trips')
           .doc(trip.uid)
           .set(trip.toFirestore());
+
+      // Si el conductor estaba en la cola, sacarlo (ya tiene cliente).
+      try {
+        await StandQueueService.instance.leaveQueue(driverDocId);
+      } catch (_) {}
 
       // Métricas: 1 contador "calle" por operadora, 1 por unidad.
       final dateKey =
@@ -239,7 +246,8 @@ class _QuickStreetAssignModalState extends State<QuickStreetAssignModal> {
                     ),
                     itemCount: sorted.length,
                     itemBuilder: (_, i) {
-                      final d = sorted[i].data();
+                      final doc = sorted[i];
+                      final d = doc.data();
                       final num_ = (d['vehicleNumber'] as String?) ?? '';
                       final userId = (d['userId'] as String?) ?? '';
                       final name = (d['driverName'] as String?) ?? '';
@@ -256,6 +264,7 @@ class _QuickStreetAssignModalState extends State<QuickStreetAssignModal> {
                           operatorId: user.uid,
                           operatorName:
                               '${user.name} ${user.lastname}'.trim(),
+                          driverDocId: doc.id,
                           driverUserId: userId,
                           driverName: name,
                           vehicleNumber: num_,

@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:uuid/uuid.dart';
 import '../../../../core/constants/app_constants.dart';
+import '../../../../core/services/stand_queue_service.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/models/trip_model.dart';
@@ -102,6 +103,14 @@ class _AssignTripModalState extends State<AssignTripModal> {
 
     // Crear el viaje vía bloc.
     if (mounted) context.read<TripBloc>().add(TripCreateRequested(trip));
+
+    // Si el conductor estaba en la cola de la parada, sacarlo (ya tiene
+    // cliente asignado, no debe seguir esperando).
+    if (_selectedDriverDocId != null) {
+      try {
+        await StandQueueService.instance.leaveQueue(_selectedDriverDocId!);
+      } catch (_) {}
+    }
 
     // Incrementar métrica diaria de la operadora (best-effort).
     try {
