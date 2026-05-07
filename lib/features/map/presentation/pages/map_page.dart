@@ -476,8 +476,9 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
             _statusHue(driver.status)),
         anchor: const Offset(0.5, 0.5),
         flat: true,
-        // Sin InfoWindow — el tap abre directamente el sheet con datos
-        onTap: () => _showDriverInfoSheet(driver, stands),
+        // Tap rápido = info breve (unidad / nombre / placa).
+        // Long-press del mapa cerca del marker = sheet completo con "Ir aquí".
+        onTap: () => _showDriverInfoCompact(driver),
       ));
     }
 
@@ -541,6 +542,8 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
                 myLocationButtonEnabled: false,
                 zoomControlsEnabled: false,
                 mapToolbarEnabled: false,
+                onLongPress: (latLng) =>
+                    _onMapLongPress(latLng, drivers, taxiStands),
                 onMapCreated: (controller) {
                   if (!_mapController.isCompleted) {
                     _mapController.complete(controller);
@@ -968,6 +971,138 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
   }
 
   /// Bottom sheet con info del conductor y distancias a bases
+  /// Long-press en el mapa: busca el conductor cuyo marker está más cerca
+  /// del punto presionado (radio ~120m al zoom típico) y abre el sheet
+  /// completo con el botón "Ir aquí (Google Maps)".
+  void _onMapLongPress(
+    LatLng pressed,
+    List<DriverModel> drivers,
+    List<TaxiStandModel> stands,
+  ) {
+    DriverModel? closest;
+    double bestKm = double.infinity;
+    final filtered = _filteredDrivers(drivers);
+    for (final d in filtered) {
+      final lat = d.currentLatitude;
+      final lng = d.currentLongitude;
+      if (lat == null || lng == null) continue;
+      final km = _haversineKm(pressed.latitude, pressed.longitude, lat, lng);
+      if (km < bestKm) {
+        bestKm = km;
+        closest = d;
+      }
+    }
+    // Tolerancia ~120 m a zoom típico.
+    if (closest != null && bestKm <= 0.12) {
+      _showDriverInfoSheet(closest, stands);
+    } else {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content:
+              Text('Mantén presionado sobre un conductor para usar "Ir aquí"'),
+          duration: Duration(seconds: 2),
+        ),
+      );
+    }
+  }
+
+  /// Sheet COMPACTO mostrado al tap rápido del marker: solo número de
+  /// unidad, nombre y placa (sin distancias ni botón Ir).
+  void _showDriverInfoCompact(DriverModel driver) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        final color = _statusColor(driver.status);
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                Row(
+                  children: [
+                    CircleAvatar(
+                      backgroundColor: color.withValues(alpha: 0.15),
+                      child: Icon(Icons.directions_car, color: color),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            driver.vehicleNumber.isNotEmpty
+                                ? 'Unidad #${driver.vehicleNumber}'
+                                : 'Conductor',
+                            style: const TextStyle(
+                                fontWeight: FontWeight.bold, fontSize: 17),
+                          ),
+                          if (driver.driverName.isNotEmpty)
+                            Text(
+                              driver.driverName,
+                              style: const TextStyle(fontSize: 14),
+                            ),
+                          if (driver.plate.isNotEmpty)
+                            Text(
+                              'Placa: ${driver.plate}',
+                              style: const TextStyle(
+                                fontSize: 13,
+                                color: AppTheme.textSecondary,
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: color.withValues(alpha: 0.15),
+                        borderRadius: BorderRadius.circular(10),
+                      ),
+                      child: Text(
+                        _statusLabel(driver.status),
+                        style: TextStyle(
+                          fontWeight: FontWeight.w600,
+                          color: color,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  'Mantén presionado sobre la unidad en el mapa para ver "Ir aquí" con Google Maps.',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: Colors.grey.shade600,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   void _showDriverInfoSheet(DriverModel driver, List<TaxiStandModel> stands) {
     final lat = driver.currentLatitude;
     final lng = driver.currentLongitude;
