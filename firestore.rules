@@ -142,7 +142,7 @@ service cloud.firestore {
 
     // ===== CONDUCTORES =====
     match /drivers/{driverId} {
-      allow read: if isActive() && sameTenant(resource.data);
+      allow read: if canOperate() && sameTenant(resource.data);
       allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
       allow update: if (isOwner(resource.data.userId) && sameTenant(resource.data))
         || (isOperatorOrAdmin() && sameTenant(resource.data));

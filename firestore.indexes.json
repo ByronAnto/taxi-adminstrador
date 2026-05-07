@@ -181,6 +181,14 @@
       ]
     },
     {
+      "collectionGroup": "drivers",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "associationId", "order": "ASCENDING" },
+        { "fieldPath": "inQueueAt", "order": "ASCENDING" }
+      ]
+    },
+    {
       "collectionGroup": "cashflow",
       "queryScope": "COLLECTION",
       "fields": [

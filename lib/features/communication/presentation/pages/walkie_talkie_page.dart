@@ -22,6 +22,7 @@ import '../../../trips/presentation/widgets/quick_street_assign_modal.dart';
 import '../../data/models/channel_model.dart';
 import '../bloc/communication_bloc.dart';
 import '../widgets/audio_history_tile.dart';
+import '../widgets/stand_queue_bar.dart';
 
 /// Página de walkie-talkie con PTT estilo Zello.
 /// Canal bloqueado: solo un usuario puede hablar a la vez.
@@ -483,6 +484,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             if (_isOffline) _buildOfflineBanner(),
             _buildPowerToggle(state),
             _buildChannelSelector(state),
+            // Cola de unidades cerca de la parada — clave para coordinar
+            // despacho estilo cooperativa.
+            const StandQueueBar(),
             if (state.isPttLocked && _radioPower.isOn) _buildSpeakerBanner(state),
             Expanded(child: _buildMessageList(state)),
             _buildAudioControls(state),
