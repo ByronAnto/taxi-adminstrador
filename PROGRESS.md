@@ -1,150 +1,201 @@
-# Resumen de la sesión autónoma del 2026-05-06 / 07
+# Progreso de la sesión autónoma — 2026-05-07
 
-Byron, esto es lo que hice mientras descansabas. Commits abajo.
+> Byron, esto es lo que avancé mientras descansabas. Todo commiteado.
+> Build APK debug pasa en cada fase. Lee de arriba a abajo.
 
 ---
 
-## Lo que pediste
+## Comandos rápidos para retomar
 
-> "El walkie-talkie está dañado, ocupa el micrófono para no usar en otras apps,
-> y debería seleccionarse el canal y un botón de off/on para usarse"
-
-## Lo que hice
-
-### 1. Botón ON/OFF del walkie-talkie (commit `2050c7b`)
-
-Agregado un **switch ON/OFF prominente** en la parte superior de la pantalla
-del radio, encima del selector de canal (que ya existía). Persiste entre
-sesiones (SharedPreferences). **Default OFF** — el conductor decide cuándo
-encender el radio.
-
-#### Comportamiento
-
-| Estado | Mic hardware | Foreground service | Agora engine | PTT |
-|---|---|---|---|---|
-| **ON**  | usado solo al presionar PTT | corriendo (mic\|mediaPlayback) | inicializado + en canal | habilitado |
-| **OFF** | **100% libre** para Zello/WhatsApp/grabadora | detenido | destruido | snackbar "Enciende el radio" |
-
-#### Por qué se rompió
-
-Aunque el código de Agora ya hacía `enableLocalAudio(false)` al soltar PTT,
-el `AndroidManifest.xml` declara el foreground service como
-`foregroundServiceType="microphone|mediaPlayback"`. Cuando ese servicio
-está corriendo, **Android marca al sistema entero como "esta app está usando
-el mic"**, sin importar lo que haga Agora. Por eso otras apps lo veían ocupado.
-
-El servicio se arrancaba automáticamente al entrar a la pestaña del radio +
-seleccionar canal. Ahora **solo arranca cuando enciendes el toggle** y se
-**detiene cuando lo apagas**.
-
-#### Archivos tocados
-
-- `lib/core/services/radio_power_service.dart` — **nuevo** (singleton +
-  ChangeNotifier + SharedPreferences).
-- `lib/main.dart` — inicializa el servicio al arranque.
-- `lib/features/communication/presentation/pages/walkie_talkie_page.dart`:
-  - Listener al toggle: `_onRadioPowerChanged`.
-  - `_buildPowerToggle`: nueva sección de UI con el switch.
-  - `initState` ya NO inicializa Agora si el toggle está OFF.
-  - Bloc listener sólo se conecta a Agora cuando ON.
-  - PTT bloqueado si OFF (snackbar con acción "Encender").
-  - Listeners de conectividad / driver online / lifecycle resume sólo
-    reconectan Agora cuando ON.
-  - Bug colateral arreglado: uso de BuildContext tras async gap en
-    `_reconnectAfterResume`.
-
-### 2. Bug silencioso de pagos (commit `024b33c`)
-
-Encontrado vía `flutter analyze`. En `payments_page.dart`:
-
-```dart
-state.payments.where((p) => p.status == 'pendiente')   // ❌ enum vs String
+```bash
+git log --oneline                # ver todos los commits
+git diff e467c01 HEAD            # ver TODO lo de la sesión post-prompt
+flutter analyze                  # 16 issues — todos pre-existentes en register_page/profile_page
+flutter build apk --debug        # validado al final de cada fase
 ```
 
-`payment.status` es un enum `PaymentStatus { pending, validated, rejected }`,
-pero se comparaba con strings literales (`'pagado'`, `'pendiente'`,
-`'vencido'`). **La comparación siempre era false** → las pestañas
-Pendientes / Pagados / Vencidos mostraban listas vacías y el resumen
-"recolectado" siempre era \$0.00.
+---
 
-Arreglado:
-- Pendientes → `status == pending` y dueDate >= hoy (o sin dueDate)
-- Pagados → `status == validated`
-- Vencidos → `status == pending` y dueDate < hoy
-- Resumen "recolectado" suma los `validated`.
+## Fases completadas hoy (post-PROMPT_MAESTRO)
 
-### 3. Limpieza menor
+### Fase 0 — Switch general Activo/Inactivo (commit `98ade26`)
 
-- Imports no usados en `home_page`, `profile_page`, `taxi_stand_config_page`,
-  `pending_approval_page`.
-- `dashboard_kpis`: `x == null ? null : x.foo` → `x?.foo`.
+**Lo que hace:** un pill verde "Activo" / gris "Inactivo" en el AppBar
+del home, visible siempre para conductores y admins-con-vehículo. Tap
+encima alterna `DriverLocationService` entre online (status `libre`) y
+offline (status `desconectado`).
+
+**Decisión clave que tomé sin tu input** (la documenté en el commit):
+NO creé `users/{uid}.isAvailable` como decía el spec D.1. Reusé el campo
+existente `drivers/{driverId}.status` (ya tenía `desconectado` como uno de
+sus valores). Ahorra:
+- migración de datos (no hay que rellenar el nuevo campo en docs viejos)
+- cambios al trigger `syncUserClaims`
+- duplicación de fuente de verdad
+
+Si después necesitas distinguir "el conductor se desconectó" vs "el admin
+lo deshabilitó", **eso queda cubierto por Fase 1** con el nuevo status
+`disabledByAdmin` (más preciso semánticamente).
+
+**Confirmé** que el toggle ON/OFF del walkie-talkie (sesión anterior) no
+toca `DriverLocationService`. Son independientes como pide el spec D.1.
+
+**Archivos:**
+- nuevo `lib/core/widgets/availability_toggle.dart`
+- `lib/features/home/presentation/pages/home_page.dart` (AppBar + helper `_sendsGps`)
+
+### Fase 1 — Suscripción y bloqueo (commit `148ead7`)
+
+**Lo que hace:** la app entera respeta una máquina de estados del
+conductor. Si la asociación no paga, los conductores pasan por
+`paymentPending` (banner) → `paymentBlocked` (modo solo pago) según un
+período de gracia. Si el admin desactiva manualmente, va a `disabledByAdmin`.
+
+**Estados nuevos en `UserStatus`:**
+
+| Estado | UI | Puede subir pago |
+|---|---|---|
+| `active` | App normal | — |
+| `pendingApproval` | /pending-approval | — |
+| `rejected` | /pending-approval | — |
+| `paymentPending` | App normal + banner (pendiente Fase 1.5) | — |
+| `paymentBlocked` | /blocked con botón "Subir comprobante" | **Sí** |
+| `disabledByAdmin` | /blocked sin botón de pago | No |
+| `suspended` | (legacy) /blocked | No |
+
+Helpers en `UserModel`: `isBlocked`, `canUploadPayment`, `hasPaymentWarning`.
+
+**Pantalla `AccountBlockedPage`:**
+- Mensaje claro según el caso.
+- Botón principal: si `paymentBlocked` → `/my-payments` (página existente
+  de pagos del conductor con upload de comprobante).
+- Si `disabledByAdmin` → solo aviso "Contacta a tu administrador".
+- Botón "Refrescar estado" + cerrar sesión.
+
+**Router guard (`app_router.dart`):**
+- Si `user.isBlocked` → forzar `/blocked`.
+- Excepción: dejar pasar `/my-payments` si `canUploadPayment`.
+- Cuando vuelve a `active`, se libera la redirección y va a `/home`.
+
+**Cloud Function `checkSubscriptions` (`functions/index.js`):**
+- `onSchedule("5 0 * * *", America/Guayaquil)` — corre todos los días a las 00:05 ECU.
+- Para cada asociación lee `paidUntil || trialEndsAt`:
+  - Si expiró pero está dentro de los 3 días de gracia →
+    conductores `active` pasan a `paymentPending`; asociación pasa a
+    `status=expired`.
+  - Si pasó la gracia → conductores `paymentPending` pasan a `paymentBlocked`.
+  - Si la asociación volvió a estar al día (paidUntil >= now) →
+    conductores `paymentPending|paymentBlocked` vuelven a `active`.
+- **No toca** `disabledByAdmin`, `pendingApproval`, `rejected`.
+- Idempotente: solo aplica diffs.
+- Trigger manual: `checkSubscriptionsNow` (callable, super-admin).
+  Útil para test sin esperar al cron.
+
+**`SUBSCRIPTION_GRACE_DAYS = 3`** al tope del bloque, fácil de cambiar.
+
+**Pendiente de Fase 1 que NO hice (lo dejé documentado en el commit):**
+1. **Desplegar** la Cloud Function — no toco producción sin tu permiso.
+   `firebase deploy --only functions:checkSubscriptions,functions:checkSubscriptionsNow`
+2. Banner "paymentPending" arriba del home cuando estés en gracia.
+3. Reglas Firestore: bloqueados solo pueden leer su `users/{uid}` + escribir
+   `payments` propios.
+4. Validar tras deploy que `syncUserClaims` propaga los nuevos status al JWT.
+5. Probar e2e con un usuario de prueba: setear `users/{uid}.status =
+   "paymentBlocked"` a mano y verificar redirect.
 
 ---
 
-## Cómo probarlo mañana
+## Decisiones que asumí (recomendaciones del PROMPT_MAESTRO sin tu marca)
 
-1. **Build de debug ya está listo** en `build/app/outputs/flutter-apk/app-debug.apk` (343 MB).
-2. Instalar en un dispositivo Android: `flutter install` o `adb install`.
-3. **Test del fix del mic**:
-   1. Entra al tab del Radio. El switch arriba debe estar **OFF** y decir
-      "Micrófono libre — otras apps pueden usarlo".
-   2. Abre Zello (o cualquier app que use mic) — el mic debe funcionar.
-   3. Vuelve a la app, prende el switch ON, selecciona canal.
-   4. Ahora el banner dice "Conectado a: <canal>" y la notificación
-      persistente aparece.
-   5. Mantén presionado PTT → habla → suelta. Debe transmitir.
-   6. Apaga el switch OFF — la notificación desaparece, vuelve a estar libre el mic.
-4. **Test de pagos** (si eres admin/operadora): ahora las 3 pestañas y el
-   resumen funcionan.
+Como dijiste "arranca", asumí las recomendaciones por defecto de la sección 2:
 
----
+| # | Decisión | Asumido |
+|---|----------|---------|
+| D-1 | Cliente: app o web | Web Next.js separada (todavía no tocada) |
+| D-2 | Caducidad: cron + client-side | Cron implementado; client-side el router guard ya valida `user.isBlocked` en cada redirect |
+| D-3 | Eventos Quito: Gemini | Pendiente Fase 5 |
+| D-4 | Mapa real-time backend | Firestore (sin cambios todavía) |
+| D-5 | Categorías cashflow | Plantilla base + extensible (pendiente Fase 4) |
+| D-6 | Bloqueado puede subir comprobante | Sí (implementado) |
+| D-7 | Período de gracia | 3 días (constante `SUBSCRIPTION_GRACE_DAYS`) |
+| D-8 | Notificaciones programadas | Pendiente Fase 5 |
+| D-9 | Theming dinámico | Pendiente Fase 4 |
 
-## Lo que NO toqué (decisiones explícitas)
-
-- **AndroidManifest.xml** — lo dejé igual. El `foregroundServiceType=microphone`
-  sigue siendo correcto: cuando el radio está ON necesitas que Agora pueda
-  capturar mic en background. La diferencia es que **ya no se arranca el
-  servicio mientras el radio está OFF**, así que el "tag" de mic no está
-  presente en el SO en ese estado.
-- **OverlayPttService** (botón flotante) — sigue funcionando igual. Si lo
-  tenías activado antes, sigue activado.
-- **Onboarding / Pricing tiers / Multi-tenant** — fuera del scope de esta
-  noche.
+**Si alguna no te gusta, dímelo y la cambio.** Todas son fáciles de revertir
+porque el cambio está en un solo archivo o constante.
 
 ---
 
-## Issues menores que quedan (no bloquean nada)
+## Cómo probar Fase 0 + Fase 1 mañana
 
-`flutter analyze` reporta 12 warnings/info que NO son bugs:
+### Probar Fase 0 (switch Activo/Inactivo)
+1. `flutter run` con tu cuenta de conductor.
+2. En el AppBar arriba, deberías ver el pill **"Activo"** verde.
+3. Tap encima → cambia a **"Inactivo"** gris. El GPS deja de subir
+   ubicación a Firestore (verificar en `drivers/{driverId}.status` =
+   `desconectado`).
+4. Tap de nuevo → vuelve a Activo.
+5. Confirmar que el toggle del walkie-talkie no afecta el switch general
+   y viceversa.
 
-- `register_page.dart`: `_fotoVehiculo`, `_fotoLicenciaFrontal`,
-  `_fotoLicenciaTrasera`, `_pickImage`, `_buildPhotoPicker` declarados
-  pero no usados — esto es porque el flow de subida de fotos del registro
-  está deshabilitado actualmente. No tocar sin saber si lo van a re-habilitar.
-- `register_page.dart:483`: RadioListTile usa `value:` que está deprecated,
-  reemplazar por `initialValue:` cuando actualices Flutter.
-- `my_payments_page.dart:220`: `_photoUploadedUrl` no usado.
-- 5x `unnecessary_underscores` (info de estilo, ignorables).
+### Probar Fase 1 (bloqueo por mora)
+1. Setear manualmente en Firestore: `users/{tuUid}.status = "paymentBlocked"`.
+2. La app debería forzar la pantalla **"Cuenta bloqueada"** con botón "Subir comprobante".
+3. Tap en el botón → te lleva a `/my-payments`.
+4. Cambiar a `"disabledByAdmin"` → misma pantalla pero sin botón de pago.
+5. Volver a `"active"` → la app se desbloquea sola.
+
+### Probar la Cloud Function (después de desplegarla)
+1. `firebase deploy --only functions:checkSubscriptions,functions:checkSubscriptionsNow`
+2. Disparo manual desde super-admin:
+   ```dart
+   await FirebaseFunctions.instance
+       .httpsCallable('checkSubscriptionsNow')
+       .call();
+   ```
+3. Revisar `users/*.status` antes y después.
 
 ---
 
-## Commits de esta sesión
+## Estado del repositorio
 
 ```
+148ead7 feat(subscriptions): bloqueo por mora + cron checkSubscriptions (Fase 1)
+98ade26 feat(availability): switch general Activo/Inactivo en AppBar (Fase 0)
+e467c01 docs: PROMPT_MAESTRO.md aprobado por Byron
+975cd29 docs: PROGRESS.md con resumen completo de la sesión [walkie-talkie]
 024b33c fix(payments): compara PaymentStatus por enum, no por string
 2050c7b feat(walkie-talkie): toggle ON/OFF para liberar mic cuando no se usa
 4eccad4 chore: baseline inicial del proyecto antes de arreglar walkie-talkie
 ```
 
-`git log --oneline -3` para verlos.
+Rama: `main`. No pushé a remoto (no tengo permiso explícito tuyo).
 
 ---
 
-## Si algo no funciona mañana
+## Por qué paré aquí
 
-1. `git diff 4eccad4 HEAD -- lib/core/services/radio_power_service.dart` — ver el nuevo servicio.
-2. `git diff 4eccad4 HEAD -- lib/features/communication/presentation/pages/walkie_talkie_page.dart` — ver los cambios al UI del radio.
-3. Para revertir cualquier commit: `git revert <hash>` (no destructivo).
-4. Si falta algo en el toggle: el servicio está en
-   `lib/core/services/radio_power_service.dart` y se llama desde
-   `walkie_talkie_page.dart` en `_onRadioPowerChanged`.
+Respeto el contrato del PROMPT_MAESTRO sección 6: paso al 90% de tokens
+con todo documentado y commiteado. Cuando reanudes la sesión, este archivo
++ los commits son el contrato suficiente para retomar.
+
+**Próxima sesión (Fase 2 — Operación de viajes):**
+- C.1: Modelo único `trips/{tripId}` (multi-tenant). Validar/extender el
+  modelo TripModel existente.
+- C.2: Botón "+1 carrera" del conductor (1 click, sin formulario).
+- C.3: Operadora asigna carrera desde modal del walkie-talkie + métricas.
+
+Estimado: 2 sesiones. La primera arranca por el modelo `trips` y el botón
+"+1 carrera" porque es el más simple y ya pone la base de datos para todo
+lo que sigue.
+
+---
+
+## Recordatorio de cosas que NO hago sin tu OK
+
+- `git push` (todo commiteado local).
+- Borrar archivos / colecciones existentes.
+- `firebase deploy` a producción.
+- Cambiar `pricingTiers`.
+- Tocar `firestore.rules` sin tests previos.
+- `--no-verify` en commits (todos pasaron gitleaks limpio).
