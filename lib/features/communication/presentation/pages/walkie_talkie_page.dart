@@ -729,31 +729,43 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     );
   }
 
-  /// Centro del walkie-talkie cuando no hay nadie hablando: solo espacio
-  /// vacío con un recordatorio de dónde ver el historial. La idea es que
-  /// el botón PTT sea el protagonista visual.
+  /// Centro del walkie-talkie cuando no hay nadie hablando: espacio
+  /// compacto con icono y recordatorio. El protagonista visual es el
+  /// botón PTT que viene debajo.
   Widget _buildRadioCenter() {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.radio, size: 80, color: Colors.grey.shade300),
-          const SizedBox(height: 16),
-          Text(
-            'Mantén presionado el botón para hablar',
-            style: TextStyle(color: Colors.grey.shade600, fontSize: 14),
-          ),
-          const SizedBox(height: 6),
-          Text(
-            'Historial de audios y mensajes en el tab Chat',
-            style: TextStyle(
-              color: Colors.grey.shade500,
-              fontSize: 12,
-              fontStyle: FontStyle.italic,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Adaptar el tamaño del icono a la altura disponible para evitar
+        // overflows en pantallas pequeñas (la cola + PTT 280px ocupan mucho).
+        final iconSize = constraints.maxHeight > 140 ? 56.0 : 36.0;
+        return Center(
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.radio, size: iconSize, color: Colors.grey.shade300),
+                const SizedBox(height: 6),
+                Text(
+                  'Mantén presionado el botón para hablar',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: Colors.grey.shade600, fontSize: 12),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Historial en el tab Chat',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Colors.grey.shade500,
+                    fontSize: 11,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
             ),
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
