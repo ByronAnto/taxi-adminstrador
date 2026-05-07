@@ -40,11 +40,27 @@ class _PaymentsPageState extends State<PaymentsPage>
     super.dispose();
   }
 
-  List<PaymentModel> _getPaymentsByStatus(PaymentState state, String status) {
-    if (state is PaymentLoaded) {
-      return state.payments.where((p) => p.status == status).toList();
-    }
-    return [];
+  /// Filtra pagos por categoría visible en las pestañas:
+  /// - 'pendiente' → status pending y aún no vencido (o sin dueDate)
+  /// - 'pagado'    → status validated
+  /// - 'vencido'   → status pending y dueDate antes de hoy
+  List<PaymentModel> _getPaymentsByStatus(PaymentState state, String tab) {
+    if (state is! PaymentLoaded) return [];
+    final now = DateTime.now();
+    return state.payments.where((p) {
+      switch (tab) {
+        case 'pagado':
+          return p.status == PaymentStatus.validated;
+        case 'vencido':
+          return p.status == PaymentStatus.pending &&
+              p.dueDate != null &&
+              p.dueDate!.isBefore(now);
+        case 'pendiente':
+        default:
+          return p.status == PaymentStatus.pending &&
+              (p.dueDate == null || !p.dueDate!.isBefore(now));
+      }
+    }).toList();
   }
 
   @override
@@ -121,7 +137,7 @@ class _PaymentsPageState extends State<PaymentsPage>
     if (state is PaymentLoaded) {
       total = state.payments.fold<double>(0, (sum, p) => sum + p.amount);
       collected = state.payments
-          .where((p) => p.status == 'pagado')
+          .where((p) => p.status == PaymentStatus.validated)
           .fold<double>(0, (sum, p) => sum + p.amount);
     }
     final pending = total - collected;
@@ -251,7 +267,7 @@ class _PaymentsPageState extends State<PaymentsPage>
           ],
         ),
         onTap: () {
-          if (payment.status == 'pendiente' || payment.status == 'vencido') {
+          if (payment.status == PaymentStatus.pending) {
             _showMarkPaidDialog(payment);
           }
         },

@@ -1,4 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
@@ -8,7 +7,6 @@ import '../../../../core/theme/app_theme.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/driver_location_service.dart';
 import '../../../map/presentation/pages/map_page.dart';
-import '../../../map/presentation/bloc/map_bloc.dart';
 import '../../../communication/presentation/pages/walkie_talkie_page.dart';
 import '../../../trips/presentation/pages/trips_page.dart';
 import '../../../chat/presentation/pages/chat_list_page.dart';

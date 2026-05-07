@@ -413,9 +413,7 @@ class _NextDueCard extends StatelessWidget {
                 NumberFormat.currency(symbol: '\$', decimalDigits: 2)
                     .format(cfg.amount);
 
-            final daysToDue = nextDue == null
-                ? null
-                : nextDue.difference(DateTime.now()).inDays;
+            final daysToDue = nextDue?.difference(DateTime.now()).inDays;
 
             final color = daysToDue == null
                 ? Colors.grey

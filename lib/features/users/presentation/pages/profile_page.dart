@@ -10,7 +10,6 @@ import '../../../../core/theme/app_theme.dart';
 import '../../../../core/services/image_upload_service.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../auth/data/models/user_model.dart';
-import '../../../auth/domain/usecases/auth_usecases.dart';
 
 /// Página de perfil de usuario con edición de datos
 class ProfilePage extends StatefulWidget {
