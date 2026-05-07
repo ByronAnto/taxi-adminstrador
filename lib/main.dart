@@ -7,11 +7,13 @@ import 'firebase_options.dart';
 import 'core/theme/app_theme.dart';
 import 'core/constants/app_constants.dart';
 import 'core/services/connectivity_service.dart';
+import 'package:hive_flutter/hive_flutter.dart';
 import 'core/services/agora_service.dart';
 import 'core/services/association_theme_service.dart';
 import 'core/services/current_user_context.dart';
 import 'core/services/driver_location_service.dart';
 import 'core/services/fcm_token_service.dart';
+import 'core/services/local_audio_history_service.dart';
 import 'core/services/overlay_ptt_service.dart';
 import 'core/services/radio_power_service.dart';
 import 'core/widgets/connectivity_banner.dart';
@@ -65,8 +67,14 @@ void main() async {
   // Inicializar monitoreo de conectividad
   await ConnectivityService.instance.initialize();
 
+  // Inicializar Hive para storage local (audio history, chat local, etc.)
+  await Hive.initFlutter();
+
   // Cargar el último estado del walkie-talkie (ON/OFF persistido)
   await RadioPowerService.instance.initialize();
+
+  // Inicializar historial de audios local (purga audios > 24h al iniciar)
+  await LocalAudioHistoryService.instance.initialize();
 
   // Inicializar servicio de overlay PTT (escuchar eventos del nativo)
   OverlayPttService.instance.initialize();

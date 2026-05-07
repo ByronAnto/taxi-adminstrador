@@ -6,6 +6,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/theme/app_theme.dart';
@@ -1053,6 +1054,27 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
                     ),
                   ],
                 ),
+                const SizedBox(height: 12),
+                // Acción "Ir" — abre Google Maps con direcciones a este conductor.
+                SizedBox(
+                  width: double.infinity,
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      Navigator.of(ctx).pop();
+                      _openInGoogleMaps(lat, lng,
+                          driver.vehicleNumber.isNotEmpty
+                              ? 'Unidad ${driver.vehicleNumber}'
+                              : driver.driverName);
+                    },
+                    icon: const Icon(Icons.directions),
+                    label: const Text('Ir aquí (Google Maps)'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: AppTheme.primaryColor,
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 16),
                 const Divider(),
                 const SizedBox(height: 8),
@@ -1083,6 +1105,23 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
         );
       },
     );
+  }
+
+  /// Abre Google Maps (o el navegador) con direcciones desde la ubicación
+  /// actual del usuario hacia las coordenadas dadas.
+  Future<void> _openInGoogleMaps(
+      double lat, double lng, String label) async {
+    // El URL universal `?q=lat,lng` abre Google Maps con marker; con
+    // `&travelmode=driving` y `?api=1&destination=lat,lng` abre la
+    // navegación turn-by-turn directamente.
+    final uri = Uri.parse(
+        'https://www.google.com/maps/dir/?api=1&destination=$lat,$lng&travelmode=driving');
+    final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+    if (!ok && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo abrir Google Maps')),
+      );
+    }
   }
 
   Widget _buildDistanceRow(IconData icon, String name, double distKm) {

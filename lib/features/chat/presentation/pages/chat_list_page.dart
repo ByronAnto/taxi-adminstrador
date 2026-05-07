@@ -1,5 +1,11 @@
+import 'dart:io';
+
+import 'package:cached_network_image/cached_network_image.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:share_plus/share_plus.dart';
 import 'package:uuid/uuid.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
@@ -231,17 +237,107 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
     final text = _messageController.text.trim();
     if (text.isEmpty) return;
 
+    final now = DateTime.now();
     final msg = ChatMessageModel(
       uid: const Uuid().v4(),
       chatRoomId: widget.chatRoomId,
       senderId: _currentUserId(),
       senderName: _currentUserName(),
       message: text,
-      createdAt: DateTime.now(),
+      expiresAt: now.add(const Duration(hours: 24)),
+      createdAt: now,
     );
 
     context.read<ChatBloc>().add(ChatSendMessageRequested(msg));
     _messageController.clear();
+  }
+
+  /// Pick image from gallery o cámara, sube a Storage con expiresAt 24h y
+  /// crea el doc en Firestore. La imagen se purga automáticamente por
+  /// Cloud Function tras 24h (mismo flujo que payments.proof.photoExpired).
+  Future<void> _sendImage(ImageSource source) async {
+    final picker = ImagePicker();
+    final picked = await picker.pickImage(
+      source: source,
+      imageQuality: 75,
+      maxWidth: 1600,
+    );
+    if (picked == null) return;
+    if (!mounted) return;
+
+    final myId = _currentUserId();
+    final myName = _currentUserName();
+    final msgId = const Uuid().v4();
+    final path = 'chat_images/${widget.chatRoomId}/$msgId.jpg';
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(
+        content: Text('Subiendo imagen...'),
+        duration: Duration(seconds: 2)));
+
+    try {
+      final ref = FirebaseStorage.instance.ref(path);
+      final file = File(picked.path);
+      final now = DateTime.now();
+      final expiresAt = now.add(const Duration(hours: 24));
+      await ref.putFile(
+        file,
+        SettableMetadata(
+          contentType: 'image/jpeg',
+          customMetadata: {
+            'expiresAt': expiresAt.millisecondsSinceEpoch.toString(),
+            'roomId': widget.chatRoomId,
+          },
+        ),
+      );
+      final url = await ref.getDownloadURL();
+      final msg = ChatMessageModel(
+        uid: msgId,
+        chatRoomId: widget.chatRoomId,
+        senderId: myId,
+        senderName: myName,
+        message: '',
+        imageUrl: url,
+        imagePath: path,
+        expiresAt: expiresAt,
+        createdAt: now,
+      );
+      if (!mounted) return;
+      context.read<ChatBloc>().add(ChatSendMessageRequested(msg));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+        content: Text('Error subiendo imagen: $e'),
+        backgroundColor: AppTheme.errorColor,
+      ));
+    }
+  }
+
+  void _showAttachSheet() {
+    showModalBottomSheet(
+      context: context,
+      builder: (_) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library),
+              title: const Text('Galería'),
+              onTap: () {
+                Navigator.pop(context);
+                _sendImage(ImageSource.gallery);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.camera_alt),
+              title: const Text('Cámara'),
+              onTap: () {
+                Navigator.pop(context);
+                _sendImage(ImageSource.camera);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
   }
 
   @override
@@ -329,6 +425,11 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
             ),
             child: Row(
               children: [
+                IconButton(
+                  icon: const Icon(Icons.attach_file),
+                  tooltip: 'Adjuntar imagen',
+                  onPressed: _showAttachSheet,
+                ),
                 Expanded(
                   child: TextField(
                     controller: _messageController,
@@ -366,7 +467,9 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   Widget _buildMessageBubble(ChatMessageModel msg, bool isMe) {
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
-      child: Container(
+      child: GestureDetector(
+        onLongPress: () => _shareMessage(msg),
+        child: Container(
         margin: const EdgeInsets.only(bottom: 8),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
         constraints:
@@ -395,12 +498,39 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                   color: AppTheme.secondaryColor,
                 ),
               ),
-            Text(
-              msg.message,
-              style: TextStyle(
-                color: isMe ? Colors.white : AppTheme.textPrimary,
+            if (msg.hasImage)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 6),
+                child: ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: CachedNetworkImage(
+                    imageUrl: msg.imageUrl!,
+                    width: 220,
+                    fit: BoxFit.cover,
+                    placeholder: (_, _) => Container(
+                      width: 220,
+                      height: 160,
+                      color: Colors.grey.shade300,
+                      child: const Center(
+                          child: CircularProgressIndicator(strokeWidth: 2)),
+                    ),
+                    errorWidget: (_, _, _) => Container(
+                      width: 220,
+                      height: 160,
+                      color: Colors.grey.shade200,
+                      child:
+                          const Icon(Icons.broken_image, size: 40),
+                    ),
+                  ),
+                ),
               ),
-            ),
+            if (msg.message.isNotEmpty)
+              Text(
+                msg.message,
+                style: TextStyle(
+                  color: isMe ? Colors.white : AppTheme.textPrimary,
+                ),
+              ),
             const SizedBox(height: 2),
             Text(
               '${msg.createdAt.hour.toString().padLeft(2, '0')}:${msg.createdAt.minute.toString().padLeft(2, '0')}',
@@ -414,6 +544,34 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
           ],
         ),
       ),
+    ),
     );
+  }
+
+  /// Reenvía el mensaje (texto + imagen si tiene) por WhatsApp / share nativo.
+  /// Si tiene imagen, descarga el blob y lo comparte como archivo.
+  Future<void> _shareMessage(ChatMessageModel msg) async {
+    if (msg.hasImage) {
+      try {
+        final ref = FirebaseStorage.instance.refFromURL(msg.imageUrl!);
+        final tmp = File(
+            '${Directory.systemTemp.path}/chat_${msg.uid}.jpg');
+        await ref.writeToFile(tmp);
+        await Share.shareXFiles(
+          [XFile(tmp.path, mimeType: 'image/jpeg')],
+          text: msg.message.isNotEmpty
+              ? msg.message
+              : 'Imagen enviada por ${msg.senderName}',
+        );
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('No se pudo compartir: $e')),
+          );
+        }
+      }
+    } else if (msg.message.isNotEmpty) {
+      await Share.share(msg.message);
+    }
   }
 }

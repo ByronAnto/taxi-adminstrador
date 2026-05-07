@@ -1823,3 +1823,75 @@ exports.dispatchScheduledNotifications = onSchedule(
   }
 );
 
+// ───────────────────────────────────────────────────────────────────
+//  purgeOldChatMessages — cron cada hora.
+//  Recorre chat_rooms/{}/messages/{} con expiresAt <= now y los borra.
+//  Si el mensaje tiene imagePath, también elimina el blob en Storage
+//  (chat_images/{roomId}/{msgId}.jpg).
+//
+//  Cumple el requerimiento de Byron: "todo se guarde por 24h en el celular
+//  de cada usuario no en nube". Firestore actúa como transporte temporal y
+//  esta función limpia automáticamente.
+// ───────────────────────────────────────────────────────────────────
+
+async function _runPurgeOldChatMessages() {
+  const now = new Date();
+  const roomsSnap = await db.collection("chat_rooms").get();
+  let scanned = 0;
+  let docsDeleted = 0;
+  let blobsDeleted = 0;
+  let blobsFailed = 0;
+  const bucket = getStorage().bucket();
+
+  for (const roomDoc of roomsSnap.docs) {
+    const expiredSnap = await roomDoc.ref
+      .collection("messages")
+      .where("expiresAt", "<=", now)
+      .limit(200)
+      .get();
+    scanned += expiredSnap.size;
+    for (const m of expiredSnap.docs) {
+      const data = m.data();
+      const imagePath = data.imagePath;
+      if (typeof imagePath === "string" && imagePath.length > 0) {
+        try {
+          await bucket.file(imagePath).delete();
+          blobsDeleted++;
+        } catch (e) {
+          // 404 → ya no existía; otros errores los contamos como fallidos.
+          if ((e && e.code) !== 404) blobsFailed++;
+        }
+      }
+      await m.ref.delete();
+      docsDeleted++;
+    }
+  }
+  return {
+    ok: true,
+    scanned,
+    docsDeleted,
+    blobsDeleted,
+    blobsFailed,
+  };
+}
+
+exports.purgeOldChatMessages = onSchedule(
+  {
+    schedule: "0 * * * *", // cada hora en el minuto 0
+    timeZone: "America/Guayaquil",
+    timeoutSeconds: 540,
+    memory: "256MiB",
+    retryCount: 1,
+  },
+  async () => {
+    const summary = await _runPurgeOldChatMessages();
+    console.log("purgeOldChatMessages:", JSON.stringify(summary));
+    return summary;
+  }
+);
+
+exports.purgeOldChatMessagesNow = onCall({}, async (request) => {
+  requireSuperAdmin(request);
+  return await _runPurgeOldChatMessages();
+});
+

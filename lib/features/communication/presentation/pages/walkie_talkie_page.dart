@@ -9,6 +9,7 @@ import '../../../../core/theme/app_theme.dart';
 import '../../../../core/services/agora_service.dart';
 import '../../../../core/services/connectivity_service.dart';
 import '../../../../core/services/driver_location_service.dart';
+import '../../../../core/services/local_audio_history_service.dart';
 import '../../../../core/services/radio_foreground_service.dart';
 import '../../../../core/services/radio_power_service.dart';
 import '../../../../core/services/overlay_ptt_service.dart';
@@ -17,6 +18,7 @@ import '../../../auth/data/models/user_model.dart';
 import '../../../trips/presentation/widgets/assign_trip_modal.dart';
 import '../../data/models/channel_model.dart';
 import '../bloc/communication_bloc.dart';
+import '../widgets/audio_history_tile.dart';
 
 /// Página de walkie-talkie con PTT estilo Zello.
 /// Canal bloqueado: solo un usuario puede hablar a la vez.
@@ -51,6 +53,11 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
 
   /// Último channelId al que nos unimos en Agora (para detectar cambios)
   String? _lastAgoraChannelId;
+
+  /// Estado de la grabación local del audio del canal (historial 24h).
+  String? _recordingEntryId;
+  DateTime? _recordingStartedAt;
+  String? _lastSpeakerLockKey; // "channelId|speakerId"
 
   /// Duración máxima de grabación en segundos (seguridad anti-mic abierto)
   static const int _maxRecordingSeconds = 60;
@@ -94,6 +101,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     _radioPower.removeListener(_onRadioPowerChanged);
     _recordingTimer?.cancel();
     _durationTimer?.cancel();
+    // Si quedó una grabación abierta, cerrarla para no perder metadata.
+    _stopLocalRecordingIfAny();
     // Destruir engine completamente al salir de la página del radio
     // para liberar la sesión de audio del SO
     _agoraService.destroyEngine();
@@ -215,6 +224,74 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         });
       }
     }
+  }
+
+  /// Detecta cambios en el speaker del canal y graba/cierra el audio local
+  /// para que quede en el historial de 24h re-escuchable.
+  ///
+  /// Reglas:
+  /// - Speaker cambia de null/X → Y: cierra grabación X (si había) y arranca
+  ///   grabación Y.
+  /// - Speaker cambia de Y → null: cierra grabación Y.
+  /// - Si el speaker es el propio usuario, también grabamos (para que pueda
+  ///   re-escuchar lo que dijo).
+  Future<void> _handleSpeakerChangeForRecording(
+    CommunicationLoaded state,
+    String? channelName,
+  ) async {
+    final channelId = state.activeChannelId;
+    if (channelId == null) {
+      // Sin canal: si había grabación, cerrarla.
+      await _stopLocalRecordingIfAny();
+      _lastSpeakerLockKey = null;
+      return;
+    }
+
+    final speakerId = state.isPttLocked ? state.pttSpeakerId : null;
+    final speakerName = state.pttSpeakerName ?? 'Conductor';
+    final newKey = speakerId == null ? null : '$channelId|$speakerId';
+
+    if (newKey == _lastSpeakerLockKey) return;
+
+    // Speaker cambió. Cerrar la grabación anterior (si hay).
+    await _stopLocalRecordingIfAny();
+    _lastSpeakerLockKey = newKey;
+
+    // Si hay un nuevo speaker, iniciar grabación local.
+    if (speakerId == null || speakerId.isEmpty) return;
+    if (!_radioPower.isOn || !_agoraService.isInChannel) return;
+    final history = LocalAudioHistoryService.instance;
+    final entryId =
+        '${DateTime.now().millisecondsSinceEpoch}_${speakerId.substring(0, speakerId.length.clamp(0, 6))}';
+    final filePath = await history.reservePath(entryId);
+    final ok = await _agoraService.startLocalRecording(filePath);
+    if (!ok) return;
+    _recordingEntryId = entryId;
+    _recordingStartedAt = DateTime.now();
+    await history.startEntry(
+      id: entryId,
+      channelId: channelId,
+      channelName: channelName ?? '',
+      speakerId: speakerId,
+      speakerName: speakerName,
+      startedAt: _recordingStartedAt!,
+      filePath: filePath,
+    );
+  }
+
+  Future<void> _stopLocalRecordingIfAny() async {
+    final id = _recordingEntryId;
+    final startedAt = _recordingStartedAt;
+    _recordingEntryId = null;
+    _recordingStartedAt = null;
+    if (id == null) return;
+    await _agoraService.stopLocalRecording();
+    final dur = startedAt == null
+        ? 0
+        : DateTime.now().difference(startedAt).inSeconds;
+    await LocalAudioHistoryService.instance
+        .finalizeEntry(id, durationSec: dur);
+    if (mounted) setState(() {}); // Refrescar la lista del historial
   }
 
   /// Reacciona al toggle ON/OFF del walkie-talkie.
@@ -365,6 +442,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             // No hay canal activo, detener servicio
             _radioService.stopService();
           }
+
+          // === Grabación local 24h: detectar cambio de speaker ===
+          _handleSpeakerChangeForRecording(state, channelName);
         }
       },
       builder: (context, state) {
@@ -640,7 +720,17 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       );
     }
 
-    if (state.activeMessages.isEmpty) {
+    // Audios locales del historial (24h, en este celular).
+    final audios = LocalAudioHistoryService.instance
+        .entriesForChannel(state.activeChannelId!);
+
+    // Mensajes de texto (Firestore). Los de voz legacy con audioBase64 ya
+    // no se reproducen — el historial local los reemplaza.
+    final texts = state.activeMessages
+        .where((m) => m.type == 'texto')
+        .toList();
+
+    if (audios.isEmpty && texts.isEmpty) {
       return Center(
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
@@ -661,13 +751,31 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       );
     }
 
+    // Combinar audios + textos ordenados por fecha desc (más reciente arriba).
+    final items = <_HistoryItem>[
+      ...audios.map((a) => _HistoryItem.audio(a)),
+      ...texts.map((t) => _HistoryItem.text(t)),
+    ]..sort((a, b) => b.at.compareTo(a.at));
+
     return ListView.builder(
       padding: const EdgeInsets.all(16),
-      itemCount: state.activeMessages.length,
+      itemCount: items.length,
       reverse: false,
       itemBuilder: (context, index) {
-        final message = state.activeMessages[index];
-        return _buildMessageTile(message);
+        final item = items[index];
+        if (item.audio != null) {
+          final isMe = item.audio!.speakerId == _currentUser?.uid;
+          return AudioHistoryTile(
+            entry: item.audio!,
+            isMe: isMe,
+            onDelete: () async {
+              await LocalAudioHistoryService.instance
+                  .deleteEntry(item.audio!.id);
+              if (mounted) setState(() {});
+            },
+          );
+        }
+        return _buildMessageTile(item.text!);
       },
     );
   }
@@ -794,8 +902,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                 : null,
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 150),
-              width: _isRecording ? 150 : 130,
-              height: _isRecording ? 150 : 130,
+              width: _isRecording ? 230 : 200,
+              height: _isRecording ? 230 : 200,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: LinearGradient(
@@ -842,7 +950,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                     color: !isOn || isLockedByOther
                         ? Colors.white70
                         : Colors.white,
-                    size: _isRecording ? 52 : 44,
+                    size: _isRecording ? 84 : 72,
                   ),
                   const SizedBox(height: 4),
                   if (!isOn)
@@ -1345,4 +1453,18 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     return '${dateTime.hour.toString().padLeft(2, '0')}:'
         '${dateTime.minute.toString().padLeft(2, '0')}';
   }
+}
+
+/// Item interno de la lista combinada audio + texto del historial del canal.
+class _HistoryItem {
+  final AudioHistoryEntry? audio;
+  final MessageModel? text;
+  final DateTime at;
+
+  _HistoryItem._({this.audio, this.text, required this.at});
+
+  factory _HistoryItem.audio(AudioHistoryEntry e) =>
+      _HistoryItem._(audio: e, at: e.startedAt);
+  factory _HistoryItem.text(MessageModel m) =>
+      _HistoryItem._(text: m, at: m.createdAt);
 }

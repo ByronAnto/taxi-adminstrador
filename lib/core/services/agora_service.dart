@@ -576,6 +576,42 @@ class AgoraService {
     }
   }
 
+  // ─────────────────── Grabación Local ───────────────────
+
+  /// Inicia grabación local del audio del canal en [filePath].
+  /// El archivo es AAC encoded (extensión .aac o .m4a).
+  /// Captura TODO lo que se escucha en el canal (incluyendo nuestro propio
+  /// PTT cuando estamos hablando) para tenerlo en historial local.
+  Future<bool> startLocalRecording(String filePath) async {
+    if (_engine == null || !_isInChannel) {
+      _log('startLocalRecording ignorado: engine=$_engine, isInChannel=$_isInChannel');
+      return false;
+    }
+    try {
+      await _engine!.startAudioRecording(AudioRecordingConfiguration(
+        filePath: filePath,
+        sampleRate: 32000,
+        fileRecordingType: AudioFileRecordingType.audioFileRecordingMixed,
+        quality: AudioRecordingQualityType.audioRecordingQualityMedium,
+      ));
+      _log('🎬 Grabación local iniciada → $filePath');
+      return true;
+    } catch (e) {
+      _log('Error startLocalRecording: $e');
+      return false;
+    }
+  }
+
+  Future<void> stopLocalRecording() async {
+    if (_engine == null) return;
+    try {
+      await _engine!.stopAudioRecording();
+      _log('⏹️ Grabación local detenida');
+    } catch (e) {
+      _log('Error stopLocalRecording: $e');
+    }
+  }
+
   // ─────────────────── Audio Remoto ───────────────────
 
   Future<void> setRemoteAudioMuted(bool muted) async {

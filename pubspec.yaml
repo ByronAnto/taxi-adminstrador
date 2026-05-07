@@ -82,6 +82,9 @@ dependencies:
   printing: ^5.14.2
   syncfusion_flutter_xlsio: ^30.1.42
 
+  # Audio playback (re-escuchar audios locales del walkie-talkie)
+  audioplayers: ^6.1.0
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
