@@ -50,9 +50,14 @@ class RadioForegroundService {
   /// Inicia el foreground service cuando se activa un canal.
   /// [channelName] es el nombre del canal activo para la notificación.
   ///
-  /// En Android 13+ el servicio falla con `ServiceRequestFailure` si la app
-  /// no tiene permiso `POST_NOTIFICATIONS`. Pedimos el permiso antes de
-  /// arrancar para evitar el error silencioso.
+  /// Causas comunes de `ServiceRequestFailure` y cómo las manejamos:
+  ///  1. POST_NOTIFICATIONS denegado (Android 13+) → pedimos el permiso
+  ///     y si está denegado permanentemente, abrimos Settings.
+  ///  2. App en estado "transitorio" (hot reload o recién arrancada) →
+  ///     reintentamos 1 vez con delay 500ms.
+  ///  3. Doze/optimización batería bloqueando background-start →
+  ///     pedimos ignorar optimizaciones (silenciosamente — el usuario
+  ///     ya tendrá la notificación de permiso si Android la requiere).
   Future<void> startService(String channelName) async {
     if (_isRunning || _isStarting) {
       // Ya corriendo o en proceso, solo actualizar notificación
@@ -64,35 +69,78 @@ class RadioForegroundService {
     _activeChannelName = channelName;
 
     try {
-      // Permisos runtime requeridos por flutter_foreground_task en Android 13+:
-      //   - POST_NOTIFICATIONS (Android 13+)
-      //   - Ignorar optimizaciones de batería (opcional pero recomendado)
+      // ─── Permiso 1: POST_NOTIFICATIONS (Android 13+) ───
       try {
-        final notifPerm =
+        var notifPerm =
             await FlutterForegroundTask.checkNotificationPermission();
         if (notifPerm != NotificationPermission.granted) {
-          await FlutterForegroundTask.requestNotificationPermission();
+          notifPerm =
+              await FlutterForegroundTask.requestNotificationPermission();
+        }
+        if (notifPerm == NotificationPermission.permanently_denied) {
+          // El usuario tocó "No volver a preguntar". El servicio NUNCA va
+          // a poder mostrar notificación → fail garantizado. Abrir Settings.
+          _logger.e(
+              'Permiso de notificaciones denegado permanentemente. '
+              'Abriendo configuración de la app...');
+          try {
+            await FlutterForegroundTask.openSystemAlertWindowSettings();
+          } catch (_) {}
+          return;
+        }
+        if (notifPerm != NotificationPermission.granted) {
+          _logger.e(
+              'Permiso de notificaciones no concedido — el radio no '
+              'puede correr en background.');
+          return;
         }
       } catch (e) {
         _logger.w('No se pudo verificar permiso de notificaciones: $e');
       }
 
-      final result = await FlutterForegroundTask.startService(
-        notificationTitle: '📻 Radio Activo',
-        notificationText: 'Canal: $channelName — Escuchando...',
-        callback: _radioTaskCallback,
-      );
+      // ─── Permiso 2: ignorar optimizaciones de batería (best-effort) ───
+      try {
+        final ignoring =
+            await FlutterForegroundTask.isIgnoringBatteryOptimizations;
+        if (!ignoring) {
+          // No bloqueamos: el usuario puede negarlo y el radio funciona
+          // mientras la app esté en foreground. Solo background sufre.
+          await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+        }
+      } catch (_) {}
+
+      // ─── Intentar arrancar (con 1 retry tras 500ms si falla) ───
+      var result = await _tryStartService(channelName);
+      if (result is! ServiceRequestSuccess) {
+        _logger.w('startService falló al primer intento, reintentando...');
+        await Future.delayed(const Duration(milliseconds: 500));
+        result = await _tryStartService(channelName);
+      }
 
       if (result is ServiceRequestSuccess) {
         _isRunning = true;
         _logger.i('Radio foreground service started for channel: $channelName');
       } else {
-        _logger.e('Failed to start radio foreground service: $result');
+        _logger.e(
+            'Failed to start radio foreground service tras retry: $result');
       }
     } catch (e) {
       _logger.e('Exception starting foreground service: $e');
     } finally {
       _isStarting = false;
+    }
+  }
+
+  Future<ServiceRequestResult> _tryStartService(String channelName) async {
+    try {
+      return await FlutterForegroundTask.startService(
+        notificationTitle: '📻 Radio Activo',
+        notificationText: 'Canal: $channelName — Escuchando...',
+        callback: _radioTaskCallback,
+      );
+    } catch (e) {
+      _logger.e('Exception en _tryStartService: $e');
+      return ServiceRequestFailure(error: e);
     }
   }
 
