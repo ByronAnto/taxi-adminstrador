@@ -10,6 +10,7 @@ import 'core/services/connectivity_service.dart';
 import 'core/services/agora_service.dart';
 import 'core/services/driver_location_service.dart';
 import 'core/services/overlay_ptt_service.dart';
+import 'core/services/radio_power_service.dart';
 import 'core/widgets/connectivity_banner.dart';
 import 'config/injection/injection.dart';
 import 'config/router/app_router.dart';
@@ -60,6 +61,9 @@ void main() async {
 
   // Inicializar monitoreo de conectividad
   await ConnectivityService.instance.initialize();
+
+  // Cargar el último estado del walkie-talkie (ON/OFF persistido)
+  await RadioPowerService.instance.initialize();
 
   // Inicializar servicio de overlay PTT (escuchar eventos del nativo)
   OverlayPttService.instance.initialize();

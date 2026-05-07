@@ -10,6 +10,7 @@ import '../../../../core/services/agora_service.dart';
 import '../../../../core/services/connectivity_service.dart';
 import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/services/radio_foreground_service.dart';
+import '../../../../core/services/radio_power_service.dart';
 import '../../../../core/services/overlay_ptt_service.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../auth/data/models/user_model.dart';
@@ -39,6 +40,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   final _connectivity = ConnectivityService.instance;
   final _overlayService = OverlayPttService.instance;
   final _locationService = DriverLocationService.instance;
+  final _radioPower = RadioPowerService.instance;
 
   /// true cuando no hay internet O el conductor está en modo Desconectado
   bool _isOffline = false;
@@ -62,18 +64,24 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
-    // Inicializar servicio de radio en segundo plano
+    // Inicializar configuración del foreground task (sólo registro,
+    // no arranca el servicio).
     _radioService.init();
-    // Inicializar Agora RTC Engine (audio tiempo real)
-    _agoraService.initialize().catchError((e) {
-      debugPrint('Error inicializando Agora: $e');
-    });
+    // Si el radio quedó ON de la sesión anterior, inicializar Agora.
+    // Si quedó OFF, NO se inicializa nada — el mic queda libre para otras apps.
+    if (_radioPower.isOn) {
+      _agoraService.initialize().catchError((e) {
+        debugPrint('Error inicializando Agora: $e');
+      });
+    }
     // Monitorear conectividad
     _isOffline = !_connectivity.isConnected || !_locationService.isOnline;
     _isDriverOffline = !_locationService.isOnline;
     _connectivity.addListener(_onConnectivityChanged);
     _locationService.addListener(_onDriverLocationChanged);
-    // Iniciar la observación de canales
+    _radioPower.addListener(_onRadioPowerChanged);
+    // Iniciar la observación de canales (siempre — para mostrar la lista
+    // aunque el radio esté apagado).
     context.read<CommunicationBloc>().add(ChannelsWatchStarted());
   }
 
@@ -82,6 +90,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     WidgetsBinding.instance.removeObserver(this);
     _connectivity.removeListener(_onConnectivityChanged);
     _locationService.removeListener(_onDriverLocationChanged);
+    _radioPower.removeListener(_onRadioPowerChanged);
     _recordingTimer?.cancel();
     _durationTimer?.cancel();
     // Destruir engine completamente al salir de la página del radio
@@ -127,8 +136,13 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       debugPrint('📱 WalkieTalkie: App en background → engine destruido por global observer');
     } else if (state == AppLifecycleState.resumed) {
       // Al volver de background, re-inicializar engine y reconectar
-      _reconnectAfterResume();
-      debugPrint('📱 WalkieTalkie: App resumed → reconectando Agora');
+      // sólo si el radio está encendido.
+      if (_radioPower.isOn) {
+        _reconnectAfterResume();
+        debugPrint('📱 WalkieTalkie: App resumed → reconectando Agora');
+      } else {
+        debugPrint('📱 WalkieTalkie: App resumed → radio OFF, no reconectar');
+      }
       if (mounted) setState(() {});
     }
   }
@@ -136,22 +150,24 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// Reconecta Agora después de que la app vuelve de background.
   /// El engine fue destruido al ir a background, así que debe
   /// re-inicializarse y reconectar al canal activo.
+  /// Sólo si el radio está ON — si está OFF no reconectamos nada.
   Future<void> _reconnectAfterResume() async {
+    if (!_radioPower.isOn) return;
+    // Capturar canal ANTES del primer await para evitar usar context tras gap
+    String? channelToRejoin;
+    if (mounted) {
+      final commState = context.read<CommunicationBloc>().state;
+      if (commState is CommunicationLoaded &&
+          commState.activeChannelId != null) {
+        channelToRejoin = commState.activeChannelId;
+      }
+    }
     try {
       // Re-inicializar engine (fue destruido en background)
       await _agoraService.initialize();
 
-      // Reconectar al canal activo
-      final commState = context.read<CommunicationBloc>().state;
-      String? channelToRejoin;
-
-      if (commState is CommunicationLoaded &&
-          commState.activeChannelId != null) {
-        channelToRejoin = commState.activeChannelId;
-      } else {
-        // Intentar usar el canal guardado antes de destroy
-        channelToRejoin = _agoraService.lastChannelBeforeDestroy;
-      }
+      // Si el bloc no tenía canal, usar el guardado antes de destroy
+      channelToRejoin ??= _agoraService.lastChannelBeforeDestroy;
 
       if (channelToRejoin != null) {
         _lastAgoraChannelId = channelToRejoin;
@@ -185,7 +201,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       _lastAgoraChannelId = null;
     } else if (!_isOffline && wasOffline) {
       // ── Conexión restaurada ──
-      // Reconectar Agora al canal activo
+      // Reconectar Agora al canal activo SOLO si el radio está ON.
+      if (!_radioPower.isOn) return;
       final currentState = context.read<CommunicationBloc>().state;
       if (currentState is CommunicationLoaded &&
           currentState.activeChannelId != null) {
@@ -197,6 +214,56 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         });
       }
     }
+  }
+
+  /// Reacciona al toggle ON/OFF del walkie-talkie.
+  ///
+  /// - ON  → inicializa Agora, se une al canal activo (si hay), arranca el
+  ///         foreground service.
+  /// - OFF → libera mic 100%: destruye engine Agora, sale del canal, detiene
+  ///         el foreground service. El SO ya no marca la app como "usando mic".
+  Future<void> _onRadioPowerChanged() async {
+    if (!mounted) return;
+    if (_radioPower.isOn) {
+      // ── ENCENDER ──
+      // Capturar canal ANTES del primer await para evitar usar context tras gap
+      String? channelToJoin;
+      String? channelName;
+      final commState = context.read<CommunicationBloc>().state;
+      if (commState is CommunicationLoaded &&
+          commState.activeChannelId != null &&
+          !_isOffline) {
+        channelToJoin = commState.activeChannelId;
+        channelName = commState.activeChannel?.name;
+      }
+      try {
+        await _agoraService.initialize();
+        if (channelToJoin != null) {
+          _lastAgoraChannelId = channelToJoin;
+          await _agoraService.joinChannel(channelToJoin);
+          if (channelName != null && !_radioService.isRunning) {
+            await _radioService.startService(channelName);
+          }
+        }
+      } catch (e) {
+        debugPrint('Error encendiendo radio: $e');
+      }
+    } else {
+      // ── APAGAR ──
+      // Si está grabando PTT, detenerlo (lectura de bloc antes de awaits)
+      if (_isRecording) {
+        final currentState = context.read<CommunicationBloc>().state;
+        if (currentState is CommunicationLoaded) {
+          _stopPtt(currentState);
+        }
+      }
+      // Salir de Agora y destruir engine — libera mic hardware
+      await _agoraService.destroyEngine();
+      _lastAgoraChannelId = null;
+      // Detener foreground service — libera el "tag" de microphone del SO
+      await _radioService.stopService();
+    }
+    if (mounted) setState(() {});
   }
 
   /// Reacciona a cambios del estado online/offline del conductor
@@ -222,6 +289,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       _lastAgoraChannelId = null;
     } else if (!_isOffline && wasOffline) {
       // ── Conductor volvió a estar online ──
+      // Reconectar Agora SOLO si el radio está ON.
+      if (!_radioPower.isOn) return;
       debugPrint('📻 WalkieTalkie: Conductor ONLINE → reconectando Agora');
       final currentState = context.read<CommunicationBloc>().state;
       if (currentState is CommunicationLoaded &&
@@ -260,7 +329,10 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           );
         }
         // === Foreground service: mantener radio en segundo plano ===
-        if (state is CommunicationLoaded) {
+        // Sólo si el radio está ENCENDIDO. Si está OFF, NO conectamos a
+        // Agora ni arrancamos el foreground service "microphone" — eso es
+        // lo que hacía que otras apps vieran el mic ocupado.
+        if (state is CommunicationLoaded && _radioPower.isOn) {
           final channelName = state.activeChannel?.name;
           final channelId = state.activeChannelId;
 
@@ -319,13 +391,94 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           children: [
             // Banner de sin conexión dentro del walkie-talkie
             if (_isOffline) _buildOfflineBanner(),
+            _buildPowerToggle(state),
             _buildChannelSelector(state),
-            if (state.isPttLocked) _buildSpeakerBanner(state),
+            if (state.isPttLocked && _radioPower.isOn) _buildSpeakerBanner(state),
             Expanded(child: _buildMessageList(state)),
             _buildAudioControls(state),
           ],
         );
       },
+    );
+  }
+
+  /// Toggle ON/OFF prominente del walkie-talkie.
+  ///
+  /// Cuando OFF: el mic queda libre para otras apps (Zello, WhatsApp, etc.).
+  /// Cuando ON: la app se conecta al canal seleccionado y empieza a escuchar.
+  Widget _buildPowerToggle(CommunicationLoaded state) {
+    final isOn = _radioPower.isOn;
+    final hasChannel = state.activeChannelId != null;
+    final channelName = state.activeChannel?.name;
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      decoration: BoxDecoration(
+        color: isOn
+            ? AppTheme.primaryColor.withValues(alpha: 0.08)
+            : Colors.grey.shade100,
+        border: Border(
+          bottom: BorderSide(
+            color: isOn
+                ? AppTheme.primaryColor.withValues(alpha: 0.3)
+                : Colors.grey.shade300,
+            width: 1,
+          ),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            isOn ? Icons.radio : Icons.power_settings_new,
+            color: isOn ? AppTheme.primaryColor : Colors.grey.shade500,
+            size: 28,
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  isOn ? 'Radio encendido' : 'Radio apagado',
+                  style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 15,
+                    color: isOn ? AppTheme.primaryColor : Colors.grey.shade700,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  isOn
+                      ? (hasChannel
+                          ? 'Conectado a: ${channelName ?? "..."}'
+                          : 'Selecciona un canal abajo')
+                      : 'Micrófono libre — otras apps pueden usarlo',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey.shade600,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          Switch.adaptive(
+            value: isOn,
+            activeThumbColor: AppTheme.primaryColor,
+            onChanged: _isOffline && !isOn
+                ? null
+                : (v) async {
+                    HapticFeedback.selectionClick();
+                    if (v) {
+                      await _radioPower.turnOn();
+                    } else {
+                      await _radioPower.turnOff();
+                    }
+                  },
+          ),
+        ],
+      ),
     );
   }
 
@@ -592,10 +745,15 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   Widget _buildAudioControls(CommunicationLoaded state) {
     final user = _currentUser;
     final hasChannel = state.activeChannelId != null;
+    final isOn = _radioPower.isOn;
     final isLockedByOther = state.isPttLocked &&
         state.pttSpeakerId != user?.uid;
-    // Bloquear PTT completamente si no hay internet o overlay activo
-    final canPtt = hasChannel && !isLockedByOther && !_isOffline && !_overlayService.isActive;
+    // Bloquear PTT completamente si no hay internet, overlay activo, o radio OFF
+    final canPtt = isOn &&
+        hasChannel &&
+        !isLockedByOther &&
+        !_isOffline &&
+        !_overlayService.isActive;
 
     return Container(
       padding: const EdgeInsets.all(16),
@@ -622,9 +780,11 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           Listener(
             onPointerDown: canPtt
                 ? (_) => _startPtt(state)
-                : _isOffline
-                    ? (_) => _showOfflineWarning()
-                    : null,
+                : !isOn
+                    ? (_) => _showRadioOffWarning()
+                    : _isOffline
+                        ? (_) => _showOfflineWarning()
+                        : null,
             onPointerUp: hasChannel
                 ? (_) => _stopPttSafe(state)
                 : null,
@@ -640,15 +800,17 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                 gradient: LinearGradient(
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
-                  colors: !hasChannel || _isOffline
-                      ? [Colors.grey[400]!, Colors.grey[500]!]
-                      : _overlayService.isActive
-                          ? [Colors.teal[600]!, Colors.teal[700]!]
-                          : isLockedByOther
-                              ? [Colors.grey[600]!, Colors.grey[700]!]
-                              : _isRecording
-                                  ? [AppTheme.errorColor, AppTheme.errorColor.withValues(alpha: 0.8)]
-                                  : [AppTheme.primaryColor, AppTheme.primaryColor.withValues(alpha: 0.85)],
+                  colors: !isOn
+                      ? [Colors.grey[300]!, Colors.grey[400]!]
+                      : !hasChannel || _isOffline
+                          ? [Colors.grey[400]!, Colors.grey[500]!]
+                          : _overlayService.isActive
+                              ? [Colors.teal[600]!, Colors.teal[700]!]
+                              : isLockedByOther
+                                  ? [Colors.grey[600]!, Colors.grey[700]!]
+                                  : _isRecording
+                                      ? [AppTheme.errorColor, AppTheme.errorColor.withValues(alpha: 0.8)]
+                                      : [AppTheme.primaryColor, AppTheme.primaryColor.withValues(alpha: 0.85)],
                 ),
                 boxShadow: [
                   BoxShadow(
@@ -665,22 +827,29 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   Icon(
-                    _isOffline
-                        ? Icons.wifi_off_rounded
-                        : _overlayService.isActive
-                        ? Icons.surround_sound
-                        : isLockedByOther
-                        ? Icons.lock
-                        : _isRecording
-                            ? Icons.mic
-                            : Icons.mic_none,
-                    color: isLockedByOther
-                        ? Colors.white54
+                    !isOn
+                        ? Icons.power_settings_new
+                        : _isOffline
+                            ? Icons.wifi_off_rounded
+                            : _overlayService.isActive
+                                ? Icons.surround_sound
+                                : isLockedByOther
+                                    ? Icons.lock
+                                    : _isRecording
+                                        ? Icons.mic
+                                        : Icons.mic_none,
+                    color: !isOn || isLockedByOther
+                        ? Colors.white70
                         : Colors.white,
                     size: _isRecording ? 52 : 44,
                   ),
                   const SizedBox(height: 4),
-                  if (_overlayService.isActive)
+                  if (!isOn)
+                    const Text(
+                      'Apagado',
+                      style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w500),
+                    )
+                  else if (_overlayService.isActive)
                     const Text(
                       'PTT Flotante',
                       style: TextStyle(color: Colors.white, fontSize: 11, fontWeight: FontWeight.w500),
@@ -844,6 +1013,24 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       );
       setState(() {});
     }
+  }
+
+  /// Muestra aviso cuando se intenta PTT con el radio apagado.
+  void _showRadioOffWarning() {
+    if (!mounted) return;
+    HapticFeedback.lightImpact();
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: const Text('Enciende el radio con el interruptor de arriba'),
+        backgroundColor: Colors.orange.shade700,
+        duration: const Duration(seconds: 2),
+        action: SnackBarAction(
+          label: 'Encender',
+          textColor: Colors.white,
+          onPressed: () => _radioPower.turnOn(),
+        ),
+      ),
+    );
   }
 
   /// Muestra aviso cuando se intenta PTT sin internet o en modo desconectado.
