@@ -23,6 +23,7 @@ import '../../features/super_admin/presentation/pages/super_admin_page.dart';
 import '../../features/admin/presentation/pages/members_page.dart';
 import '../../features/admin/presentation/pages/billing_config_page.dart';
 import '../../features/admin/presentation/pages/cashflow_page.dart';
+import '../../features/admin/presentation/pages/notifications_page.dart';
 import '../../features/payments/presentation/pages/my_payments_page.dart';
 import '../../features/payments/presentation/pages/payment_approvals_page.dart';
 
@@ -178,6 +179,11 @@ class AppRouter {
           path: '/cashflow',
           name: 'cashflow',
           builder: (context, state) => const CashflowPage(),
+        ),
+        GoRoute(
+          path: '/notifications',
+          name: 'notifications',
+          builder: (context, state) => const NotificationsPage(),
         ),
         GoRoute(
           path: '/payment-approvals',

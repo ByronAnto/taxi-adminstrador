@@ -339,6 +339,12 @@ class _HomePageState extends State<HomePage> {
           () => context.push('/cashflow'),
         ),
         _buildQuickAction(
+          'Avisos',
+          Icons.campaign,
+          Colors.indigo,
+          () => context.push('/notifications'),
+        ),
+        _buildQuickAction(
           'Config. Cobros',
           Icons.tune,
           AppTheme.primaryDark,
