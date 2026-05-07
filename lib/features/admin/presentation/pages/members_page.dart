@@ -422,13 +422,29 @@ class _MembersPageState extends State<MembersPage> {
       ));
     }
 
-    if (u.status == UserStatus.suspended) {
+    // Reactivar cubre: suspended (legacy), paymentBlocked (mora) y
+    // disabledByAdmin (admin lo desactivó). Vuelve el status a 'active'.
+    if (u.status == UserStatus.suspended ||
+        u.status == UserStatus.paymentBlocked ||
+        u.status == UserStatus.disabledByAdmin ||
+        u.status == UserStatus.paymentPending) {
       items.add(const PopupMenuItem(
         value: 'reactivate',
         child: Row(children: [
-          Icon(Icons.refresh, size: 18),
+          Icon(Icons.refresh, size: 18, color: Colors.green),
           SizedBox(width: 8),
-          Text('Reactivar'),
+          Text('Activar / Reactivar'),
+        ]),
+      ));
+    }
+
+    if (u.status == UserStatus.rejected) {
+      items.add(const PopupMenuItem(
+        value: 'approve',
+        child: Row(children: [
+          Icon(Icons.check_circle, size: 18, color: Colors.green),
+          SizedBox(width: 8),
+          Text('Re-aprobar'),
         ]),
       ));
     }

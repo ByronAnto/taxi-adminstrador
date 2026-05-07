@@ -93,6 +93,20 @@ class _StandQueueBarState extends State<StandQueueBar> {
                     ),
                   ),
                   if (isDriver) _DriverQueueButton(queue: queue),
+                  if (isOperator)
+                    TextButton.icon(
+                      onPressed: () => _showOperatorAddToQueue(context, aid),
+                      icon: const Icon(Icons.add, size: 16),
+                      label: const Text('Agregar',
+                          style: TextStyle(
+                              fontSize: 11, fontWeight: FontWeight.w700)),
+                      style: TextButton.styleFrom(
+                        foregroundColor: AppTheme.primaryColor,
+                        padding:
+                            const EdgeInsets.symmetric(horizontal: 8),
+                        minimumSize: const Size(0, 28),
+                      ),
+                    ),
                 ],
               ),
               const SizedBox(height: 6),
@@ -131,6 +145,179 @@ class _StandQueueBarState extends State<StandQueueBar> {
                           );
                         },
                       ),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// Modal para que la operadora agregue MANUALMENTE una unidad a la cola.
+  /// Útil cuando el conductor está online pero no tap "Entrar a parada"
+  /// en su propia app.
+  Future<void> _showOperatorAddToQueue(
+      BuildContext context, String aid) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (_) {
+        return Container(
+          decoration: const BoxDecoration(
+            color: Colors.white,
+            borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+          ),
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 12),
+                  decoration: BoxDecoration(
+                    color: Colors.grey.shade300,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              Row(
+                children: [
+                  Icon(Icons.local_taxi, color: AppTheme.primaryColor),
+                  const SizedBox(width: 8),
+                  const Text(
+                    'Agregar unidad a la cola',
+                    style: TextStyle(
+                        fontSize: 18, fontWeight: FontWeight.w700),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Text(
+                'Toca el número de unidad para ponerla al final de la cola.',
+                style:
+                    TextStyle(fontSize: 13, color: Colors.grey.shade700),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                height: 280,
+                child: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+                  stream: FirebaseFirestore.instance
+                      .collection(AppConstants.driversCollection)
+                      .where('associationId', isEqualTo: aid)
+                      .where('status', whereNotIn: [
+                    AppConstants.statusOffline
+                  ]).snapshots(),
+                  builder: (context, snap) {
+                    if (snap.connectionState == ConnectionState.waiting) {
+                      return const Center(
+                          child: CircularProgressIndicator());
+                    }
+                    final docs = snap.data?.docs ?? [];
+                    if (docs.isEmpty) {
+                      return Container(
+                        padding: const EdgeInsets.all(16),
+                        decoration: BoxDecoration(
+                          color: Colors.orange.shade50,
+                          borderRadius: BorderRadius.circular(10),
+                        ),
+                        child: Row(
+                          children: [
+                            Icon(Icons.info_outline,
+                                color: Colors.orange.shade800),
+                            const SizedBox(width: 12),
+                            const Expanded(
+                              child: Text(
+                                'No hay unidades online. Pídele al conductor que active su radio y entre.',
+                                style: TextStyle(fontSize: 13),
+                              ),
+                            ),
+                          ],
+                        ),
+                      );
+                    }
+                    // Filtrar las que ya están en cola (no las mostramos otra vez).
+                    final notInQueue = docs.where((d) {
+                      return d.data()['inQueueAt'] == null;
+                    }).toList()
+                      ..sort((a, b) {
+                        final na = int.tryParse(
+                                a.data()['vehicleNumber'] ?? '0') ??
+                            0;
+                        final nb = int.tryParse(
+                                b.data()['vehicleNumber'] ?? '0') ??
+                            0;
+                        return na.compareTo(nb);
+                      });
+                    if (notInQueue.isEmpty) {
+                      return const Center(
+                        child: Text('Todas las unidades online ya están en la cola.'),
+                      );
+                    }
+                    return GridView.builder(
+                      gridDelegate:
+                          const SliverGridDelegateWithFixedCrossAxisCount(
+                        crossAxisCount: 4,
+                        crossAxisSpacing: 8,
+                        mainAxisSpacing: 8,
+                        childAspectRatio: 1,
+                      ),
+                      itemCount: notInQueue.length,
+                      itemBuilder: (_, i) {
+                        final d = notInQueue[i].data();
+                        final num_ =
+                            (d['vehicleNumber'] as String?) ?? '';
+                        final docId = notInQueue[i].id;
+                        return Material(
+                          color: AppTheme.successColor,
+                          borderRadius: BorderRadius.circular(12),
+                          elevation: 2,
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap: () async {
+                              HapticFeedback.lightImpact();
+                              await StandQueueService.instance
+                                  .joinQueue(docId);
+                              if (context.mounted) {
+                                Navigator.of(context).pop();
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  SnackBar(
+                                    content: Text(
+                                        'Unidad #$num_ agregada a la cola'),
+                                    backgroundColor: AppTheme.successColor,
+                                    duration: const Duration(seconds: 2),
+                                  ),
+                                );
+                              }
+                            },
+                            child: Container(
+                              alignment: Alignment.center,
+                              child: Column(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  const Icon(Icons.directions_car,
+                                      color: Colors.white, size: 18),
+                                  const SizedBox(height: 4),
+                                  Text(
+                                    num_.isEmpty ? '?' : '#$num_',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.w800,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    );
+                  },
+                ),
               ),
             ],
           ),
