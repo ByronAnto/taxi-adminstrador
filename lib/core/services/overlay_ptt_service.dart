@@ -85,18 +85,23 @@ class OverlayPttService {
 
   /// Inicia el botón PTT flotante sobre todas las apps.
   /// Conecta Agora al canal de forma persistente (escuchando, mic OFF).
+  ///
+  /// IMPORTANTE: hacemos overlayActivate ANTES de mostrar el botón nativo.
+  /// Si Agora falla al unirse al canal, NO mostramos el botón flotante
+  /// (antes lo dejábamos visible pero inerte → Byron reportó "el botón
+  /// aparece flotante pero al presionar no envía audio").
   Future<bool> start(String channelId) async {
     try {
+      // 1. Conectar Agora al canal PRIMERO. Si falla, abortamos sin mostrar
+      //    el botón flotante en el SO.
       _activeChannelId = channelId;
+      await _agoraService.overlayActivate(channelId);
 
-      // 1. Mostrar botón flotante nativo
+      // 2. Solo si el join channel completó OK, mostramos el botón flotante.
       await _channel.invokeMethod('startOverlay');
       _isActive = true;
       onStateChanged?.call();
-
-      // 2. Conectar Agora al canal (engine + join + mic OFF)
-      await _updateButtonState('connecting');
-      await _agoraService.overlayActivate(channelId);
+      // Inmediatamente verde — ya está conectado al canal.
       await _updateButtonState('idle');
 
       _log('Overlay iniciado + Agora conectado a canal: $channelId');
@@ -105,7 +110,15 @@ class OverlayPttService {
       _log('Error iniciando overlay: $e');
       _isActive = false;
       _activeChannelId = null;
-      try { await _updateButtonState('idle'); } catch (_) {}
+      // Asegurar limpieza: si por alguna razón el botón nativo se mostró
+      // (no debería en este flow), lo cerramos.
+      try {
+        await _channel.invokeMethod('stopOverlay');
+      } catch (_) {}
+      // Engine puede haber quedado a medio inicializar; limpiar.
+      try {
+        await _agoraService.overlayDeactivate();
+      } catch (_) {}
       return false;
     }
   }
@@ -130,30 +143,38 @@ class OverlayPttService {
 
   /// Maneja el evento de botón presionado (desde overlay nativo).
   /// Canal Persistente: solo enciende el mic → instantáneo (0ms).
+  ///
+  /// Auto-recuperación: si el canal se perdió (engine destruido por Doze
+  /// mode, FlutterEngine suspendido, etc.) intentamos recuperar el canal
+  /// usando `lastChannelBeforeDestroy` antes de fallar.
   Future<void> _handlePttDown() async {
-    if (_activeChannelId == null) {
-      _log('Sin canal activo, ignorando PTT');
+    var channelId = _activeChannelId;
+    // Recuperación si perdimos referencia al canal (kill background, etc).
+    channelId ??= _agoraService.lastChannelBeforeDestroy;
+    if (channelId == null || channelId.isEmpty) {
+      _log('Sin canal activo NI último canal recuperable, abortando PTT');
       await _updateButtonState('error');
+      Future.delayed(const Duration(milliseconds: 1500), () async {
+        await _updateButtonState('idle');
+      });
       return;
     }
+    _activeChannelId = channelId;
 
     _isPttActive = true;
-    _log('PTT DOWN → unmute mic (instantáneo)');
-    // Feedback inmediato: mientras Agora abre el mic, mostramos amarillo
-    // (connecting). Si el unmute es exitoso pasa a rojo (transmitting).
+    _log('PTT DOWN → unmute mic (canal=$channelId, '
+        'engineInChannel=${_agoraService.isInChannel})');
+    // Feedback inmediato: mientras Agora abre el mic, amarillo (connecting).
     await _updateButtonState('connecting');
 
     try {
-      await _agoraService.quickPttStart(_activeChannelId!);
+      await _agoraService.quickPttStart(channelId);
       await _updateButtonState('transmitting');
-      // Beep tipo Motorola al tomar el mic en el flotante
       PttBeepService.instance.playStart();
-      _log('PTT activo — transmitiendo');
+      _log('✅ PTT activo — transmitiendo');
     } catch (e) {
       _log('❌ Error iniciando PTT: $e');
       _isPttActive = false;
-      // El usuario ve botón rojo de error y entiende que no se transmitió.
-      // En 1.5s vuelve a verde para que pueda reintentar.
       await _updateButtonState('error');
       Future.delayed(const Duration(milliseconds: 1500), () async {
         if (!_isPttActive) await _updateButtonState('idle');

@@ -1052,7 +1052,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
 
     // Iniciar overlay (conecta Agora al canal automáticamente)
     final started = await _overlayService.start(state.activeChannelId!);
-    if (started && mounted) {
+    if (!mounted) return;
+    if (started) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
@@ -1063,6 +1064,29 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         ),
       );
       setState(() {});
+    } else {
+      // Falló overlayActivate (timeout join channel, sin red, etc.). El
+      // botón nativo NO se mostró (gracias al fix del start). Avisamos al
+      // usuario y volvemos a inicializar Agora en la página principal.
+      try {
+        await _agoraService.initialize();
+        if (state.activeChannelId != null) {
+          _lastAgoraChannelId = state.activeChannelId;
+          await _agoraService.joinChannel(state.activeChannelId!);
+        }
+      } catch (_) {}
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: const Text(
+              'No se pudo activar PTT flotante. Verifica internet y vuelve a intentar.',
+            ),
+            backgroundColor: AppTheme.errorColor,
+            duration: const Duration(seconds: 4),
+          ),
+        );
+        setState(() {});
+      }
     }
   }
 
