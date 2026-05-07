@@ -31,6 +31,12 @@ class _TripsPageState extends State<TripsPage>
     // Dispatch watch event to load trips from Firebase
     context.read<TripBloc>().add(TripsWatchStarted());
     context.read<TripBloc>().add(TripHistoryLoadRequested());
+    // Cargar estadísticas del conductor (si lo es) para la pestaña Stats.
+    final auth = context.read<AuthBloc>().state;
+    if (auth is AuthAuthenticated &&
+        auth.user.role == AppConstants.roleDriver) {
+      context.read<TripBloc>().add(TripStatsLoadRequested(auth.user.uid));
+    }
   }
 
   @override
