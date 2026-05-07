@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
+import 'package:go_router/go_router.dart';
 import '../../../../core/services/excel_export_service.dart';
 import '../../../../core/services/pdf_export_service.dart';
 import '../../../../core/theme/app_theme.dart';
@@ -74,6 +75,11 @@ class _CashflowPageState extends State<CashflowPage>
       appBar: AppBar(
         title: const Text('Caja'),
         actions: [
+          IconButton(
+            tooltip: 'Categorías',
+            icon: const Icon(Icons.category_outlined),
+            onPressed: () => context.push('/cashflow-categories'),
+          ),
           IconButton(
             tooltip: 'Exportar Excel',
             icon: const Icon(Icons.table_chart),
@@ -262,32 +268,105 @@ class _CashflowPageState extends State<CashflowPage>
         final m = movs[i];
         final color =
             m.isIngreso ? Colors.green.shade700 : Colors.red.shade700;
-        return Card(
-          child: ListTile(
-            leading: Icon(
-              m.isIngreso ? Icons.add_circle : Icons.remove_circle,
-              color: color,
-            ),
-            title: Text(m.categoria),
-            subtitle: Text(
-              [
-                if (m.descripcion != null && m.descripcion!.isNotEmpty)
-                  m.descripcion,
-                if (m.beneficiario != null && m.beneficiario!.isNotEmpty)
-                  '→ ${m.beneficiario}',
-                DateFormat('dd MMM yyyy').format(m.fecha),
-              ].whereType<String>().join(' · '),
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-            ),
-            trailing: Text(
-              '${m.isIngreso ? '+' : '-'}${fmt.format(m.monto)}',
-              style: TextStyle(
-                  color: color, fontWeight: FontWeight.w800, fontSize: 15),
+        return Dismissible(
+          key: ValueKey(m.uid),
+          direction: DismissDirection.endToStart,
+          background: Container(
+            alignment: Alignment.centerRight,
+            padding: const EdgeInsets.only(right: 24),
+            color: Colors.red.shade700,
+            child: const Icon(Icons.delete, color: Colors.white),
+          ),
+          confirmDismiss: (_) => _confirmDelete(m),
+          onDismissed: (_) => _deleteMovement(m),
+          child: Card(
+            child: ListTile(
+              leading: Icon(
+                m.isIngreso ? Icons.add_circle : Icons.remove_circle,
+                color: color,
+              ),
+              title: Text(m.categoria),
+              subtitle: Text(
+                [
+                  if (m.descripcion != null && m.descripcion!.isNotEmpty)
+                    m.descripcion,
+                  if (m.beneficiario != null && m.beneficiario!.isNotEmpty)
+                    '→ ${m.beneficiario}',
+                  DateFormat('dd MMM yyyy').format(m.fecha),
+                ].whereType<String>().join(' · '),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+              ),
+              trailing: Text(
+                '${m.isIngreso ? '+' : '-'}${fmt.format(m.monto)}',
+                style: TextStyle(
+                    color: color,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 15),
+              ),
+              onTap: () => _editMovement(m),
             ),
           ),
         );
       },
+    );
+  }
+
+  Future<bool?> _confirmDelete(CashflowMovement m) async {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Borrar movimiento'),
+        content: Text(
+            '¿Seguro que quieres borrar este ${m.isIngreso ? "ingreso" : "egreso"} de ${m.categoria} por \$${m.monto.toStringAsFixed(2)}?'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.errorColor),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Borrar'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _deleteMovement(CashflowMovement m) async {
+    try {
+      await FirebaseFirestore.instance
+          .collection('cashflow')
+          .doc(m.uid)
+          .delete();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Movimiento borrado')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: AppTheme.errorColor,
+          ),
+        );
+      }
+    }
+  }
+
+  void _editMovement(CashflowMovement m) {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (_) => _AddMovementForm(
+        associationId: m.associationId,
+        createdBy: m.createdBy,
+        existing: m,
+      ),
     );
   }
 
@@ -435,8 +514,15 @@ class _CashflowPageState extends State<CashflowPage>
 class _AddMovementForm extends StatefulWidget {
   final String associationId;
   final String createdBy;
-  const _AddMovementForm(
-      {required this.associationId, required this.createdBy});
+
+  /// Si se pasa un movimiento existente, el form entra en modo edición.
+  final CashflowMovement? existing;
+
+  const _AddMovementForm({
+    required this.associationId,
+    required this.createdBy,
+    this.existing,
+  });
 
   @override
   State<_AddMovementForm> createState() => _AddMovementFormState();
@@ -444,14 +530,28 @@ class _AddMovementForm extends StatefulWidget {
 
 class _AddMovementFormState extends State<_AddMovementForm> {
   final _form = GlobalKey<FormState>();
-  CashflowType _tipo = CashflowType.ingreso;
+  late CashflowType _tipo;
   String? _categoria;
-  final _monto = TextEditingController();
-  final _beneficiario = TextEditingController();
-  final _descripcion = TextEditingController();
+  late final TextEditingController _monto;
+  late final TextEditingController _beneficiario;
+  late final TextEditingController _descripcion;
   String? _metodo;
-  DateTime _fecha = DateTime.now();
+  late DateTime _fecha;
   bool _saving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final ex = widget.existing;
+    _tipo = ex?.tipo ?? CashflowType.ingreso;
+    _categoria = ex?.categoria;
+    _monto = TextEditingController(
+        text: ex == null ? '' : ex.monto.toStringAsFixed(2));
+    _beneficiario = TextEditingController(text: ex?.beneficiario ?? '');
+    _descripcion = TextEditingController(text: ex?.descripcion ?? '');
+    _metodo = ex?.metodoPago;
+    _fecha = ex?.fecha ?? DateTime.now();
+  }
 
   @override
   void dispose() {
@@ -465,8 +565,10 @@ class _AddMovementFormState extends State<_AddMovementForm> {
     if (!_form.currentState!.validate()) return;
     if (_categoria == null) return;
     setState(() => _saving = true);
+    final ex = widget.existing;
+    final isEditing = ex != null;
     final mov = CashflowMovement(
-      uid: const Uuid().v4(),
+      uid: ex?.uid ?? const Uuid().v4(),
       associationId: widget.associationId,
       tipo: _tipo,
       categoria: _categoria!,
@@ -480,7 +582,8 @@ class _AddMovementFormState extends State<_AddMovementForm> {
           ? null
           : _descripcion.text.trim(),
       createdBy: widget.createdBy,
-      createdAt: DateTime.now(),
+      createdAt: ex?.createdAt ?? DateTime.now(),
+      updatedAt: DateTime.now(),
     );
     try {
       await FirebaseFirestore.instance
@@ -491,9 +594,11 @@ class _AddMovementFormState extends State<_AddMovementForm> {
         Navigator.of(context).pop();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text(_tipo == CashflowType.ingreso
-                ? 'Ingreso registrado'
-                : 'Egreso registrado'),
+            content: Text(isEditing
+                ? 'Movimiento actualizado'
+                : (_tipo == CashflowType.ingreso
+                    ? 'Ingreso registrado'
+                    : 'Egreso registrado')),
             backgroundColor: AppTheme.successColor,
           ),
         );
@@ -510,9 +615,52 @@ class _AddMovementFormState extends State<_AddMovementForm> {
 
   @override
   Widget build(BuildContext context) {
-    final cats = _tipo == CashflowType.ingreso
-        ? DefaultCashflowCategories.ingresos
-        : DefaultCashflowCategories.egresos;
+    return FutureBuilder<({List<String> ingresos, List<String> egresos})>(
+      future: _loadCategories(widget.associationId),
+      builder: (context, snap) {
+        final cats = (_tipo == CashflowType.ingreso
+                ? snap.data?.ingresos
+                : snap.data?.egresos) ??
+            (_tipo == CashflowType.ingreso
+                ? DefaultCashflowCategories.ingresos
+                : DefaultCashflowCategories.egresos);
+        // El categoría seleccionada puede no estar en la lista (cuando el
+        // admin la borró pero el doc aún la usa); la mantenemos visible.
+        final items = {..._categoria == null ? <String>{} : {_categoria!}, ...cats}
+            .toList();
+        return _buildBody(items);
+      },
+    );
+  }
+
+  Future<({List<String> ingresos, List<String> egresos})> _loadCategories(
+      String aid) async {
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('associations')
+          .doc(aid)
+          .get();
+      final cf = doc.data()?['cashflowCategories'] as Map<String, dynamic>?;
+      if (cf == null) {
+        return (
+          ingresos: DefaultCashflowCategories.ingresos,
+          egresos: DefaultCashflowCategories.egresos,
+        );
+      }
+      final ing = (cf['ingresos'] as List?)?.cast<String>() ??
+          DefaultCashflowCategories.ingresos;
+      final egr = (cf['egresos'] as List?)?.cast<String>() ??
+          DefaultCashflowCategories.egresos;
+      return (ingresos: ing, egresos: egr);
+    } catch (_) {
+      return (
+        ingresos: DefaultCashflowCategories.ingresos,
+        egresos: DefaultCashflowCategories.egresos,
+      );
+    }
+  }
+
+  Widget _buildBody(List<String> cats) {
 
     return Padding(
       padding: EdgeInsets.only(
@@ -529,9 +677,11 @@ class _AddMovementFormState extends State<_AddMovementForm> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Text(
-                _tipo == CashflowType.ingreso
-                    ? 'Nuevo ingreso'
-                    : 'Nuevo egreso',
+                widget.existing != null
+                    ? 'Editar movimiento'
+                    : (_tipo == CashflowType.ingreso
+                        ? 'Nuevo ingreso'
+                        : 'Nuevo egreso'),
                 style: const TextStyle(
                     fontSize: 18, fontWeight: FontWeight.w700),
               ),

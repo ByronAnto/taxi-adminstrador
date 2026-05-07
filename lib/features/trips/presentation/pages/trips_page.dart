@@ -1,3 +1,4 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -581,8 +582,211 @@ class _TripsPageState extends State<TripsPage>
                 _detailRow(Icons.straighten, 'Distancia', '${trip.distanceKm!.toStringAsFixed(1)} km'),
               if (trip.notes != null && trip.notes!.isNotEmpty)
                 _detailRow(Icons.note, 'Notas', trip.notes!),
+              const SizedBox(height: 16),
+              const Divider(),
+              const SizedBox(height: 8),
+              _buildTripActions(trip, ctx),
             ],
           ),
+        ),
+      ),
+    );
+  }
+
+  /// Acciones disponibles en la hoja de detalle del viaje según rol y estado.
+  Widget _buildTripActions(TripModel trip, BuildContext sheetCtx) {
+    final auth = context.read<AuthBloc>().state;
+    if (auth is! AuthAuthenticated) return const SizedBox.shrink();
+    final user = auth.user;
+    final isDriverOwner = trip.driverId == user.uid;
+    final isOperatorOrAdmin = user.role == AppConstants.roleAdmin ||
+        user.role == AppConstants.roleOperator;
+    final canEdit =
+        isDriverOwner || isOperatorOrAdmin; // ambos pueden editar info
+    final canCancel = isOperatorOrAdmin && !trip.isFinished &&
+        trip.status != TripStatus.cancelado;
+    final canDelete = user.role == AppConstants.roleAdmin;
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: [
+        if (canEdit)
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.of(sheetCtx).pop();
+              _showEditTripDialog(trip);
+            },
+            icon: const Icon(Icons.edit, size: 18),
+            label: const Text('Editar'),
+          ),
+        if (canCancel)
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.of(sheetCtx).pop();
+              _cancelTrip(trip);
+            },
+            icon: const Icon(Icons.cancel_outlined, size: 18),
+            label: const Text('Cancelar viaje'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.orange.shade800,
+              side: BorderSide(color: Colors.orange.shade800),
+            ),
+          ),
+        if (canDelete)
+          OutlinedButton.icon(
+            onPressed: () => _deleteTrip(trip, sheetCtx),
+            icon: const Icon(Icons.delete, size: 18),
+            label: const Text('Borrar'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppTheme.errorColor,
+              side: const BorderSide(color: AppTheme.errorColor),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Future<void> _deleteTrip(TripModel trip, BuildContext sheetCtx) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Borrar viaje'),
+        content: const Text('¿Seguro? Esta acción es permanente.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.errorColor),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Borrar'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (sheetCtx.mounted) Navigator.of(sheetCtx).pop();
+    try {
+      await FirebaseFirestore.instance
+          .collection('trips')
+          .doc(trip.uid)
+          .delete();
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Viaje borrado')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Error: $e')));
+    }
+  }
+
+  void _showEditTripDialog(TripModel trip) {
+    final fareCtrl = TextEditingController(
+        text: trip.fare == null ? '' : trip.fare!.toStringAsFixed(2));
+    final destCtrl = TextEditingController(text: trip.dropoffAddress ?? '');
+    final notesCtrl = TextEditingController(text: trip.notes ?? '');
+    String method = trip.paymentMethod;
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: const Text('Editar viaje'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                TextField(
+                  controller: fareCtrl,
+                  keyboardType:
+                      const TextInputType.numberWithOptions(decimal: true),
+                  decoration: const InputDecoration(
+                    labelText: 'Monto',
+                    prefixText: '\$ ',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: destCtrl,
+                  decoration: const InputDecoration(
+                    labelText: 'Destino',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 12),
+                DropdownButtonFormField<String>(
+                  initialValue: method,
+                  decoration: const InputDecoration(
+                    labelText: 'Método de pago',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                        value: 'efectivo', child: Text('Efectivo')),
+                    DropdownMenuItem(
+                        value: 'digital', child: Text('Digital')),
+                    DropdownMenuItem(
+                        value: 'transferencia', child: Text('Transferencia')),
+                  ],
+                  onChanged: (v) => setLocal(() => method = v ?? 'efectivo'),
+                ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: notesCtrl,
+                  maxLines: 3,
+                  decoration: const InputDecoration(
+                    labelText: 'Notas',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final fare =
+                    double.tryParse(fareCtrl.text.replaceAll(',', '.'));
+                final updates = <String, dynamic>{
+                  'fare': fare,
+                  'dropoffAddress': destCtrl.text.trim().isEmpty
+                      ? null
+                      : destCtrl.text.trim(),
+                  'paymentMethod': method,
+                  'notes': notesCtrl.text.trim().isEmpty
+                      ? null
+                      : notesCtrl.text.trim(),
+                  'updatedAt': FieldValue.serverTimestamp(),
+                };
+                try {
+                  await FirebaseFirestore.instance
+                      .collection('trips')
+                      .doc(trip.uid)
+                      .update(updates);
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  if (!mounted) return;
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Viaje actualizado')),
+                  );
+                } catch (e) {
+                  if (ctx.mounted) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      SnackBar(content: Text('Error: $e')),
+                    );
+                  }
+                }
+              },
+              child: const Text('Guardar'),
+            ),
+          ],
         ),
       ),
     );
