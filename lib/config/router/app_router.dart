@@ -24,6 +24,7 @@ import '../../features/admin/presentation/pages/members_page.dart';
 import '../../features/admin/presentation/pages/billing_config_page.dart';
 import '../../features/admin/presentation/pages/cashflow_page.dart';
 import '../../features/admin/presentation/pages/cashflow_categories_page.dart';
+import '../../features/admin/presentation/pages/payment_concepts_page.dart';
 import '../../features/admin/presentation/pages/theme_settings_page.dart';
 import '../../features/admin/presentation/pages/notifications_page.dart';
 import '../../features/admin/presentation/pages/trip_requests_page.dart';
@@ -192,6 +193,11 @@ class AppRouter {
           path: '/theme-settings',
           name: 'theme-settings',
           builder: (context, state) => const ThemeSettingsPage(),
+        ),
+        GoRoute(
+          path: '/payment-concepts',
+          name: 'payment-concepts',
+          builder: (context, state) => const PaymentConceptsPage(),
         ),
         GoRoute(
           path: '/notifications',

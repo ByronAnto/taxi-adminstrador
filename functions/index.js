@@ -1967,6 +1967,157 @@ exports.purgeOldChatMessagesNow = onCall({}, async (request) => {
 //    backfillAssociationId({ associationId: 'jipijapa' })
 // ───────────────────────────────────────────────────────────────────
 
+// ───────────────────────────────────────────────────────────────────
+//  checkDriverDues — cron diario 00:30 ECU.
+//  Lógica de MEMBRESÍA DEL CONDUCTOR en su grupo (NO la suscripción
+//  del SaaS — eso es checkSubscriptions).
+//
+//  Para cada asociación con billingConfig:
+//   - Calcula el inicio del período actual (today - period).
+//   - Para cada conductor activo:
+//     - Busca `payments` con driverId==X, status==validated, concept==
+//       billingConfig.defaultConcept, paymentDate >= periodStart.
+//     - Si NO existe pago en el período actual:
+//        - Si pasó el dueDate + graceDays (default 3) → paymentBlocked.
+//        - Si está en gracia → paymentPending.
+//     - Si existe → active (desbloquear si estaba bloqueado).
+//
+//  Idempotente. Solo toca conductores. NO toca admins/operadoras (su pago
+//  es al SaaS, lo maneja checkSubscriptions).
+// ───────────────────────────────────────────────────────────────────
+
+const DRIVER_DUES_GRACE_DAYS = 3;
+
+function _periodStartFor(billingConfig, now) {
+  const every = Number(billingConfig?.period?.every) || 1;
+  const unit = billingConfig?.period?.unit || "month";
+  const start = new Date(now);
+  switch (unit) {
+    case "day":
+      start.setDate(start.getDate() - every);
+      break;
+    case "week":
+      start.setDate(start.getDate() - every * 7);
+      break;
+    case "year":
+      start.setFullYear(start.getFullYear() - every);
+      break;
+    case "month":
+    default:
+      start.setMonth(start.getMonth() - every);
+      break;
+  }
+  return start;
+}
+
+async function _runCheckDriverDues() {
+  const now = new Date();
+  const summary = {
+    associationsScanned: 0,
+    driversWarned: 0,
+    driversBlocked: 0,
+    driversReactivated: 0,
+  };
+
+  const associationsSnap = await db.collection("associations").get();
+  for (const aDoc of associationsSnap.docs) {
+    summary.associationsScanned++;
+    const a = aDoc.data();
+    const bc = a.billingConfig;
+    if (!bc || !bc.amount || bc.amount <= 0) {
+      continue; // sin cobro configurado, skip
+    }
+
+    const periodStart = _periodStartFor(bc, now);
+    const concept = bc.defaultConcept || "cuota_mensual";
+
+    // Conductores activos de la asociación.
+    const driversSnap = await db
+      .collection("users")
+      .where("associationId", "==", aDoc.id)
+      .where("role", "==", "conductor")
+      .get();
+
+    for (const uDoc of driversSnap.docs) {
+      const u = uDoc.data();
+      const status = u.status || "active";
+      if (
+        status === "disabledByAdmin" ||
+        status === "pendingApproval" ||
+        status === "rejected"
+      ) {
+        continue;
+      }
+
+      // Buscar pago validado en el período actual.
+      const paySnap = await db
+        .collection("payments")
+        .where("driverId", "==", uDoc.id)
+        .where("associationId", "==", aDoc.id)
+        .where("status", "==", "validated")
+        .where("concept", "==", concept)
+        .where("paymentDate", ">=", periodStart)
+        .limit(1)
+        .get();
+      const hasPaid = !paySnap.empty;
+
+      let nextStatus = status;
+      if (hasPaid) {
+        if (status === "paymentPending" || status === "paymentBlocked") {
+          nextStatus = "active";
+          summary.driversReactivated++;
+        }
+      } else {
+        // No pagó en el período. Determinar gracia.
+        const graceCutoff = new Date(now);
+        graceCutoff.setDate(graceCutoff.getDate() - DRIVER_DUES_GRACE_DAYS);
+        // Asumimos que el dueDate del período actual es ahora-now relativo;
+        // simplificado: si pasó la gracia desde el inicio del período → blocked.
+        if (periodStart < graceCutoff) {
+          if (status !== "paymentBlocked") {
+            nextStatus = "paymentBlocked";
+            summary.driversBlocked++;
+          }
+        } else {
+          if (status === "active") {
+            nextStatus = "paymentPending";
+            summary.driversWarned++;
+          }
+        }
+      }
+
+      if (nextStatus !== status) {
+        await uDoc.ref.update({
+          status: nextStatus,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+    }
+  }
+
+  return summary;
+}
+
+exports.checkDriverDues = onSchedule(
+  {
+    schedule: "30 0 * * *", // 00:30 todos los días
+    timeZone: "America/Guayaquil",
+    timeoutSeconds: 540,
+    memory: "256MiB",
+    retryCount: 2,
+  },
+  async () => {
+    const summary = await _runCheckDriverDues();
+    console.log("checkDriverDues:", JSON.stringify(summary));
+    return summary;
+  },
+);
+
+exports.checkDriverDuesNow = onCall({}, async (request) => {
+  requireSuperAdmin(request);
+  return await _runCheckDriverDues();
+});
+
 exports.backfillAssociationId = onCall(
   { timeoutSeconds: 540 },
   async (request) => {

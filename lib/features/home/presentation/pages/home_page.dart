@@ -363,6 +363,12 @@ class _HomePageState extends State<HomePage> {
           () => context.push('/billing-config'),
         ),
         _buildQuickAction(
+          'Conceptos',
+          Icons.list_alt,
+          Colors.brown,
+          () => context.push('/payment-concepts'),
+        ),
+        _buildQuickAction(
           'Emergencias',
           Icons.sos,
           AppTheme.errorColor,
