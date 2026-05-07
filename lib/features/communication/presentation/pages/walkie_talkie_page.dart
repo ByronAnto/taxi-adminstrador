@@ -1298,6 +1298,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             ChannelMessageSendRequested(
               MessageModel(
                 uid: const Uuid().v4(),
+                associationId: user.associationId,
                 channelId: state.activeChannelId!,
                 senderId: user.uid,
                 senderName: '${user.name} ${user.lastname}',
@@ -1539,6 +1540,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                         ChannelCreateRequested(
                           ChannelModel(
                             uid: const Uuid().v4(),
+                            associationId: user.associationId,
                             name: nameController.text.trim(),
                             type: channelType,
                             createdBy: user.uid,
@@ -1592,6 +1594,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                       ChannelMessageSendRequested(
                         MessageModel(
                           uid: const Uuid().v4(),
+                          associationId: user.associationId,
                           channelId: state.activeChannelId!,
                           senderId: user.uid,
                           senderName: '${user.name} ${user.lastname}',

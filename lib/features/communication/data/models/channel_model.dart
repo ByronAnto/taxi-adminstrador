@@ -3,6 +3,11 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 /// Modelo de canal de comunicación para walkie-talkie
 class ChannelModel {
   final String uid;
+
+  /// Multi-tenant: slug de la asociación dueña del canal. Vacío en docs
+  /// legacy migrados (las reglas asumen 'jipijapa' como fallback).
+  final String associationId;
+
   final String name;
   final String description;
   final String type; // publico, privado
@@ -18,6 +23,7 @@ class ChannelModel {
 
   const ChannelModel({
     required this.uid,
+    this.associationId = '',
     required this.name,
     this.description = '',
     this.type = 'publico',
@@ -46,6 +52,7 @@ class ChannelModel {
     final data = doc.data() as Map<String, dynamic>;
     return ChannelModel(
       uid: doc.id,
+      associationId: data['associationId'] ?? '',
       name: data['name'] ?? '',
       description: data['description'] ?? '',
       type: data['type'] ?? 'publico',
@@ -61,6 +68,7 @@ class ChannelModel {
 
   Map<String, dynamic> toFirestore() {
     return {
+      'associationId': associationId,
       'name': name,
       'description': description,
       'type': type,
@@ -106,6 +114,10 @@ class ChannelModel {
 /// Modelo de mensaje (voz, texto)
 class MessageModel {
   final String uid;
+
+  /// Multi-tenant: slug de la asociación. Las reglas Firestore lo exigen.
+  final String associationId;
+
   final String channelId;
   final String senderId;
   final String senderName;
@@ -117,6 +129,7 @@ class MessageModel {
 
   const MessageModel({
     required this.uid,
+    this.associationId = '',
     required this.channelId,
     required this.senderId,
     required this.senderName,
@@ -131,6 +144,7 @@ class MessageModel {
     final data = doc.data() as Map<String, dynamic>;
     return MessageModel(
       uid: doc.id,
+      associationId: data['associationId'] ?? '',
       channelId: data['channelId'] ?? '',
       senderId: data['senderId'] ?? '',
       senderName: data['senderName'] ?? '',
@@ -144,6 +158,7 @@ class MessageModel {
 
   Map<String, dynamic> toFirestore() {
     return {
+      'associationId': associationId,
       'channelId': channelId,
       'senderId': senderId,
       'senderName': senderName,

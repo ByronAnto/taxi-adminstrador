@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/channel_model.dart';
 import '../../../../core/constants/app_constants.dart';
+import '../../../../core/services/current_user_context.dart';
 
 class CommunicationRemoteDatasource {
   final FirebaseFirestore _firestore;
@@ -17,12 +18,16 @@ class CommunicationRemoteDatasource {
   // ========== CANALES ==========
 
   Stream<List<ChannelModel>> watchChannels() {
-    return _channelsRef
-        .where('isActive', isEqualTo: true)
-        .orderBy('name')
-        .snapshots()
-        .map((snapshot) =>
-            snapshot.docs.map((doc) => ChannelModel.fromFirestore(doc)).toList());
+    // Multi-tenant: filtrar por la asociación del usuario actual.
+    // Sin este filtro, las reglas Firestore rechazan todo el snapshot por
+    // contener docs de otros tenants.
+    final aid = CurrentUserContext.instance.associationId;
+    Query query = _channelsRef.where('isActive', isEqualTo: true);
+    if (aid != null && aid.isNotEmpty) {
+      query = query.where('associationId', isEqualTo: aid);
+    }
+    return query.orderBy('name').snapshots().map((snapshot) =>
+        snapshot.docs.map((doc) => ChannelModel.fromFirestore(doc)).toList());
   }
 
   /// Observar un canal específico en tiempo real (para estado PTT lock)
@@ -39,7 +44,9 @@ class CommunicationRemoteDatasource {
   }
 
   Future<void> createChannel(ChannelModel channel) async {
-    await _channelsRef.add(channel.toFirestore());
+    // Usar set(uid) en vez de add() para que el ID del doc coincida con
+    // el ChannelModel.uid (UUID generado en el cliente).
+    await _channelsRef.doc(channel.uid).set(channel.toFirestore());
   }
 
   Future<void> joinChannel(String channelId, String userId) async {
@@ -118,8 +125,12 @@ class CommunicationRemoteDatasource {
   // ========== MENSAJES DE CANAL ==========
 
   Stream<List<MessageModel>> watchChannelMessages(String channelId) {
-    return _messagesRef
-        .where('channelId', isEqualTo: channelId)
+    final aid = CurrentUserContext.instance.associationId;
+    Query query = _messagesRef.where('channelId', isEqualTo: channelId);
+    if (aid != null && aid.isNotEmpty) {
+      query = query.where('associationId', isEqualTo: aid);
+    }
+    return query
         .orderBy('createdAt', descending: false)
         .limitToLast(100)
         .snapshots()
@@ -128,6 +139,6 @@ class CommunicationRemoteDatasource {
   }
 
   Future<void> sendChannelMessage(MessageModel message) async {
-    await _messagesRef.add(message.toFirestore());
+    await _messagesRef.doc(message.uid).set(message.toFirestore());
   }
 }
