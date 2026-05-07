@@ -923,8 +923,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                 : null,
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 150),
-              width: _isRecording ? 230 : 200,
-              height: _isRecording ? 230 : 200,
+              width: _isRecording ? 280 : 250,
+              height: _isRecording ? 280 : 250,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: LinearGradient(
@@ -971,7 +971,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                     color: !isOn || isLockedByOther
                         ? Colors.white70
                         : Colors.white,
-                    size: _isRecording ? 84 : 72,
+                    size: _isRecording ? 110 : 95,
                   ),
                   const SizedBox(height: 4),
                   if (!isOn)
@@ -1055,21 +1055,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                     ? 'Desactivar PTT flotante'
                     : 'Activar PTT flotante',
               ),
-              // Enviar texto button (bloqueado sin internet)
-              IconButton(
-                onPressed: hasChannel && !_isOffline
-                    ? () => _showTextMessageDialog(state)
-                    : _isOffline
-                        ? () => _showOfflineWarning()
-                        : null,
-                icon: Icon(
-                  Icons.message,
-                  color: hasChannel && !_isOffline
-                      ? AppTheme.secondaryColor
-                      : Colors.grey,
-                ),
-                iconSize: 28,
-              ),
+              // El botón de "enviar texto" se removió de aquí — el chat
+              // 1-a-1 vive en el tab "Chat" del bottom nav. Ganamos espacio
+              // para que el botón PTT principal sea más prominente.
               // Asignar carrera — solo operadora (rol).
               if (user?.role == AppConstants.roleOperator)
                 IconButton(
@@ -1583,60 +1571,6 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             ),
           ],
         ),
-      ),
-    );
-  }
-
-  void _showTextMessageDialog(CommunicationLoaded state) {
-    final user = _currentUser;
-    if (user == null || state.activeChannelId == null) return;
-
-    final messageController = TextEditingController();
-    final activeChannel = state.channels.firstWhere(
-      (c) => c.uid == state.activeChannelId,
-      orElse: () => state.channels.first,
-    );
-
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('Mensaje a ${activeChannel.name}'),
-        content: TextField(
-          controller: messageController,
-          maxLines: 3,
-          decoration: const InputDecoration(
-            hintText: 'Escribe tu mensaje...',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancelar'),
-          ),
-          ElevatedButton(
-            onPressed: () {
-              if (messageController.text.isNotEmpty) {
-                context.read<CommunicationBloc>().add(
-                      ChannelMessageSendRequested(
-                        MessageModel(
-                          uid: const Uuid().v4(),
-                          associationId: user.associationId,
-                          channelId: state.activeChannelId!,
-                          senderId: user.uid,
-                          senderName: '${user.name} ${user.lastname}',
-                          type: 'texto',
-                          text: messageController.text.trim(),
-                          createdAt: DateTime.now(),
-                        ),
-                      ),
-                    );
-                Navigator.pop(ctx);
-              }
-            },
-            child: const Text('Enviar'),
-          ),
-        ],
       ),
     );
   }
