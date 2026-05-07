@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import '../constants/app_constants.dart';
 import '../services/driver_location_service.dart';
+import '../services/radio_power_service.dart';
 import '../theme/app_theme.dart';
 
 /// Switch GENERAL "Activo / Inactivo" del conductor.
@@ -57,9 +58,17 @@ class _AvailabilityToggleState extends State<AvailabilityToggle> {
       if (turnOn) {
         // Volver a "libre" al re-activar — el conductor luego puede pasar a
         // "con pasajero" desde el diálogo de cambio de estado.
+        // El walkie-talkie NO se enciende automáticamente: el conductor decide
+        // cuándo encenderlo desde su propio toggle.
         await _locationService.updateStatus(AppConstants.statusFree);
       } else {
+        // OFF general = todo apagado: para GPS Y apaga el walkie-talkie
+        // (destruye engine Agora + detiene foreground service microphone).
+        // Esto libera el mic 100% para que otras apps lo puedan usar.
         await _locationService.goOffline();
+        if (RadioPowerService.instance.isOn) {
+          await RadioPowerService.instance.turnOff();
+        }
       }
     } catch (e) {
       if (mounted) {

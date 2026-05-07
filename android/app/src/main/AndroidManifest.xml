@@ -65,13 +65,22 @@
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
         </activity>
-        <!-- Foreground Service para Radio en segundo plano (walkie-talkie) -->
+        <!-- Foreground Service para Radio en segundo plano (walkie-talkie).
+             Solo mediaPlayback: el "tag" de microphone se quitó intencionalmente
+             para que otras apps (Zello/WhatsApp/grabadora) NO vean el mic ocupado
+             cuando el radio está ON pero el conductor no está presionando PTT.
+
+             Trade-off: el PTT en background sin overlay flotante NO funciona
+             (Android 14+ requiere foreground service tipo microphone para
+             capturar el mic en background). Cuando el conductor quiere PTT en
+             background debe activar el overlay flotante (que SÍ tiene microphone). -->
         <service
             android:name="com.pravera.flutter_foreground_task.service.ForegroundService"
-            android:foregroundServiceType="microphone|mediaPlayback"
+            android:foregroundServiceType="mediaPlayback"
             android:exported="false" />
 
-        <!-- Overlay PTT: botón flotante sobre todas las apps -->
+        <!-- Overlay PTT: botón flotante sobre todas las apps. Mantiene
+             microphone porque es exactamente para PTT en background. -->
         <service
             android:name=".OverlayPttService"
             android:foregroundServiceType="microphone"
