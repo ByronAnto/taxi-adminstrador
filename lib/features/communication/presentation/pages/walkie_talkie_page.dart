@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -669,33 +670,40 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
 
           final channel = state.channels[index];
           final isSelected = channel.uid == state.activeChannelId;
+          final canManage = role == AppConstants.roleAdmin ||
+              role == AppConstants.roleOperator;
 
           return Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: ChoiceChip(
-              label: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (channel.type == 'privado')
-                    const Padding(
-                      padding: EdgeInsets.only(right: 4),
-                      child: Icon(Icons.lock, size: 14),
-                    ),
-                  Text(channel.name, style: const TextStyle(fontSize: 12)),
-                  if (channel.isLocked && !channel.isLockExpired)
-                    const Padding(
-                      padding: EdgeInsets.only(left: 4),
-                      child: Icon(Icons.mic, size: 14, color: Colors.red),
-                    ),
-                ],
+            child: GestureDetector(
+              onLongPress: canManage
+                  ? () => _showChannelManageSheet(channel)
+                  : null,
+              child: ChoiceChip(
+                label: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (channel.type == 'privado')
+                      const Padding(
+                        padding: EdgeInsets.only(right: 4),
+                        child: Icon(Icons.lock, size: 14),
+                      ),
+                    Text(channel.name, style: const TextStyle(fontSize: 12)),
+                    if (channel.isLocked && !channel.isLockExpired)
+                      const Padding(
+                        padding: EdgeInsets.only(left: 4),
+                        child: Icon(Icons.mic, size: 14, color: Colors.red),
+                      ),
+                  ],
+                ),
+                selected: isSelected,
+                selectedColor: AppTheme.primaryColor,
+                onSelected: (selected) {
+                  context.read<CommunicationBloc>().add(
+                        ChannelSelected(selected ? channel.uid : null),
+                      );
+                },
               ),
-              selected: isSelected,
-              selectedColor: AppTheme.primaryColor,
-              onSelected: (selected) {
-                context.read<CommunicationBloc>().add(
-                      ChannelSelected(selected ? channel.uid : null),
-                    );
-              },
             ),
           );
         },
@@ -1317,6 +1325,160 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// Con Agora, el audio de voz se transmite en tiempo real.
   /// Los mensajes de voz en el historial son solo metadatos (duración).
   /// Los mensajes antiguos con audioBase64 ya no se reproducen.
+
+  /// Bottom sheet con opciones de manejo del canal (long-press en el chip).
+  /// Solo visible para admin/operadora.
+  void _showChannelManageSheet(ChannelModel channel) {
+    showModalBottomSheet(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.edit),
+              title: Text('Editar "${channel.name}"'),
+              onTap: () {
+                Navigator.pop(ctx);
+                _showEditChannelDialog(channel);
+              },
+            ),
+            ListTile(
+              leading: Icon(Icons.delete, color: Colors.red.shade700),
+              title: Text('Borrar canal',
+                  style: TextStyle(color: Colors.red.shade700)),
+              onTap: () {
+                Navigator.pop(ctx);
+                _confirmDeleteChannel(channel);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showEditChannelDialog(ChannelModel channel) {
+    final nameCtrl = TextEditingController(text: channel.name);
+    String type = channel.type;
+    showDialog(
+      context: context,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setLocal) => AlertDialog(
+          title: Text('Editar "${channel.name}"'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Nombre del canal',
+                  prefixIcon: Icon(Icons.tag),
+                ),
+              ),
+              const SizedBox(height: 12),
+              RadioGroup<String>(
+                groupValue: type,
+                onChanged: (v) {
+                  setLocal(() => type = v ?? type);
+                },
+                child: Row(
+                  children: const [
+                    Expanded(
+                      child: RadioListTile<String>(
+                        title:
+                            Text('Público', style: TextStyle(fontSize: 14)),
+                        value: 'publico',
+                      ),
+                    ),
+                    Expanded(
+                      child: RadioListTile<String>(
+                        title:
+                            Text('Privado', style: TextStyle(fontSize: 14)),
+                        value: 'privado',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancelar'),
+            ),
+            ElevatedButton(
+              onPressed: () async {
+                final newName = nameCtrl.text.trim();
+                if (newName.isEmpty) return;
+                try {
+                  await FirebaseFirestore.instance
+                      .collection('channels')
+                      .doc(channel.uid)
+                      .update({
+                    'name': newName,
+                    'type': type,
+                    'updatedAt': FieldValue.serverTimestamp(),
+                  });
+                  if (ctx.mounted) Navigator.pop(ctx);
+                } catch (e) {
+                  if (ctx.mounted) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      SnackBar(content: Text('Error: $e')),
+                    );
+                  }
+                }
+              },
+              child: const Text('Guardar'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _confirmDeleteChannel(ChannelModel channel) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Borrar canal'),
+        content: Text(
+            '¿Borrar el canal "${channel.name}"? Los mensajes históricos no se eliminan automáticamente.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.errorColor),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Borrar'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (!mounted) return;
+    try {
+      await FirebaseFirestore.instance
+          .collection('channels')
+          .doc(channel.uid)
+          .delete();
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Canal borrado')),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Error: $e')),
+        );
+      }
+    }
+  }
 
   void _showCreateChannelDialog() {
     final user = _currentUser;

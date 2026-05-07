@@ -285,7 +285,25 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
           const PopupMenuItem(value: 'suspend', child: Text('Suspender')),
           const PopupMenuItem(value: 'cancel', child: Text('Cancelar')),
           const PopupMenuDivider(),
+          const PopupMenuItem(
+            value: 'edit',
+            child: Row(children: [
+              Icon(Icons.edit, size: 18),
+              SizedBox(width: 8),
+              Text('Editar datos'),
+            ]),
+          ),
           const PopupMenuItem(value: 'copy_id', child: Text('Copiar ID')),
+          const PopupMenuDivider(),
+          const PopupMenuItem(
+            value: 'delete',
+            child: Row(children: [
+              Icon(Icons.delete, size: 18, color: Colors.red),
+              SizedBox(width: 8),
+              Text('Borrar definitivo',
+                  style: TextStyle(color: Colors.red)),
+            ]),
+          ),
         ],
       ),
     );
@@ -510,6 +528,143 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
       case 'view_members':
         if (mounted) context.go('/members?aid=${a.id}');
         break;
+      case 'edit':
+        await _showEditAssociationDialog(a);
+        break;
+      case 'delete':
+        await _confirmDeleteAssociation(a);
+        break;
+    }
+  }
+
+  Future<void> _showEditAssociationDialog(AssociationModel a) async {
+    final nameCtrl = TextEditingController(text: a.name);
+    final cityCtrl = TextEditingController(text: a.city);
+    final emailCtrl = TextEditingController(text: a.email);
+    final phoneCtrl = TextEditingController(text: a.phone ?? '');
+    final result = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Editar ${a.name}'),
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: nameCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Nombre',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: cityCtrl,
+                decoration: const InputDecoration(
+                  labelText: 'Ciudad',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: emailCtrl,
+                keyboardType: TextInputType.emailAddress,
+                decoration: const InputDecoration(
+                  labelText: 'Email contacto',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: phoneCtrl,
+                keyboardType: TextInputType.phone,
+                decoration: const InputDecoration(
+                  labelText: 'Teléfono',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Guardar'),
+          ),
+        ],
+      ),
+    );
+    if (result != true) return;
+    try {
+      await _firestore.collection('associations').doc(a.id).update({
+        'name': nameCtrl.text.trim(),
+        'city': cityCtrl.text.trim(),
+        'email': emailCtrl.text.trim(),
+        'phone': phoneCtrl.text.trim().isEmpty ? null : phoneCtrl.text.trim(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      if (mounted) _showSnack('Asociación actualizada', Colors.green);
+    } catch (e) {
+      if (mounted) _showSnack('Error: $e', Colors.red);
+    }
+  }
+
+  Future<void> _confirmDeleteAssociation(AssociationModel a) async {
+    final ctrl = TextEditingController();
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Borrar asociación'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              '⚠️ Esto eliminará el doc associations/${a.id}. Los usuarios, viajes, pagos, canales y demás docs etiquetados con associationId="${a.id}" NO se borran automáticamente.',
+              style: const TextStyle(fontSize: 13),
+            ),
+            const SizedBox(height: 12),
+            const Text(
+              'Para confirmar escribe el código de la asociación:',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            const SizedBox(height: 6),
+            TextField(
+              controller: ctrl,
+              decoration: InputDecoration(
+                hintText: a.code,
+                border: const OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            style:
+                ElevatedButton.styleFrom(backgroundColor: Colors.red.shade700),
+            onPressed: () {
+              if (ctrl.text.trim().toUpperCase() == a.code.toUpperCase()) {
+                Navigator.pop(ctx, true);
+              }
+            },
+            child: const Text('BORRAR'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    try {
+      await _firestore.collection('associations').doc(a.id).delete();
+      if (mounted) _showSnack('Asociación borrada', Colors.red);
+    } catch (e) {
+      if (mounted) _showSnack('Error: $e', Colors.red);
     }
   }
 

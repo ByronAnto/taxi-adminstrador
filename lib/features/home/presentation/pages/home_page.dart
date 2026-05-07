@@ -351,6 +351,12 @@ class _HomePageState extends State<HomePage> {
           () => context.push('/notifications'),
         ),
         _buildQuickAction(
+          'Branding',
+          Icons.palette,
+          Colors.pink,
+          () => context.push('/theme-settings'),
+        ),
+        _buildQuickAction(
           'Config. Cobros',
           Icons.tune,
           AppTheme.primaryDark,
