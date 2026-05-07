@@ -1058,8 +1058,10 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
               // El botón de "enviar texto" se removió de aquí — el chat
               // 1-a-1 vive en el tab "Chat" del bottom nav. Ganamos espacio
               // para que el botón PTT principal sea más prominente.
-              // Asignar carrera — solo operadora (rol).
-              if (user?.role == AppConstants.roleOperator)
+              // Asignar carrera — operadora Y admin (en grupos chicos el
+              // admin también opera el radio).
+              if (user?.role == AppConstants.roleOperator ||
+                  user?.role == AppConstants.roleAdmin)
                 IconButton(
                   onPressed: !_isOffline
                       ? () => showAssignTripModal(context)
@@ -1070,7 +1072,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                         ? AppTheme.primaryColor
                         : Colors.grey,
                   ),
-                  iconSize: 28,
+                  iconSize: 32,
                   tooltip: 'Asignar carrera',
                 ),
             ],
