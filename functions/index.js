@@ -1475,3 +1475,141 @@ exports.purgeExpiredProofsNow = onCall({}, async (request) => {
     blobsFailed,
   };
 });
+
+// ───────────────────────────────────────────────────────────────────
+//  checkSubscriptions — cron diario 00:05 ECU.
+//  Para cada asociación:
+//   - Calcula la fecha de expiración (trialEndsAt si trial, paidUntil si paid).
+//   - Si ya expiró pero está dentro del período de gracia (default 3 días):
+//      - association.status = "expired" (si no estaba ya).
+//      - conductores activos pasan a UserStatus.paymentPending (banner).
+//   - Si pasó el período de gracia:
+//      - conductores en paymentPending pasan a paymentBlocked (modo solo pago).
+//   - Si la asociación volvió a estar al día (paidUntil >= now):
+//      - association.status = "active".
+//      - conductores en paymentPending|paymentBlocked vuelven a active.
+//
+//  Idempotente: corre cada día y solo aplica diffs.
+//  Trigger manual: usar `checkSubscriptionsNow` (callable, super-admin).
+// ───────────────────────────────────────────────────────────────────
+
+const SUBSCRIPTION_GRACE_DAYS = 3;
+
+async function _runSubscriptionCheck() {
+  const now = new Date();
+  const graceCutoff = new Date(
+    now.getTime() - SUBSCRIPTION_GRACE_DAYS * 24 * 60 * 60 * 1000
+  );
+
+  const associationsSnap = await db.collection("associations").get();
+  const summary = {
+    associationsScanned: 0,
+    associationsExpired: 0,
+    associationsReactivated: 0,
+    driversWarned: 0,
+    driversBlocked: 0,
+    driversReactivated: 0,
+  };
+
+  for (const aDoc of associationsSnap.docs) {
+    summary.associationsScanned++;
+    const a = aDoc.data();
+
+    // Determinar fecha de expiración efectiva.
+    const trialEndsAt = a.trialEndsAt?.toDate?.() || a.trialEndsAt || null;
+    const paidUntil = a.paidUntil?.toDate?.() || a.paidUntil || null;
+    const expiresAt = paidUntil || trialEndsAt;
+
+    if (!expiresAt) {
+      // Asociación sin fecha de expiración → no la tocamos (se asume legacy).
+      continue;
+    }
+
+    const isExpired = expiresAt < now;
+    const isPastGrace = expiresAt < graceCutoff;
+    const newStatus = isExpired ? "expired" : "active";
+
+    // Actualizar el doc de la asociación si hace falta.
+    if (a.status !== newStatus) {
+      await aDoc.ref.update({
+        status: newStatus,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      if (newStatus === "expired") summary.associationsExpired++;
+      else summary.associationsReactivated++;
+    }
+
+    // Recorrer conductores de esta asociación.
+    const driversSnap = await db
+      .collection("users")
+      .where("associationId", "==", aDoc.id)
+      .where("role", "==", "conductor")
+      .get();
+
+    for (const uDoc of driversSnap.docs) {
+      const u = uDoc.data();
+      const currentStatus = u.status || "active";
+
+      // No tocar usuarios bloqueados manualmente por admin.
+      if (currentStatus === "disabledByAdmin") continue;
+      // No tocar usuarios pendientes de aprobación o rechazados.
+      if (currentStatus === "pendingApproval" || currentStatus === "rejected") {
+        continue;
+      }
+
+      let nextStatus = currentStatus;
+      if (!isExpired) {
+        // Asociación al día → desbloquear.
+        if (
+          currentStatus === "paymentPending" ||
+          currentStatus === "paymentBlocked"
+        ) {
+          nextStatus = "active";
+          summary.driversReactivated++;
+        }
+      } else if (isPastGrace) {
+        // Pasado el período de gracia → bloquear.
+        if (currentStatus !== "paymentBlocked") {
+          nextStatus = "paymentBlocked";
+          summary.driversBlocked++;
+        }
+      } else {
+        // Dentro del período de gracia → warning.
+        if (currentStatus === "active") {
+          nextStatus = "paymentPending";
+          summary.driversWarned++;
+        }
+      }
+
+      if (nextStatus !== currentStatus) {
+        await uDoc.ref.update({
+          status: nextStatus,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+      }
+    }
+  }
+
+  return summary;
+}
+
+exports.checkSubscriptions = onSchedule(
+  {
+    schedule: "5 0 * * *", // 00:05 todos los días
+    timeZone: "America/Guayaquil",
+    timeoutSeconds: 540,
+    memory: "256MiB",
+    retryCount: 2,
+  },
+  async () => {
+    const summary = await _runSubscriptionCheck();
+    console.log("checkSubscriptions:", JSON.stringify(summary));
+    return summary;
+  }
+);
+
+exports.checkSubscriptionsNow = onCall({}, async (request) => {
+  requireSuperAdmin(request);
+  const summary = await _runSubscriptionCheck();
+  return { ok: true, ...summary };
+});

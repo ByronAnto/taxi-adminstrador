@@ -1,10 +1,29 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
 /// Estado del usuario dentro de su asociación.
-/// `pendingApproval` aplica al flujo de auto-registro (Opción A):
-///   un conductor escribe el código de asociación → su cuenta queda
-///   en pendingApproval hasta que el admin la apruebe.
-enum UserStatus { active, pendingApproval, rejected, suspended }
+///
+/// - `active`: cuenta normal con acceso completo según su rol.
+/// - `pendingApproval`: auto-registro pendiente de aprobación admin.
+/// - `rejected`: auto-registro rechazado por el admin.
+/// - `suspended`: legacy. Equivalente a `disabledByAdmin`. Se conserva por
+///   retrocompatibilidad pero el flujo nuevo usa `disabledByAdmin`.
+/// - `paymentPending`: el plan de la asociación venció hace ≤ N días
+///   (período de gracia). El conductor sigue operando normalmente pero ve
+///   un banner de aviso.
+/// - `paymentBlocked`: vencido + pasado el período de gracia, o el conductor
+///   no pagó su cuota mensual. La app entra en modo SOLO PAGO: única
+///   pantalla disponible es la de subir comprobante.
+/// - `disabledByAdmin`: el admin lo desactivó manualmente. Mismo bloqueo
+///   visual que `paymentBlocked` pero sin opción de subir pago.
+enum UserStatus {
+  active,
+  pendingApproval,
+  rejected,
+  suspended,
+  paymentPending,
+  paymentBlocked,
+  disabledByAdmin,
+}
 
 /// Modelo de usuario para Firestore.
 ///
@@ -68,6 +87,21 @@ class UserModel {
 
   bool get isPending => status == UserStatus.pendingApproval;
   bool get isApproved => status == UserStatus.active;
+
+  /// True si el usuario debe ver la pantalla de "cuenta bloqueada" en vez
+  /// del flujo normal de la app. Cubre suspended (legacy), paymentBlocked y
+  /// disabledByAdmin.
+  bool get isBlocked =>
+      status == UserStatus.paymentBlocked ||
+      status == UserStatus.disabledByAdmin ||
+      status == UserStatus.suspended;
+
+  /// True si el usuario puede subir comprobante de pago para reactivarse.
+  /// Solo `paymentBlocked` lo permite; `disabledByAdmin` no.
+  bool get canUploadPayment => status == UserStatus.paymentBlocked;
+
+  /// True si el plan de la asociación está en período de gracia (banner).
+  bool get hasPaymentWarning => status == UserStatus.paymentPending;
 
   factory UserModel.fromFirestore(DocumentSnapshot doc) {
     final data = doc.data() as Map<String, dynamic>;
@@ -179,6 +213,12 @@ class UserModel {
         return UserStatus.rejected;
       case 'suspended':
         return UserStatus.suspended;
+      case 'paymentPending':
+        return UserStatus.paymentPending;
+      case 'paymentBlocked':
+        return UserStatus.paymentBlocked;
+      case 'disabledByAdmin':
+        return UserStatus.disabledByAdmin;
       case 'active':
       default:
         return UserStatus.active;

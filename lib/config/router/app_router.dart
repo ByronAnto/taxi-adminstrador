@@ -7,6 +7,7 @@ import '../../features/reports/presentation/bloc/reports_bloc.dart';
 import '../../features/auth/presentation/pages/login_page.dart';
 import '../../features/auth/presentation/pages/register_page.dart';
 import '../../features/auth/presentation/pages/pending_approval_page.dart';
+import '../../features/auth/presentation/pages/account_blocked_page.dart';
 import '../../features/home/presentation/pages/home_page.dart';
 import '../../features/users/presentation/pages/profile_page.dart';
 import '../../features/payments/presentation/pages/payments_page.dart';
@@ -37,19 +38,32 @@ class AppRouter {
             state.matchedLocation == '/register';
         final isPendingPath =
             state.matchedLocation == '/pending-approval';
+        final isBlockedPath = state.matchedLocation == '/blocked';
+        final isMyPaymentsPath = state.matchedLocation == '/my-payments';
 
         // No autenticado: forzar /login (excepto si va a /register).
         if (!isAuthenticated && !isLoggingIn) {
           return '/login';
         }
 
-        // Autenticado pero status != active: ir a pending-approval.
         if (isAuthenticated) {
-          final isApproved = authState.user.isApproved;
+          final user = authState.user;
+          final isApproved = user.isApproved;
+          final isBlocked = user.isBlocked;
+
+          // Bloqueado por admin o por mora: pantalla de bloqueo.
+          // Permitir /my-payments solo si puede subir comprobante (paymentBlocked).
+          if (isBlocked) {
+            if (isBlockedPath) return null;
+            if (isMyPaymentsPath && user.canUploadPayment) return null;
+            return '/blocked';
+          }
+
+          // Status pendingApproval / rejected → pantalla de pendiente.
           if (!isApproved && !isPendingPath) {
             return '/pending-approval';
           }
-          if (isApproved && (isLoggingIn || isPendingPath)) {
+          if (isApproved && (isLoggingIn || isPendingPath || isBlockedPath)) {
             return '/home';
           }
         }
@@ -71,6 +85,11 @@ class AppRouter {
           path: '/pending-approval',
           name: 'pending-approval',
           builder: (context, state) => const PendingApprovalPage(),
+        ),
+        GoRoute(
+          path: '/blocked',
+          name: 'blocked',
+          builder: (context, state) => const AccountBlockedPage(),
         ),
         GoRoute(
           path: '/home',
