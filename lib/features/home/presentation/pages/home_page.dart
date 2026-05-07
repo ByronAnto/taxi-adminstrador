@@ -6,6 +6,7 @@ import '../../../auth/data/models/user_model.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/driver_location_service.dart';
+import '../../../../core/widgets/availability_toggle.dart';
 import '../../../map/presentation/pages/map_page.dart';
 import '../../../communication/presentation/pages/walkie_talkie_page.dart';
 import '../../../trips/presentation/pages/trips_page.dart';
@@ -22,6 +23,16 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   int _currentIndex = -1; // Se inicializa al index del Radio
+
+  /// ¿Este usuario envía GPS (y por tanto debe ver el switch Activo/Inactivo)?
+  /// Mismo criterio que en `main.dart` al inicializar el location service.
+  bool _sendsGps(UserModel user) {
+    if (user.role == AppConstants.roleDriver) return true;
+    if (user.role == AppConstants.roleAdmin && user.numeroVehiculo.isNotEmpty) {
+      return true;
+    }
+    return false;
+  }
 
   int _radioIndexForRole(String role) {
     switch (role) {
@@ -56,6 +67,13 @@ class _HomePageState extends State<HomePage> {
           appBar: AppBar(
             title: const Text(AppConstants.appName),
             actions: [
+              // Switch general "Activo/Inactivo" — solo para conductores y
+              // admins con vehículo (los que envían GPS).
+              if (_sendsGps(user))
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: Center(child: const AvailabilityToggle()),
+                ),
               // Botón de pánico / emergencia
               IconButton(
                 onPressed: () => _showEmergencyDialog(context),
