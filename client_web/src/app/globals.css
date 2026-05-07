@@ -1,0 +1,24 @@
+@import "tailwindcss/base";
+@import "tailwindcss/components";
+@import "tailwindcss/utilities";
+@import "leaflet/dist/leaflet.css";
+
+html, body {
+  background: #f5f7fa;
+  color: #1a202c;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto;
+}
+
+.btn-primary {
+  @apply bg-primary text-white font-semibold rounded-lg px-4 py-3 w-full
+         hover:bg-primary-dark transition disabled:opacity-50;
+}
+
+.input {
+  @apply w-full border border-gray-300 rounded-lg px-3 py-2.5 text-base
+         focus:outline-none focus:ring-2 focus:ring-primary;
+}
+
+.card {
+  @apply bg-white rounded-xl shadow-md p-6;
+}

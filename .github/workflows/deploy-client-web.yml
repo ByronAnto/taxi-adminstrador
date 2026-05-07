@@ -1,0 +1,135 @@
+name: Deploy client_web
+
+# Despliega el portal web del cliente.
+#
+# Estrategia: build + push de imagen Docker a GitHub Container Registry
+# (ghcr.io). Después puedes:
+#   - Correrla en Cloud Run / Render / Fly.io con esa imagen.
+#   - O activar el deploy a Firebase Hosting (sección comentada al final).
+#
+# Triggers:
+#   - push a main que toque archivos de client_web/.
+#   - manual (workflow_dispatch).
+#
+# Secrets requeridos en GitHub → Settings → Secrets and variables:
+#   FIREBASE_API_KEY
+#   FIREBASE_AUTH_DOMAIN              (default taxis-f0f51.firebaseapp.com)
+#   FIREBASE_PROJECT_ID               (default taxis-f0f51)
+#   FIREBASE_STORAGE_BUCKET
+#   FIREBASE_MESSAGING_SENDER_ID
+#   FIREBASE_APP_ID
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "client_web/**"
+      - ".github/workflows/deploy-client-web.yml"
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: ${{ github.repository }}/client-web
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: client_web/package-lock.json
+
+      - name: Install deps
+        working-directory: client_web
+        run: npm ci
+
+      - name: Lint + type check
+        working-directory: client_web
+        run: |
+          npm run lint --silent || echo "lint warnings (no bloquea)"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,prefix=sha-,format=short
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: client_web
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_FIREBASE_API_KEY=${{ secrets.FIREBASE_API_KEY }}
+            NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN=${{ secrets.FIREBASE_AUTH_DOMAIN }}
+            NEXT_PUBLIC_FIREBASE_PROJECT_ID=${{ secrets.FIREBASE_PROJECT_ID }}
+            NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET=${{ secrets.FIREBASE_STORAGE_BUCKET }}
+            NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+            NEXT_PUBLIC_FIREBASE_APP_ID=${{ secrets.FIREBASE_APP_ID }}
+
+      - name: Image summary
+        run: |
+          echo "✅ Imagen publicada en:"
+          echo "   ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+          echo ""
+          echo "Para correrla en local:"
+          echo "  docker run -p 3000:3000 \\"
+          echo "    ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:latest"
+
+  # ----- (Opcional) Deploy a Firebase Hosting con SSR -----
+  # Descomentar si prefieres servir desde Firebase en vez de Docker.
+  # Firebase Hosting con frameworks (Next.js) está en preview pero funciona.
+  #
+  # deploy-firebase:
+  #   needs: build-and-push
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with: { node-version: "20" }
+  #     - name: Install deps
+  #       working-directory: client_web
+  #       run: npm ci
+  #     - name: Build
+  #       working-directory: client_web
+  #       env:
+  #         NEXT_PUBLIC_FIREBASE_API_KEY: ${{ secrets.FIREBASE_API_KEY }}
+  #         NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN: ${{ secrets.FIREBASE_AUTH_DOMAIN }}
+  #         NEXT_PUBLIC_FIREBASE_PROJECT_ID: ${{ secrets.FIREBASE_PROJECT_ID }}
+  #         NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET: ${{ secrets.FIREBASE_STORAGE_BUCKET }}
+  #         NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID: ${{ secrets.FIREBASE_MESSAGING_SENDER_ID }}
+  #         NEXT_PUBLIC_FIREBASE_APP_ID: ${{ secrets.FIREBASE_APP_ID }}
+  #       run: npm run build
+  #     - uses: FirebaseExtended/action-hosting-deploy@v0
+  #       with:
+  #         repoToken: ${{ secrets.GITHUB_TOKEN }}
+  #         firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+  #         projectId: taxis-f0f51
+  #         channelId: live
+  #         entryPoint: client_web

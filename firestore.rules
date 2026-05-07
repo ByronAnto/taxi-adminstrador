@@ -382,14 +382,44 @@ service cloud.firestore {
       allow write: if isSuperAdmin();
     }
 
-    // ===== SOLICITUDES DE CARRERA (clientes) =====
-    // Por ahora solo lectura/asignación por operadora/admin. La creación
-    // desde el portal cliente queda pendiente Fase 6.
+    // ===== SOLICITUDES DE CARRERA (clientes web + operadora) =====
+    // - Cliente autenticado: crea solicitudes propias (clienteId==uid)
+    //   y lee/cancela las suyas.
+    // - Operadora/admin del tenant: ve todas, asigna, actualiza estado.
+    function isClienteOf(data) {
+      return isAuthenticated()
+        && data.get('clienteId', '') == request.auth.uid;
+    }
     match /tripRequests/{reqId} {
-      allow read: if isOperatorOrAdmin() && sameTenant(resource.data);
-      allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
-      allow update: if isOperatorOrAdmin() && sameTenant(resource.data);
+      allow read: if (isOperatorOrAdmin() && sameTenant(resource.data))
+        || isClienteOf(resource.data);
+      allow create: if (isOperatorOrAdmin() && sameTenantOnCreate())
+        || (
+          isAuthenticated()
+          && request.resource.data.get('clienteId', '') == request.auth.uid
+          && request.resource.data.get('associationId', '') is string
+          && request.resource.data.get('estado', '') == 'pendiente'
+        );
+      allow update: if (isOperatorOrAdmin() && sameTenant(resource.data))
+        // El cliente solo puede cancelar su propia solicitud.
+        || (
+          isClienteOf(resource.data)
+          && request.resource.data.diff(resource.data)
+              .affectedKeys().hasOnly(['estado', 'updatedAt'])
+          && request.resource.data.estado == 'cancelada'
+        );
       allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    // ===== CLIENTES (perfil del cliente web) =====
+    // Doc en `clients/{uid}` con datos de contacto del cliente final.
+    // Cada cliente solo puede leer/escribir el suyo. Operadora/admin
+    // de cualquier asociación pueden leerlos para mostrar info en la
+    // app móvil cuando llega una solicitud.
+    match /clients/{uid} {
+      allow read: if isOwner(uid) || isOperatorOrAdmin();
+      allow create, update: if isOwner(uid);
+      allow delete: if isOwner(uid) || isSuperAdmin();
     }
 
     // ===== ANALYTICS (precomputado por cron, solo admin del tenant lo lee) =====
