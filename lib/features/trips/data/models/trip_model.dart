@@ -30,8 +30,15 @@ class TripSource {
   /// Conductor pulsó "+1 carrera" en su app.
   static const manual = 'manual';
 
-  /// Operadora asignó desde el modal del walkie-talkie.
+  /// Operadora asignó desde el modal del walkie-talkie con datos completos
+  /// (cliente, dirección de recogida, notas).
   static const apkOperadora = 'apkOperadora';
+
+  /// Carrera rápida en la calle: la operadora ofrece el servicio en la
+  /// vía pública y manda al cliente con un taxi del grupo. Solo se
+  /// registra # unidad y opcionalmente código de cliente. Sirve para
+  /// contar cuántos clientes son direccionados por la operadora.
+  static const street = 'street';
 
   /// El conductor recibió la carrera por canal de radio.
   static const walkieTalkie = 'walkieTalkie';

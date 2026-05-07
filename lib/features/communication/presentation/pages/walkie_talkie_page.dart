@@ -18,6 +18,7 @@ import '../../../../core/services/overlay_ptt_service.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../trips/presentation/widgets/assign_trip_modal.dart';
+import '../../../trips/presentation/widgets/quick_street_assign_modal.dart';
 import '../../data/models/channel_model.dart';
 import '../bloc/communication_bloc.dart';
 import '../widgets/audio_history_tile.dart';
@@ -1061,7 +1062,24 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
               // Asignar carrera — operadora Y admin (en grupos chicos el
               // admin también opera el radio).
               if (user?.role == AppConstants.roleOperator ||
-                  user?.role == AppConstants.roleAdmin)
+                  user?.role == AppConstants.roleAdmin) ...[
+                // Carrera rápida (calle): 1-2 toques, solo # unidad +
+                // opcional código cliente. Para contar clientes
+                // direccionados por la operadora a las unidades.
+                IconButton(
+                  onPressed: !_isOffline
+                      ? () => showQuickStreetAssignModal(context)
+                      : () => _showOfflineWarning(),
+                  icon: Icon(
+                    Icons.bolt,
+                    color: !_isOffline
+                        ? Colors.amber.shade700
+                        : Colors.grey,
+                  ),
+                  iconSize: 32,
+                  tooltip: 'Carrera rápida (calle)',
+                ),
+                // Asignar carrera con detalles (cliente, dirección, notas).
                 IconButton(
                   onPressed: !_isOffline
                       ? () => showAssignTripModal(context)
@@ -1073,8 +1091,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                         : Colors.grey,
                   ),
                   iconSize: 32,
-                  tooltip: 'Asignar carrera',
+                  tooltip: 'Asignar carrera con datos',
                 ),
+              ],
             ],
           ),
         ],
