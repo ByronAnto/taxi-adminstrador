@@ -1954,3 +1954,69 @@ exports.purgeOldChatMessagesNow = onCall({}, async (request) => {
   return await _runPurgeOldChatMessages();
 });
 
+// ───────────────────────────────────────────────────────────────────
+//  backfillAssociationId — migración one-shot.
+//  Asigna `associationId = "jipijapa"` (o el slug que se pase) a todos
+//  los docs legacy que no lo tengan, en las colecciones que las reglas
+//  Firestore exigen multi-tenant: channels, messages, drivers, trips,
+//  payments, expenses, taxi_stands, emergencies, competitor_trips.
+//
+//  Solo super-admin. Idempotente: si ya tiene associationId, lo skipea.
+//
+//  Uso desde la app o Functions shell:
+//    backfillAssociationId({ associationId: 'jipijapa' })
+// ───────────────────────────────────────────────────────────────────
+
+exports.backfillAssociationId = onCall(
+  { timeoutSeconds: 540 },
+  async (request) => {
+    requireSuperAdmin(request);
+    const aid = (request.data?.associationId || "jipijapa").toString();
+    if (!aid) {
+      throw new HttpsError(
+        "invalid-argument",
+        "associationId vacío",
+      );
+    }
+
+    const COLLECTIONS = [
+      "channels",
+      "messages",
+      "drivers",
+      "trips",
+      "payments",
+      "expenses",
+      "taxi_stands",
+      "emergencies",
+      "competitor_trips",
+      "vehicles",
+      "incentives",
+    ];
+
+    const summary = {};
+
+    for (const coll of COLLECTIONS) {
+      let updated = 0;
+      let scanned = 0;
+      const snap = await db.collection(coll).get();
+      for (const d of snap.docs) {
+        scanned++;
+        const data = d.data();
+        const current = data.associationId;
+        if (typeof current === "string" && current.length > 0) {
+          continue; // ya tiene, no tocar
+        }
+        await d.ref.update({
+          associationId: aid,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        updated++;
+      }
+      summary[coll] = { scanned, updated };
+    }
+
+    console.log("backfillAssociationId:", JSON.stringify(summary));
+    return { ok: true, associationId: aid, ...summary };
+  },
+);
+

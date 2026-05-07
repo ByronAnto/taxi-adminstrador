@@ -657,12 +657,18 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             return Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4),
               child: ActionChip(
-                avatar: const Icon(Icons.add, size: 18, color: Colors.white),
-                label: const Text(
+                avatar: Icon(Icons.add, size: 18,
+                    color: AppTheme.primaryColor),
+                label: Text(
                   'Nuevo',
-                  style: TextStyle(color: Colors.white, fontSize: 12),
+                  style: TextStyle(
+                      color: AppTheme.primaryColor,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600),
                 ),
-                backgroundColor: Colors.white24,
+                backgroundColor: Colors.white,
+                side: BorderSide(
+                    color: AppTheme.primaryColor.withValues(alpha: 0.4)),
                 onPressed: () => _showCreateChannelDialog(),
               ),
             );
