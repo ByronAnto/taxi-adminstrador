@@ -487,9 +487,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             // despacho estilo cooperativa.
             const StandQueueBar(),
             if (state.isPttLocked && _radioPower.isOn) _buildSpeakerBanner(state),
-            // Espacio expandido — el historial vive en el tab "Chat".
-            Expanded(child: _buildRadioCenter()),
-            _buildAudioControls(state),
+            // El botón PTT ocupa todo el espacio disponible. El historial
+            // vive en el tab "Chat".
+            Expanded(child: _buildAudioControls(state)),
           ],
         );
       },
@@ -729,46 +729,6 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     );
   }
 
-  /// Centro del walkie-talkie cuando no hay nadie hablando: espacio
-  /// compacto con icono y recordatorio. El protagonista visual es el
-  /// botón PTT que viene debajo.
-  Widget _buildRadioCenter() {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // Adaptar el tamaño del icono a la altura disponible para evitar
-        // overflows en pantallas pequeñas (la cola + PTT 280px ocupan mucho).
-        final iconSize = constraints.maxHeight > 140 ? 56.0 : 36.0;
-        return Center(
-          child: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(Icons.radio, size: iconSize, color: Colors.grey.shade300),
-                const SizedBox(height: 6),
-                Text(
-                  'Mantén presionado el botón para hablar',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                      color: Colors.grey.shade600, fontSize: 12),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  'Historial en el tab Chat',
-                  textAlign: TextAlign.center,
-                  style: TextStyle(
-                    color: Colors.grey.shade500,
-                    fontSize: 11,
-                    fontStyle: FontStyle.italic,
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
   Widget _buildAudioControls(CommunicationLoaded state) {
     final user = _currentUser;
     final hasChannel = state.activeChannelId != null;
@@ -794,13 +754,25 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           ),
         ],
       ),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
+      child: LayoutBuilder(builder: (context, constraints) {
+        // Reserva ~64 px para la fila de íconos secundarios + spacing.
+        // El resto es para el botón PTT, que escala como círculo cuyo
+        // diámetro = min(ancho disponible, alto disponible para PTT).
+        const reservedForActions = 64.0;
+        final maxPttSize = (constraints.maxHeight - reservedForActions)
+            .clamp(180.0, double.infinity);
+        final pttIdle =
+            maxPttSize.clamp(220.0, constraints.maxWidth - 16).toDouble();
+        final pttActive =
+            (pttIdle * 1.10).clamp(0.0, constraints.maxWidth).toDouble();
+        final iconSize = pttIdle * 0.42;
+      return Column(
+        mainAxisSize: MainAxisSize.max,
         children: [
-          // PTT button grande estilo Zello — centrado
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
+          // PTT button grande estilo Zello — centrado, ocupa el espacio.
+          Expanded(
+            child: Center(
+              child:
           // PTT (Push-to-Talk) Button — Zello style
           // Uses Listener instead of GestureDetector for INSTANT response
           // (0ms delay vs ~500ms long-press delay).
@@ -820,8 +792,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                 : null,
             child: AnimatedContainer(
               duration: const Duration(milliseconds: 150),
-              width: _isRecording ? 280 : 250,
-              height: _isRecording ? 280 : 250,
+              width: _isRecording ? pttActive : pttIdle,
+              height: _isRecording ? pttActive : pttIdle,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 gradient: LinearGradient(
@@ -868,7 +840,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                     color: !isOn || isLockedByOther
                         ? Colors.white70
                         : Colors.white,
-                    size: _isRecording ? 110 : 95,
+                    size: iconSize,
                   ),
                   const SizedBox(height: 4),
                   if (!isOn)
@@ -913,9 +885,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
               ),
             ),
           ),
-            ],
+            ),
           ),
-          const SizedBox(height: 12),
+          const SizedBox(height: 8),
           // Botones secundarios debajo
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -993,7 +965,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             ],
           ),
         ],
-      ),
+      );
+      }),
     );
   }
 
