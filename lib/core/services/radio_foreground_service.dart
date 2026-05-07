@@ -49,6 +49,10 @@ class RadioForegroundService {
 
   /// Inicia el foreground service cuando se activa un canal.
   /// [channelName] es el nombre del canal activo para la notificación.
+  ///
+  /// En Android 13+ el servicio falla con `ServiceRequestFailure` si la app
+  /// no tiene permiso `POST_NOTIFICATIONS`. Pedimos el permiso antes de
+  /// arrancar para evitar el error silencioso.
   Future<void> startService(String channelName) async {
     if (_isRunning || _isStarting) {
       // Ya corriendo o en proceso, solo actualizar notificación
@@ -60,6 +64,19 @@ class RadioForegroundService {
     _activeChannelName = channelName;
 
     try {
+      // Permisos runtime requeridos por flutter_foreground_task en Android 13+:
+      //   - POST_NOTIFICATIONS (Android 13+)
+      //   - Ignorar optimizaciones de batería (opcional pero recomendado)
+      try {
+        final notifPerm =
+            await FlutterForegroundTask.checkNotificationPermission();
+        if (notifPerm != NotificationPermission.granted) {
+          await FlutterForegroundTask.requestNotificationPermission();
+        }
+      } catch (e) {
+        _logger.w('No se pudo verificar permiso de notificaciones: $e');
+      }
+
       final result = await FlutterForegroundTask.startService(
         notificationTitle: '📻 Radio Activo',
         notificationText: 'Canal: $channelName — Escuchando...',

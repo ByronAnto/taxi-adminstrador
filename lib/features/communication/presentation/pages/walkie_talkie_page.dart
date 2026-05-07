@@ -11,6 +11,7 @@ import '../../../../core/services/agora_service.dart';
 import '../../../../core/services/connectivity_service.dart';
 import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/services/local_audio_history_service.dart';
+import '../../../../core/services/ptt_beep_service.dart';
 import '../../../../core/services/radio_foreground_service.dart';
 import '../../../../core/services/radio_power_service.dart';
 import '../../../../core/services/overlay_ptt_service.dart';
@@ -89,6 +90,11 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     _connectivity.addListener(_onConnectivityChanged);
     _locationService.addListener(_onDriverLocationChanged);
     _radioPower.addListener(_onRadioPowerChanged);
+    // El overlay se puede cerrar desde la notificación nativa (botón "Cerrar"
+    // o swipe). Escuchar para refrescar el icono del botón en la UI.
+    _overlayService.onStateChanged = () {
+      if (mounted) setState(() {});
+    };
     // Iniciar la observación de canales (siempre — para mostrar la lista
     // aunque el radio esté apagado).
     context.read<CommunicationBloc>().add(ChannelsWatchStarted());
@@ -100,6 +106,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     _connectivity.removeListener(_onConnectivityChanged);
     _locationService.removeListener(_onDriverLocationChanged);
     _radioPower.removeListener(_onRadioPowerChanged);
+    _overlayService.onStateChanged = null;
     _recordingTimer?.cancel();
     _durationTimer?.cancel();
     // Si quedó una grabación abierta, cerrarla para no perder metadata.
@@ -1088,15 +1095,28 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   // === PTT Actions ===
 
   /// Activa/desactiva el botón PTT flotante sobre todas las apps.
+  ///
+  /// Con timeout para evitar que la UI quede colgada si stop()/start()
+  /// del overlay se traban (typical en Android 14+ con Doze mode).
   Future<void> _toggleOverlay(CommunicationLoaded state) async {
     if (_overlayService.isActive) {
       // ── Desactivar overlay ──
-      await _overlayService.stop();
+      // Timeout de 4s — si stop se cuelga, forzamos el flag local para que
+      // la UI vuelva a mostrar el icono "activar".
+      try {
+        await _overlayService.stop().timeout(const Duration(seconds: 4));
+      } catch (e) {
+        debugPrint('Overlay stop colgado: $e — forzando reset');
+      }
       // Re-inicializar engine para uso en esta página
-      await _agoraService.initialize();
-      if (state.activeChannelId != null) {
-        _lastAgoraChannelId = state.activeChannelId;
-        await _agoraService.joinChannel(state.activeChannelId!);
+      try {
+        await _agoraService.initialize();
+        if (state.activeChannelId != null) {
+          _lastAgoraChannelId = state.activeChannelId;
+          await _agoraService.joinChannel(state.activeChannelId!);
+        }
+      } catch (e) {
+        debugPrint('Error re-init Agora tras stop overlay: $e');
       }
       if (mounted) setState(() {});
       return;
@@ -1238,9 +1258,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
 
     _recordingStartTime = DateTime.now();
 
-    // 🔔 Feedback háptico + sonido al iniciar PTT
+    // 🔔 Feedback háptico + beep tipo Motorola/Zello al iniciar PTT
     HapticFeedback.mediumImpact();
-    SystemSound.play(SystemSoundType.click);
+    PttBeepService.instance.playStart();
 
     // Intentar adquirir el lock PTT en Firestore
     if (!mounted) return;
@@ -1291,8 +1311,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     // ── AGORA: Mutear mic → dejar de transmitir ──
     try {
       await _agoraService.muteMic();
-      // 🔔 Feedback háptico al soltar PTT
+      // 🔔 Feedback háptico + beep "fin de transmisión" tipo Motorola
       HapticFeedback.lightImpact();
+      PttBeepService.instance.playEnd();
     } catch (e) {
       // Silenciar error — ya dejamos de grabar en la UI
     }

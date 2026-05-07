@@ -14,6 +14,7 @@ import 'core/services/current_user_context.dart';
 import 'core/services/driver_location_service.dart';
 import 'core/services/fcm_token_service.dart';
 import 'core/services/local_audio_history_service.dart';
+import 'core/services/ptt_beep_service.dart';
 import 'core/services/overlay_ptt_service.dart';
 import 'core/services/radio_power_service.dart';
 import 'core/widgets/connectivity_banner.dart';
@@ -75,6 +76,9 @@ void main() async {
 
   // Inicializar historial de audios local (purga audios > 24h al iniciar)
   await LocalAudioHistoryService.instance.initialize();
+
+  // Pre-generar los beeps tipo Motorola/Zello para el PTT (latencia 0ms)
+  await PttBeepService.instance.initialize();
 
   // Inicializar servicio de overlay PTT (escuchar eventos del nativo)
   OverlayPttService.instance.initialize();

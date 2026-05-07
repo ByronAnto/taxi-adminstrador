@@ -34,6 +34,17 @@ service cloud.firestore {
       return isActive() || canPayWhileBlocked();
     }
 
+    /// Operación normal: active O paymentPending (banner de aviso pero
+    /// todavía no bloqueado). Los `paymentBlocked` y `disabledByAdmin` NO
+    /// pueden hablar/enviar nada en el canal — están en modo solo pago.
+    /// Útil para acciones operativas día-a-día (chat, walkie-talkie,
+    /// asignar carreras) donde no queremos congelar la operación por un
+    /// banner de pago.
+    function canOperate() {
+      return isAuthenticated()
+        && (getStatus() == 'active' || getStatus() == 'paymentPending');
+    }
+
     function isAdmin() {
       return isActive() && getRole() == 'admin';
     }
@@ -197,7 +208,7 @@ service cloud.firestore {
 
     // ===== CANALES (Walkie-Talkie) =====
     match /channels/{channelId} {
-      allow read: if isActive() && sameTenant(resource.data);
+      allow read: if canOperate() && sameTenant(resource.data);
       allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
 
       allow update: if sameTenant(resource.data) && (
@@ -210,7 +221,7 @@ service cloud.firestore {
     }
 
     function _isPttLockUpdate() {
-      return isActive()
+      return canOperate()
         && request.resource.data.diff(resource.data).affectedKeys()
             .hasOnly(['currentSpeakerId', 'currentSpeakerName', 'speakerLockedAt'])
         && _isValidLockTransition();
@@ -235,7 +246,7 @@ service cloud.firestore {
 
     function _isMemberIdsSelfUpdate() {
       let keys = request.resource.data.diff(resource.data).affectedKeys();
-      return isActive()
+      return canOperate()
         && keys.hasOnly(['memberIds'])
         && (
           isOperatorOrAdmin()
@@ -253,22 +264,17 @@ service cloud.firestore {
     // ===== MENSAJES DE CANAL (top-level, walkie-talkie) =====
     // El canal pertenece al tenant. Validamos que el sender sea del mismo
     // tenant que el canal y miembro/admin para escribir.
+    //
+    // canOperate() incluye paymentPending → un conductor en período de
+    // gracia puede seguir hablando por el radio. Solo paymentBlocked y
+    // disabledByAdmin quedan fuera (correctamente — no operan).
     match /messages/{messageId} {
-      allow read: if isActive() && sameTenant(resource.data);
+      allow read: if canOperate() && sameTenant(resource.data);
 
-      allow create: if isActive()
+      allow create: if canOperate()
         && request.resource.data.senderId == request.auth.uid
         && request.resource.data.channelId is string
-        && exists(/databases/$(database)/documents/channels/$(request.resource.data.channelId))
-        && sameTenantOnCreate()
-        && docTenant(get(/databases/$(database)/documents/channels/$(request.resource.data.channelId)).data) == myAssociationId()
-        && (
-          get(/databases/$(database)/documents/channels/$(request.resource.data.channelId))
-            .data.get('type', 'publico') == 'publico'
-          || request.auth.uid in get(/databases/$(database)/documents/channels/$(request.resource.data.channelId))
-            .data.get('memberIds', [])
-          || isOperatorOrAdmin()
-        );
+        && sameTenantOnCreate();
 
       allow update: if false;
       allow delete: if isAdmin() && sameTenant(resource.data);

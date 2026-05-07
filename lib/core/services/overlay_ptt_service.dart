@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'agora_service.dart';
+import 'ptt_beep_service.dart';
 
 /// Servicio que gestiona el botón PTT flotante (overlay).
 ///
@@ -145,6 +146,8 @@ class OverlayPttService {
     try {
       await _agoraService.quickPttStart(_activeChannelId!);
       await _updateButtonState('transmitting');
+      // Beep tipo Motorola al tomar el mic en el flotante
+      PttBeepService.instance.playStart();
       _log('PTT activo — transmitiendo');
     } catch (e) {
       _log('❌ Error iniciando PTT: $e');
@@ -167,6 +170,8 @@ class OverlayPttService {
     try {
       await _agoraService.quickPttStop();
       await _updateButtonState('idle');
+      // Beep "fin de transmisión" tipo Motorola
+      PttBeepService.instance.playEnd();
       _log('PTT muted — sigue en canal, escuchando');
     } catch (e) {
       _log('Error deteniendo PTT: $e');
