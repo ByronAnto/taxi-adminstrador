@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
+import '../../../../core/services/pdf_export_service.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/models/cashflow_model.dart';
@@ -71,6 +72,13 @@ class _CashflowPageState extends State<CashflowPage>
     return Scaffold(
       appBar: AppBar(
         title: const Text('Caja'),
+        actions: [
+          IconButton(
+            tooltip: 'Exportar PDF',
+            icon: const Icon(Icons.picture_as_pdf),
+            onPressed: () => _exportPdf(aid),
+          ),
+        ],
         bottom: TabBar(
           controller: _tab,
           tabs: const [
@@ -315,6 +323,52 @@ class _CashflowPageState extends State<CashflowPage>
         ),
       ],
     );
+  }
+
+  Future<void> _exportPdf(String aid) async {
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Generando PDF…')),
+    );
+    try {
+      final docs = await FirebaseFirestore.instance
+          .collection('cashflow')
+          .where('associationId', isEqualTo: aid)
+          .where('fecha',
+              isGreaterThanOrEqualTo: Timestamp.fromDate(_periodStart))
+          .orderBy('fecha', descending: true)
+          .get();
+      final movs = docs.docs.map(CashflowMovement.fromFirestore).toList();
+      final assoc = await PdfExportService.instance.loadAssociation(aid);
+      final periodLabel = {
+            'day': 'Hoy',
+            'week': 'Esta semana',
+            'month': 'Este mes',
+            'year': 'Este año',
+          }[_period] ??
+          'Período';
+      final bytes = await PdfExportService.instance.buildCashflowReport(
+        associationName: assoc.name,
+        logoUrl: assoc.logoUrl,
+        primaryColor: assoc.primary,
+        movements: movs,
+        periodStart: _periodStart,
+        periodEnd: DateTime.now(),
+        periodLabel: periodLabel,
+      );
+      await PdfExportService.instance.share(
+        bytes,
+        fileName:
+            'caja_${aid}_${DateFormat('yyyyMMdd').format(DateTime.now())}.pdf',
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Error generando PDF: $e'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    }
   }
 
   void _showAddMovement(

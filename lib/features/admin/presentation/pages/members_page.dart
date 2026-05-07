@@ -275,6 +275,9 @@ class _MembersPageState extends State<MembersPage> {
     final statusColor = switch (u.status) {
       UserStatus.active => Colors.green,
       UserStatus.pendingApproval => Colors.orange,
+      UserStatus.paymentPending => Colors.amber.shade800,
+      UserStatus.paymentBlocked => Colors.red.shade900,
+      UserStatus.disabledByAdmin => Colors.red.shade900,
       UserStatus.suspended => Colors.red,
       UserStatus.rejected => Colors.grey,
     };
@@ -282,6 +285,9 @@ class _MembersPageState extends State<MembersPage> {
     final statusLabel = switch (u.status) {
       UserStatus.active => 'Activo',
       UserStatus.pendingApproval => 'Pendiente',
+      UserStatus.paymentPending => 'Pago pendiente',
+      UserStatus.paymentBlocked => 'Bloqueado · pago',
+      UserStatus.disabledByAdmin => 'Desactivado',
       UserStatus.suspended => 'Suspendido',
       UserStatus.rejected => 'Rechazado',
     };
@@ -914,12 +920,18 @@ class _MemberDetailDialog extends StatelessWidget {
     final statusColor = switch (user.status) {
       UserStatus.active => Colors.green,
       UserStatus.pendingApproval => Colors.orange,
+      UserStatus.paymentPending => Colors.amber.shade800,
+      UserStatus.paymentBlocked => Colors.red.shade900,
+      UserStatus.disabledByAdmin => Colors.red.shade900,
       UserStatus.suspended => Colors.red,
       UserStatus.rejected => Colors.grey,
     };
     final statusLabel = switch (user.status) {
       UserStatus.active => 'Activo',
       UserStatus.pendingApproval => 'Pendiente',
+      UserStatus.paymentPending => 'Pago pendiente',
+      UserStatus.paymentBlocked => 'Bloqueado · pago',
+      UserStatus.disabledByAdmin => 'Desactivado',
       UserStatus.suspended => 'Suspendido',
       UserStatus.rejected => 'Rechazado',
     };

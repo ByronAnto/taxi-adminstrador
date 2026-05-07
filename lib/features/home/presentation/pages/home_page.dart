@@ -303,6 +303,12 @@ class _HomePageState extends State<HomePage> {
           () => context.push('/assign-trip'),
         ),
         _buildQuickAction(
+          'Solicitudes',
+          Icons.assignment_turned_in,
+          Colors.deepPurple,
+          () => context.push('/trip-requests'),
+        ),
+        _buildQuickAction(
           'Paradas',
           Icons.flag,
           Colors.orange,

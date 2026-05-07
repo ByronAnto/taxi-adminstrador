@@ -8,8 +8,10 @@ import 'core/theme/app_theme.dart';
 import 'core/constants/app_constants.dart';
 import 'core/services/connectivity_service.dart';
 import 'core/services/agora_service.dart';
+import 'core/services/association_theme_service.dart';
 import 'core/services/current_user_context.dart';
 import 'core/services/driver_location_service.dart';
+import 'core/services/fcm_token_service.dart';
 import 'core/services/overlay_ptt_service.dart';
 import 'core/services/radio_power_service.dart';
 import 'core/widgets/connectivity_banner.dart';
@@ -172,6 +174,11 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                   associationId: user.associationId,
                   role: user.role,
                 );
+                // Registrar el token FCM en users/{uid} para recibir
+                // notificaciones del cron dispatchScheduledNotifications.
+                FcmTokenService.instance.bind(user.uid);
+                // Cargar theme custom de la asociación (logo + colores).
+                AssociationThemeService.instance.loadFor(user.associationId);
                 // Inicializar GPS para conductores y admins con vehículo
                 if (user.role == AppConstants.roleDriver ||
                     (user.role == AppConstants.roleAdmin &&
@@ -187,17 +194,25 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                 }
               } else if (state is AuthUnauthenticated) {
                 CurrentUserContext.instance.clear();
+                FcmTokenService.instance.unbind();
+                AssociationThemeService.instance.clear();
                 locationService.reset();
               }
             },
             child: ConnectivityBanner(
-              child: MaterialApp.router(
+              child: ListenableBuilder(
+                listenable: AssociationThemeService.instance,
+                builder: (context, _) {
+                  final svc = AssociationThemeService.instance;
+                  return MaterialApp.router(
                 title: AppConstants.appName,
                 debugShowCheckedModeBanner: false,
-                theme: AppTheme.lightTheme,
-                darkTheme: AppTheme.darkTheme,
+                theme: svc.applyToThemeData(AppTheme.lightTheme),
+                darkTheme: svc.applyToThemeData(AppTheme.darkTheme),
                 themeMode: ThemeMode.light,
                 routerConfig: router,
+              );
+                },
               ),
             ),
           );

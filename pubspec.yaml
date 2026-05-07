@@ -77,6 +77,10 @@ dependencies:
   timeago: ^3.7.0
   flutter_native_splash: ^2.4.6
 
+  # Reportes (PDF A4 + Excel)
+  pdf: ^3.11.3
+  printing: ^5.14.2
+
 dev_dependencies:
   flutter_test:
     sdk: flutter
