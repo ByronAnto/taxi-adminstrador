@@ -49,6 +49,7 @@ class DriverLocationService extends ChangeNotifier {
   /// Busca el driver doc, sincroniza datos denormalizados y pone online.
   Future<void> initialize({
     required String userId,
+    String? associationId,
     String? displayName,
     String? vehicleNumber,
     String? plate,
@@ -73,6 +74,7 @@ class DriverLocationService extends ChangeNotifier {
             _firestore.collection(AppConstants.driversCollection).doc();
         await newDocRef.set({
           'userId': userId,
+          'associationId': associationId ?? '',
           'licenseNumber': '',
           'licenseType': '',
           'licenseExpiry': now,
@@ -99,7 +101,8 @@ class DriverLocationService extends ChangeNotifier {
         debugPrint('📍 [LocationService] Driver ID: $_driverId');
       }
 
-      // Sincronizar campos denormalizados (nombre, placa, nro. vehículo)
+      // Sincronizar campos denormalizados (nombre, placa, nro. vehículo).
+      // associationId se rellena en docs viejos que no lo tenían (migración soft).
       final updates = <String, dynamic>{};
       if (vehicleNumber != null && vehicleNumber.isNotEmpty) {
         updates['vehicleNumber'] = vehicleNumber;
@@ -109,6 +112,9 @@ class DriverLocationService extends ChangeNotifier {
       }
       if (displayName != null && displayName.isNotEmpty) {
         updates['driverName'] = displayName;
+      }
+      if (associationId != null && associationId.isNotEmpty) {
+        updates['associationId'] = associationId;
       }
       if (updates.isNotEmpty) {
         await _firestore

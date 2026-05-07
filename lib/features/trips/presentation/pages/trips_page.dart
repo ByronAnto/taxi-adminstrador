@@ -1,7 +1,12 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
+import 'package:uuid/uuid.dart';
+import '../../../../core/constants/app_constants.dart';
+import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/models/trip_model.dart';
 import '../../domain/usecases/trip_usecases.dart';
 import '../bloc/trip_bloc.dart';
@@ -61,6 +66,7 @@ class _TripsPageState extends State<TripsPage>
       builder: (context, state) {
         return Column(
           children: [
+            _buildQuickTripBar(),
             Container(
               color: AppTheme.secondaryColor,
               child: TabBar(
@@ -92,6 +98,73 @@ class _TripsPageState extends State<TripsPage>
         );
       },
     );
+  }
+
+  /// Barra superior con botón "+1 carrera" (solo conductores).
+  ///
+  /// Crea una carrera rápida con el GPS actual como pickup, status finalizado
+  /// y source manual. Sin formularios — un click y listo. Después en el
+  /// historial el conductor puede tap-largo para editar monto/destino.
+  Widget _buildQuickTripBar() {
+    final authState = context.watch<AuthBloc>().state;
+    if (authState is! AuthAuthenticated) return const SizedBox.shrink();
+    if (authState.user.role != AppConstants.roleDriver) {
+      return const SizedBox.shrink();
+    }
+
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      color: Colors.white,
+      child: Row(
+        children: [
+          Expanded(
+            child: ElevatedButton.icon(
+              onPressed: () => _addQuickTrip(authState.user.uid,
+                  '${authState.user.name} ${authState.user.lastname}'.trim(),
+                  authState.user.associationId),
+              icon: const Icon(Icons.add_circle_outline),
+              label: const Text('+1 carrera',
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.primaryColor,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 14),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(12),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Crea una carrera rápida en Firestore con datos mínimos.
+  /// Pickup = última posición conocida del GPS, o (0,0) si no hay.
+  /// Status = finalizado, source = manual.
+  Future<void> _addQuickTrip(
+      String driverId, String driverName, String associationId) async {
+    final loc = DriverLocationService.instance;
+    final now = DateTime.now();
+    final trip = TripModel(
+      uid: const Uuid().v4(),
+      associationId: associationId,
+      driverId: driverId,
+      driverName: driverName.isEmpty ? null : driverName,
+      pickupLatitude: loc.lastLatitude ?? 0.0,
+      pickupLongitude: loc.lastLongitude ?? 0.0,
+      pickupAddress: '',
+      status: TripStatus.finalizado,
+      source: TripSource.manual,
+      startTime: now,
+      endTime: now,
+      durationMinutes: 0,
+      createdAt: now,
+    );
+    HapticFeedback.lightImpact();
+    context.read<TripBloc>().add(TripCreateRequested(trip));
   }
 
   Widget _buildFilterBar() {

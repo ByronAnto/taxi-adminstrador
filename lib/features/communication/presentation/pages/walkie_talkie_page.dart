@@ -14,6 +14,7 @@ import '../../../../core/services/radio_power_service.dart';
 import '../../../../core/services/overlay_ptt_service.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../auth/data/models/user_model.dart';
+import '../../../trips/presentation/widgets/assign_trip_modal.dart';
 import '../../data/models/channel_model.dart';
 import '../bloc/communication_bloc.dart';
 
@@ -940,6 +941,21 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                 ),
                 iconSize: 28,
               ),
+              // Asignar carrera — solo operadora (rol).
+              if (user?.role == AppConstants.roleOperator)
+                IconButton(
+                  onPressed: !_isOffline
+                      ? () => showAssignTripModal(context)
+                      : () => _showOfflineWarning(),
+                  icon: Icon(
+                    Icons.assignment_ind,
+                    color: !_isOffline
+                        ? AppTheme.primaryColor
+                        : Colors.grey,
+                  ),
+                  iconSize: 28,
+                  tooltip: 'Asignar carrera',
+                ),
             ],
           ),
         ],

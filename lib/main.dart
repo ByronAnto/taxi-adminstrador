@@ -170,6 +170,7 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                         user.numeroVehiculo.isNotEmpty)) {
                   locationService.initialize(
                     userId: user.uid,
+                    associationId: user.associationId,
                     displayName:
                         '${user.name} ${user.lastname}'.trim(),
                     vehicleNumber: user.numeroVehiculo,
