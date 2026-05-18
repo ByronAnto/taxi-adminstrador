@@ -1797,7 +1797,55 @@ exports.enforcePayments = onSchedule(
     }
 
     console.log(`[enforcePayments] A=${suspendedCount}`);
-    return { suspended: suspendedCount };
+
+    // ─── Pase B: conductores en mora ───
+    const { computeNextDueDate } = require("./lib/dueDate");
+
+    const activeAssocs = await db.collection("associations")
+      .where("status", "==", "active")
+      .get();
+
+    let blockedCount = 0;
+    for (const aDoc of activeAssocs.docs) {
+      const cfg = aDoc.data().billingConfig;
+      if (!cfg || !(cfg.amount > 0)) continue;
+
+      const usersSnap = await db.collection("users")
+        .where("associationId", "==", aDoc.id)
+        .where("status", "==", "active")
+        .get();
+
+      for (const uDoc of usersSnap.docs) {
+        const u = uDoc.data();
+        if (!["conductor", "admin"].includes(u.role)) continue;
+        if (!u.approvedAt) continue;
+
+        const last = await _lastValidatedPayment(uDoc.id, aDoc.id);
+        const nextDue = computeNextDueDate(
+          { approvedAt: u.approvedAt.toDate ? u.approvedAt.toDate() : u.approvedAt },
+          cfg, last,
+        );
+        if (nextDue.getTime() > now.toMillis()) continue;
+        if (await _hasActivePermit(uDoc.id, nextDue)) continue;
+
+        await uDoc.ref.update({
+          status: "paymentBlocked",
+          blockedAt: now,
+          blockReason: "cuota_vencida",
+          updatedAt: now,
+        });
+        blockedCount++;
+        console.log(`[enforcePayments] blocked user ${uDoc.id}`);
+
+        await _sendFcmToUid(uDoc.id, {
+          title: "Tu cuenta fue bloqueada",
+          body: "Sube tu comprobante de pago para reactivarte.",
+        }).catch(() => {});
+      }
+    }
+
+    console.log(`[enforcePayments] B=${blockedCount}`);
+    return { suspended: suspendedCount, blocked: blockedCount };
   }
 );
 
@@ -1811,6 +1859,38 @@ async function _sendFcmToUid(uid, payload) {
     token,
     notification: { title: payload.title, body: payload.body },
   });
+}
+
+/// Último pago validado y NO anulado del conductor.
+async function _lastValidatedPayment(uid, associationId) {
+  const snap = await db.collection("payments")
+    .where("driverId", "==", uid)
+    .where("associationId", "==", associationId)
+    .where("status", "==", "validated")
+    .orderBy("validatedAt", "desc")
+    .limit(10)
+    .get();
+  for (const d of snap.docs) {
+    if (!d.data().voidedAt) return d.data();
+  }
+  return null;
+}
+
+/// True si el conductor tiene un permiso activo cubriendo la fecha dada.
+async function _hasActivePermit(uid, dateCovered) {
+  const snap = await db.collection("permissions")
+    .where("driverId", "==", uid)
+    .where("status", "==", "active")
+    .limit(5)
+    .get();
+  for (const d of snap.docs) {
+    const p = d.data();
+    const start = p.startDate?.toDate?.();
+    const end = p.expectedEndDate?.toDate?.();
+    if (!start || !end) continue;
+    if (dateCovered >= start && dateCovered <= end) return true;
+  }
+  return false;
 }
 
 // ───────────────────────────────────────────────────────────────────
