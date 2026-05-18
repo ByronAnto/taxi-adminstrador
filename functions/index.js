@@ -1189,6 +1189,151 @@ exports.voidPayment = onCall({}, async (request) => {
   return { ok: true };
 });
 
+// ──────────────────────────────────────────────────────────────────
+//  reportAssociationPayment — admin sube comprobante de membresía al
+//  super-admin. Crea doc en `payments` con concept='membresia_asociacion'.
+// ──────────────────────────────────────────────────────────────────
+
+exports.reportAssociationPayment = onCall({}, async (request) => {
+  const auth = requireAuth(request);
+  const { amount, bank, transactionRef, transactionDate, photoUrl, photoExpiresAt } = request.data || {};
+
+  if (!amount || amount <= 0) {
+    throw new HttpsError("invalid-argument", "Monto inválido.");
+  }
+
+  const userSnap = await db.collection("users").doc(auth.uid).get();
+  const u = userSnap.data() || {};
+  if (u.role !== "admin") {
+    throw new HttpsError("permission-denied", "Solo admin puede reportar membresía.");
+  }
+
+  const now = FieldValue.serverTimestamp();
+  const docRef = db.collection("payments").doc();
+  await docRef.set({
+    associationId: u.associationId,
+    driverId: auth.uid,
+    driverName: `${u.name || ""} ${u.lastname || ""}`.trim(),
+    concept: "membresia_asociacion",
+    amount,
+    status: "pending",
+    targetSuperAdmin: true,
+    reportedAt: now,
+    proof: {
+      method: "transferencia",
+      bank: bank || null,
+      transactionRef: transactionRef || null,
+      transactionDate: transactionDate ? Timestamp.fromDate(new Date(transactionDate)) : null,
+      photoUrl: photoUrl || null,
+      photoExpiresAt: photoExpiresAt ? Timestamp.fromDate(new Date(photoExpiresAt)) : null,
+    },
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  return { ok: true, paymentId: docRef.id };
+});
+
+// ──────────────────────────────────────────────────────────────────
+//  validateAssociationPayment — super-admin aprueba pago de membresía.
+//  Extiende paidUntil + months, activa asociación, FCM a todos.
+// ──────────────────────────────────────────────────────────────────
+
+exports.validateAssociationPayment = onCall({}, async (request) => {
+  const auth = requireAuth(request);
+  const { paymentId, monthsToAdd } = request.data || {};
+
+  const callerEmail = auth.token.email || "";
+  const isSuper = SUPER_ADMIN_EMAILS.includes(callerEmail);
+  if (!isSuper) {
+    throw new HttpsError("permission-denied", "Solo super-admin.");
+  }
+
+  if (!paymentId) throw new HttpsError("invalid-argument", "paymentId requerido.");
+  const months = Math.max(1, Math.min(36, Number(monthsToAdd) || 1));
+
+  const pRef = db.collection("payments").doc(paymentId);
+  const pSnap = await pRef.get();
+  if (!pSnap.exists) throw new HttpsError("not-found", "Pago no existe.");
+  const p = pSnap.data();
+  if (p.concept !== "membresia_asociacion") {
+    throw new HttpsError("failed-precondition", "Este pago no es de membresía.");
+  }
+  if (p.status !== "pending") {
+    throw new HttpsError("failed-precondition", "Solo pagos pendientes.");
+  }
+
+  const now = FieldValue.serverTimestamp();
+  await pRef.update({
+    status: "validated",
+    validatedAt: now,
+    validatedBy: auth.uid,
+    updatedAt: now,
+  });
+
+  // Extender paidUntil
+  const aRef = db.collection("associations").doc(p.associationId);
+  const aSnap = await aRef.get();
+  const current = aSnap.data().paidUntil?.toDate?.() || new Date();
+  const base = current > new Date() ? current : new Date();
+  const newPaidUntil = new Date(base);
+  newPaidUntil.setUTCMonth(newPaidUntil.getUTCMonth() + months);
+
+  await aRef.update({
+    status: "active",
+    paidUntil: Timestamp.fromDate(newPaidUntil),
+    suspendedAt: FieldValue.delete(),
+    suspendedReason: FieldValue.delete(),
+    updatedAt: now,
+  });
+
+  // FCM a todos los users de la asoc
+  const usersSnap = await db.collection("users")
+    .where("associationId", "==", p.associationId)
+    .get();
+  await Promise.all(usersSnap.docs.map((u) => _sendFcmToUid(u.id, {
+    title: "Cooperativa reactivada",
+    body: "Ya puedes operar normalmente.",
+  }).catch(() => {})));
+
+  return { ok: true, newPaidUntil: newPaidUntil.toISOString() };
+});
+
+// ──────────────────────────────────────────────────────────────────
+//  extendPaidUntil — super-admin extiende paidUntil manualmente sin
+//  comprobante (caso transferencia directa fuera de la app).
+// ──────────────────────────────────────────────────────────────────
+
+exports.extendPaidUntil = onCall({}, async (request) => {
+  const auth = requireAuth(request);
+  const { associationId, monthsToAdd } = request.data || {};
+
+  const callerEmail = auth.token.email || "";
+  const isSuper = SUPER_ADMIN_EMAILS.includes(callerEmail);
+  if (!isSuper) throw new HttpsError("permission-denied", "Solo super-admin.");
+  if (!associationId) throw new HttpsError("invalid-argument", "associationId requerido.");
+  const months = Math.max(1, Math.min(36, Number(monthsToAdd) || 1));
+
+  const aRef = db.collection("associations").doc(associationId);
+  const aSnap = await aRef.get();
+  if (!aSnap.exists) throw new HttpsError("not-found", "Asoc no existe.");
+
+  const current = aSnap.data().paidUntil?.toDate?.() || new Date();
+  const base = current > new Date() ? current : new Date();
+  const newPaidUntil = new Date(base);
+  newPaidUntil.setUTCMonth(newPaidUntil.getUTCMonth() + months);
+
+  await aRef.update({
+    status: "active",
+    paidUntil: Timestamp.fromDate(newPaidUntil),
+    suspendedAt: FieldValue.delete(),
+    suspendedReason: FieldValue.delete(),
+    updatedAt: FieldValue.serverTimestamp(),
+  });
+
+  return { ok: true, newPaidUntil: newPaidUntil.toISOString() };
+});
+
 /**
  * Admin/operadora rechaza un pago. Cambia status a `rejected` con motivo.
  */
