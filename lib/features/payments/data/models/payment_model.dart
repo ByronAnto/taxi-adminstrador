@@ -177,6 +177,19 @@ class PaymentModel {
   /// Cuándo se emitió el cobro (server timestamp en creación).
   final DateTime? emittedAt;
 
+  // Campos de anulación
+  /// Cuándo fue anulado el pago (si aplica). Si no es null, el pago está anulado.
+  final DateTime? voidedAt;
+
+  /// UID del admin que anuló el pago.
+  final String? voidedBy;
+
+  /// Motivo de la anulación.
+  final String? voidReason;
+
+  /// True cuando este pago es una membresía de asociación (admin → super-admin).
+  final bool targetSuperAdmin;
+
   const PaymentModel({
     required this.uid,
     required this.associationId,
@@ -198,6 +211,10 @@ class PaymentModel {
     this.emittedBy,
     this.emittedByName,
     this.emittedAt,
+    this.voidedAt,
+    this.voidedBy,
+    this.voidReason,
+    this.targetSuperAdmin = false,
   });
 
   /// True si el conductor todavía no ha reportado el pago de un cobro
@@ -210,6 +227,13 @@ class PaymentModel {
   bool get isPending => status == PaymentStatus.pending;
   bool get isValidated => status == PaymentStatus.validated;
   bool get isRejected => status == PaymentStatus.rejected;
+
+  /// True si el pago fue anulado por un admin.
+  bool get isVoided => voidedAt != null;
+
+  /// True si el pago está validado Y no ha sido anulado.
+  bool get isEffectivelyValidated =>
+      status == PaymentStatus.validated && !isVoided;
 
   factory PaymentModel.fromFirestore(DocumentSnapshot doc) {
     final data = doc.data() as Map<String, dynamic>;
@@ -238,6 +262,10 @@ class PaymentModel {
       emittedBy: data['emittedBy'] as String?,
       emittedByName: data['emittedByName'] as String?,
       emittedAt: (data['emittedAt'] as Timestamp?)?.toDate(),
+      voidedAt: (data['voidedAt'] as Timestamp?)?.toDate(),
+      voidedBy: data['voidedBy'] as String?,
+      voidReason: data['voidReason'] as String?,
+      targetSuperAdmin: data['targetSuperAdmin'] as bool? ?? false,
     );
   }
 
@@ -264,6 +292,10 @@ class PaymentModel {
       'emittedByName': emittedByName,
       'emittedAt':
           emittedAt != null ? Timestamp.fromDate(emittedAt!) : null,
+      if (voidedAt != null) 'voidedAt': Timestamp.fromDate(voidedAt!),
+      if (voidedBy != null) 'voidedBy': voidedBy,
+      if (voidReason != null) 'voidReason': voidReason,
+      'targetSuperAdmin': targetSuperAdmin,
     };
   }
 
@@ -285,13 +317,26 @@ class PaymentModel {
 /// Etiquetas humanas para los conceptos de pago.
 class PaymentConcepts {
   PaymentConcepts._();
+
+  // Constantes de concepto para uso tipado en el código.
+  static const String cuotaMensual = 'cuota_mensual';
+  static const String cuotaSemanal = 'cuota_semanal';
+  static const String multa = 'multa';
+  static const String deuda = 'deuda';
+  static const String incentivo = 'incentivo';
+  static const String ayuda = 'ayuda';
+
+  /// Membresía que el admin de una asociación paga al super-admin.
+  static const String membresiaAsociacion = 'membresia_asociacion';
+
   static const Map<String, String> labels = {
-    'cuota_mensual': 'Cuota mensual',
-    'cuota_semanal': 'Cuota semanal',
-    'multa': 'Multa',
-    'deuda': 'Deuda',
-    'incentivo': 'Incentivo',
-    'ayuda': 'Ayuda',
+    cuotaMensual: 'Cuota mensual',
+    cuotaSemanal: 'Cuota semanal',
+    multa: 'Multa',
+    deuda: 'Deuda',
+    incentivo: 'Incentivo',
+    ayuda: 'Ayuda',
+    membresiaAsociacion: 'Membresía asociación',
   };
   static String label(String concept) => labels[concept] ?? concept;
 }
