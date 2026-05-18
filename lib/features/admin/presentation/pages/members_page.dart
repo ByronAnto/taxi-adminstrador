@@ -481,6 +481,14 @@ class _MembersPageState extends State<MembersPage> {
           Text('Hacer administrador'),
         ]),
       ));
+      items.add(const PopupMenuItem(
+        value: 'add_co_admin',
+        child: Row(children: [
+          Icon(Icons.person_add_alt_1, size: 18, color: Colors.green),
+          SizedBox(width: 8),
+          Text('Agregar como co-admin'),
+        ]),
+      ));
     }
 
     // Crear cobro one-off: para conductores activos (multa/ayuda/deuda
@@ -938,6 +946,9 @@ class _MembersPageState extends State<MembersPage> {
       case 'make_admin':
         await _confirmTransferAdmin(u);
         break;
+      case 'add_co_admin':
+        await _confirmAddCoAdmin(u);
+        break;
       case 'view_report':
         context.push(
           '/driver-report?driverId=${u.uid}&name=${Uri.encodeComponent('${u.name} ${u.lastname}'.trim())}',
@@ -1091,6 +1102,43 @@ class _MembersPageState extends State<MembersPage> {
       'transferAdmin',
       {'newAdminUid': u.uid},
       successMsg: '${u.name} ahora es el administrador.',
+    );
+  }
+
+  Future<void> _confirmAddCoAdmin(UserModel u) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('¿Agregar como co-admin?'),
+        content: Text(
+          '${u.name} ${u.lastname} pasará a tener rol de administrador, '
+          'PERO el administrador actual SE MANTIENE.\n\n'
+          'Útil cuando querés delegar responsabilidades a una segunda '
+          'persona sin perder al titular.\n\n'
+          'Esta acción se aplica de inmediato.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.green.shade700,
+              foregroundColor: Colors.white,
+            ),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Confirmar'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+
+    await _callFn(
+      'addCoAdmin',
+      {'targetUid': u.uid},
+      successMsg: '${u.name} ahora es co-administrador.',
     );
   }
 
