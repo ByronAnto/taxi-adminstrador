@@ -502,8 +502,22 @@ exports.transferAdmin = onCall({}, async (request) => {
     );
   }
 
-  // Transferencia atómica
+  // Transferencia atómica.
+  // Firestore exige que TODOS los reads vayan ANTES de TODOS los writes
+  // dentro de una transacción — por eso resolvemos el read del admin
+  // saliente arriba, y recién después emitimos las 3 escrituras.
+  const oldAdminRef = (oldAdminUid && oldAdminUid !== newAdminUid)
+    ? db.collection("users").doc(oldAdminUid)
+    : null;
   await db.runTransaction(async (tx) => {
+    // ─── READS primero ───
+    let demoteOldAdmin = false;
+    if (oldAdminRef) {
+      const oldAdminSnap = await tx.get(oldAdminRef);
+      demoteOldAdmin = oldAdminSnap.exists;
+    }
+
+    // ─── WRITES después ───
     // 1. Promover nuevo admin
     tx.update(newAdminRef, {
       role: "admin",
@@ -511,15 +525,11 @@ exports.transferAdmin = onCall({}, async (request) => {
     });
 
     // 2. Degradar admin saliente a "conductor"
-    if (oldAdminUid && oldAdminUid !== newAdminUid) {
-      const oldAdminRef = db.collection("users").doc(oldAdminUid);
-      const oldAdminSnap = await tx.get(oldAdminRef);
-      if (oldAdminSnap.exists) {
-        tx.update(oldAdminRef, {
-          role: "conductor",
-          updatedAt: FieldValue.serverTimestamp(),
-        });
-      }
+    if (demoteOldAdmin) {
+      tx.update(oldAdminRef, {
+        role: "conductor",
+        updatedAt: FieldValue.serverTimestamp(),
+      });
     }
 
     // 3. Actualizar ownerUid de la asociación
