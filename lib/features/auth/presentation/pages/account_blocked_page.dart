@@ -1,181 +1,208 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
-import '../../../../core/constants/app_constants.dart';
-import '../../../../core/theme/app_theme.dart';
+import '../../../associations/data/models/association_model.dart';
+import '../../../payments/presentation/widgets/report_association_payment_dialog.dart';
 import '../../data/models/user_model.dart';
 import '../bloc/auth_bloc.dart';
 
-/// Pantalla mostrada cuando la cuenta del conductor está bloqueada.
+/// Pantalla mostrada al usuario cuando su cuenta está bloqueada por mora,
+/// o cuando la asociación a la que pertenece está suspendida.
 ///
-/// Cubre dos casos:
-/// - `paymentBlocked`: el conductor no pagó. Puede subir comprobante para que
-///   el admin lo apruebe y vuelva a `active`.
-/// - `disabledByAdmin`: admin lo desactivó manualmente. Solo puede contactar
-///   al admin (no puede subir pago).
-///
-/// El router redirige aquí cuando `user.isBlocked == true`.
+/// Variantes:
+///  - Conductor bloqueado por su mora personal: puede subir comprobante.
+///  - Admin con asociación suspendida: puede subir comprobante de membresía.
+///  - Conductor/operadora con asociación suspendida: solo puede cerrar sesión.
 class AccountBlockedPage extends StatelessWidget {
   const AccountBlockedPage({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return BlocBuilder<AuthBloc, AuthState>(
-      builder: (context, state) {
-        if (state is! AuthAuthenticated) {
-          return const Scaffold(
-            body: Center(child: CircularProgressIndicator()),
-          );
+    final auth = context.watch<AuthBloc>().state;
+    if (auth is! AuthAuthenticated) return const _LoadingScaffold();
+    final user = auth.user;
+
+    return FutureBuilder<DocumentSnapshot>(
+      future: FirebaseFirestore.instance
+          .collection('associations')
+          .doc(user.associationId)
+          .get(),
+      builder: (ctx, snap) {
+        if (!snap.hasData) return const _LoadingScaffold();
+        final assoc = snap.data!.exists
+            ? AssociationModel.fromFirestore(snap.data!)
+            : null;
+        final assocSuspended = assoc?.status == AssociationStatus.suspended;
+        final isAdmin = user.role == 'admin';
+
+        if (assocSuspended && isAdmin) {
+          return _AssocSuspendedAdminView(assoc: assoc!, user: user);
         }
+        if (assocSuspended) {
+          return _AssocSuspendedNonAdminView(assoc: assoc!);
+        }
+        return _DriverBlockedView(user: user);
+      },
+    );
+  }
+}
 
-        final user = state.user;
-        final canPay = user.canUploadPayment;
-        final isAdminDisabled = user.status == UserStatus.disabledByAdmin;
-        // Cuando es el admin del grupo el que está bloqueado por mora, el
-        // flujo no es "subir comprobante" sino "contactar al proveedor del
-        // software". Los admins no pagan vía el formulario de pagos del
-        // conductor — pagan al operador del SaaS (Byron) por fuera.
-        final isAdminWithExpiredSub =
-            user.role == AppConstants.roleAdmin &&
-                user.status == UserStatus.paymentBlocked;
+class _LoadingScaffold extends StatelessWidget {
+  const _LoadingScaffold();
+  @override
+  Widget build(BuildContext context) =>
+      const Scaffold(body: Center(child: CircularProgressIndicator()));
+}
 
-        return Scaffold(
-          appBar: AppBar(
-            automaticallyImplyLeading: false,
-            title: const Text('Cuenta bloqueada'),
-            backgroundColor: AppTheme.errorColor,
-            foregroundColor: Colors.white,
-            actions: [
-              IconButton(
-                tooltip: 'Cerrar sesión',
-                icon: const Icon(Icons.logout),
-                onPressed: () {
-                  context.read<AuthBloc>().add(AuthSignOutRequested());
-                },
+class _DriverBlockedView extends StatelessWidget {
+  final UserModel user;
+  const _DriverBlockedView({required this.user});
+
+  @override
+  Widget build(BuildContext context) {
+    final reason = user.blockReason;
+    final reasonText = reason == 'pago_anulado'
+        ? 'Un pago tuyo fue anulado.'
+        : reason == 'cuota_vencida'
+            ? 'Tu cuota está vencida.'
+            : 'Tu cuenta está bloqueada.';
+    return Scaffold(
+      backgroundColor: Colors.red.shade50,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Icon(Icons.block, size: 80, color: Colors.red),
+              const SizedBox(height: 16),
+              const Text(
+                'Tu cuenta está bloqueada',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              Text(
+                reasonText,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 16),
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: () => context.push('/my-payments'),
+                icon: const Icon(Icons.upload),
+                label: const Text('Subir comprobante de pago'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton(
+                onPressed: () =>
+                    context.read<AuthBloc>().add(AuthSignOutRequested()),
+                child: const Text('Cerrar sesión'),
               ),
             ],
           ),
-          body: SafeArea(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  const SizedBox(height: 24),
-                  Icon(
-                    isAdminDisabled
-                        ? Icons.person_off_outlined
-                        : isAdminWithExpiredSub
-                            ? Icons.event_busy
-                            : Icons.lock_outline,
-                    size: 80,
-                    color: AppTheme.errorColor,
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    isAdminDisabled
-                        ? 'Tu cuenta fue desactivada'
-                        : isAdminWithExpiredSub
-                            ? 'Suscripción vencida'
-                            : 'Pago pendiente',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Text(
-                    isAdminDisabled
-                        ? 'El administrador de tu asociación desactivó tu cuenta. '
-                            'Contáctalo para restaurar el acceso.'
-                        : isAdminWithExpiredSub
-                            ? 'La suscripción de ${AppConstants.appName} de tu '
-                                'asociación venció. Contacta a tu proveedor del '
-                                'software para renovar el plan y reactivar el '
-                                'acceso de todos los socios.'
-                            : 'Para seguir usando ${AppConstants.appName} debes '
-                                'completar el pago de tu cuota. Sube un '
-                                'comprobante y el administrador lo aprobará '
-                                'para reactivar tu cuenta.',
-                    textAlign: TextAlign.center,
-                    style: TextStyle(
-                      fontSize: 15,
-                      color: Colors.grey.shade700,
-                      height: 1.4,
-                    ),
-                  ),
-                  const SizedBox(height: 32),
-                  if (canPay && !isAdminWithExpiredSub) ...[
-                    ElevatedButton.icon(
-                      onPressed: () => context.push('/my-payments'),
-                      icon: const Icon(Icons.upload_file),
-                      label: const Text('Subir comprobante de pago'),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: AppTheme.primaryColor,
-                        foregroundColor: Colors.white,
-                        padding: const EdgeInsets.symmetric(vertical: 14),
-                        textStyle: const TextStyle(
-                          fontSize: 16,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 12),
-                    OutlinedButton.icon(
-                      onPressed: () => context.push('/profile'),
-                      icon: const Icon(Icons.person_outline),
-                      label: const Text('Ver mi perfil'),
-                    ),
-                  ] else ...[
-                    Container(
-                      padding: const EdgeInsets.all(16),
-                      decoration: BoxDecoration(
-                        color: Colors.orange.shade50,
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: Colors.orange.shade200),
-                      ),
-                      child: Row(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Icon(Icons.info_outline,
-                              color: Colors.orange.shade800),
-                          const SizedBox(width: 12),
-                          Expanded(
-                            child: Text(
-                              isAdminWithExpiredSub
-                                  ? 'Una vez que tu proveedor renueve la '
-                                      'suscripción, todos los socios y tu '
-                                      'cuenta se reactivarán automáticamente.'
-                                  : 'No puedes subir comprobante mientras tu '
-                                      'cuenta esté desactivada. Habla con el '
-                                      'administrador.',
-                              style: TextStyle(
-                                color: Colors.orange.shade900,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ],
-                  const SizedBox(height: 24),
-                  Center(
-                    child: TextButton.icon(
-                      onPressed: () {
-                        context.read<AuthBloc>().add(AuthCheckRequested());
-                      },
-                      icon: const Icon(Icons.refresh),
-                      label: const Text('Refrescar estado'),
-                    ),
-                  ),
-                ],
+        ),
+      ),
+    );
+  }
+}
+
+class _AssocSuspendedAdminView extends StatelessWidget {
+  final AssociationModel assoc;
+  final UserModel user;
+  const _AssocSuspendedAdminView({required this.assoc, required this.user});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.red.shade50,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Icon(Icons.business, size: 80, color: Colors.red),
+              const SizedBox(height: 16),
+              const Text(
+                'Tu cooperativa fue suspendida',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
               ),
-            ),
+              const SizedBox(height: 8),
+              const Text(
+                'La membresía está vencida. Sube el comprobante de pago para reactivarla.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              ElevatedButton.icon(
+                onPressed: () => showDialog(
+                  context: context,
+                  builder: (_) => const ReportAssociationPaymentDialog(),
+                ),
+                icon: const Icon(Icons.payments),
+                label: const Text('Pagar membresía'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
+              ),
+              const SizedBox(height: 12),
+              OutlinedButton(
+                onPressed: () =>
+                    context.read<AuthBloc>().add(AuthSignOutRequested()),
+                child: const Text('Cerrar sesión'),
+              ),
+            ],
           ),
-        );
-      },
+        ),
+      ),
+    );
+  }
+}
+
+class _AssocSuspendedNonAdminView extends StatelessWidget {
+  final AssociationModel assoc;
+  const _AssocSuspendedNonAdminView({required this.assoc});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: Colors.red.shade50,
+      body: SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Icon(Icons.business, size: 80, color: Colors.red),
+              const SizedBox(height: 16),
+              const Text(
+                'Tu cooperativa fue suspendida',
+                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                'El administrador debe pagar la membresía. Mientras tanto no puedes operar.',
+                textAlign: TextAlign.center,
+              ),
+              const SizedBox(height: 24),
+              OutlinedButton(
+                onPressed: () =>
+                    context.read<AuthBloc>().add(AuthSignOutRequested()),
+                child: const Text('Cerrar sesión'),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
