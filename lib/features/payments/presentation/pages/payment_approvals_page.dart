@@ -32,6 +32,7 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
   final _functions = FirebaseFunctions.instance;
 
   _ApprovalFilter _filter = _ApprovalFilter.pending;
+  bool _showOnlyMembership = false;
 
   String? _resolveAid(BuildContext context) {
     if (widget.associationId != null && widget.associationId!.isNotEmpty) {
@@ -85,31 +86,42 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
       ),
       body: Column(
         children: [
-          _buildFilters(),
+          _buildFilters(isSuper: isSuper),
           const Divider(height: 1),
-          Expanded(child: _buildList(aid)),
+          Expanded(child: _buildList(aid, isSuper: isSuper)),
         ],
       ),
     );
   }
 
-  Widget _buildFilters() {
+  Widget _buildFilters({required bool isSuper}) {
     return SizedBox(
       height: 56,
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-        children: _ApprovalFilter.values.map((f) {
-          final selected = _filter == f;
-          return Padding(
-            padding: const EdgeInsets.only(right: 6),
-            child: ChoiceChip(
-              label: Text(_filterLabel(f)),
-              selected: selected,
-              onSelected: (_) => setState(() => _filter = f),
+        children: [
+          ..._ApprovalFilter.values.map((f) {
+            final selected = _filter == f;
+            return Padding(
+              padding: const EdgeInsets.only(right: 6),
+              child: ChoiceChip(
+                label: Text(_filterLabel(f)),
+                selected: selected,
+                onSelected: (_) => setState(() => _filter = f),
+              ),
+            );
+          }),
+          if (isSuper)
+            Padding(
+              padding: const EdgeInsets.only(left: 2),
+              child: FilterChip(
+                label: const Text('Solo membresías'),
+                selected: _showOnlyMembership,
+                onSelected: (v) => setState(() => _showOnlyMembership = v),
+              ),
             ),
-          );
-        }).toList(),
+        ],
       ),
     );
   }
@@ -127,10 +139,20 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
     }
   }
 
-  Widget _buildList(String aid) {
-    final query = _firestore
-        .collection('payments')
-        .where('associationId', isEqualTo: aid);
+  Widget _buildList(String aid, {required bool isSuper}) {
+    // Super-admin en modo "Solo membresías": consulta cross-asociación,
+    // filtrando por concept + targetSuperAdmin, sin restricción de associationId.
+    Query<Map<String, dynamic>> query;
+    if (isSuper && _showOnlyMembership) {
+      query = _firestore
+          .collection('payments')
+          .where('concept', isEqualTo: 'membresia_asociacion')
+          .where('targetSuperAdmin', isEqualTo: true);
+    } else {
+      query = _firestore
+          .collection('payments')
+          .where('associationId', isEqualTo: aid);
+    }
 
     return StreamBuilder<QuerySnapshot>(
       stream: query.snapshots(),
@@ -284,6 +306,14 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
   }
 
   Future<void> _approve(PaymentModel p) async {
+    if (p.concept == 'membresia_asociacion') {
+      await _approveMembership(p);
+    } else {
+      await _approveRegular(p);
+    }
+  }
+
+  Future<void> _approveRegular(PaymentModel p) async {
     Navigator.pop(context); // cerrar dialog
     try {
       await _functions
@@ -293,6 +323,65 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Pago validado.'),
+          backgroundColor: Colors.green,
+        ),
+      );
+    } on FirebaseFunctionsException catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: ${e.message ?? e.code}'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    }
+  }
+
+  Future<void> _approveMembership(PaymentModel p) async {
+    // Pedir al super-admin cuántos meses extender
+    int selectedMonths = 1;
+    final months = await showDialog<int>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('¿Cuántos meses extender?'),
+        content: StatefulBuilder(builder: (ctx, setLocal) {
+          return DropdownButton<int>(
+            value: selectedMonths,
+            items: [1, 3, 6, 12]
+                .map((m) => DropdownMenuItem(
+                      value: m,
+                      child: Text('$m mes${m == 1 ? '' : 'es'}'),
+                    ))
+                .toList(),
+            onChanged: (v) => setLocal(() => selectedMonths = v ?? 1),
+          );
+        }),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(selectedMonths),
+            child: const Text('Aprobar'),
+          ),
+        ],
+      ),
+    );
+
+    if (months == null) return; // usuario canceló
+    if (!mounted) return;
+
+    Navigator.pop(context); // cerrar dialog de detalle
+    try {
+      await _functions
+          .httpsCallable('validateAssociationPayment')
+          .call({'paymentId': p.uid, 'monthsToAdd': months});
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              'Membresía aprobada (+$months mes${months == 1 ? '' : 'es'}).'),
           backgroundColor: Colors.green,
         ),
       );
@@ -440,7 +529,18 @@ class _PaymentTile extends StatelessWidget {
             ),
             // Nombre + unidad denormalizados al doc en el reporte. Si
             // no están (doc antiguo), caemos al UID truncado.
+            // Para pagos de membresía de asociación mostramos etiqueta especial.
             Builder(builder: (_) {
+              if (payment.concept == 'membresia_asociacion') {
+                final assocId = payment.associationId;
+                final label = assocId.isNotEmpty
+                    ? 'Membresía · Asoc: ${assocId.substring(0, assocId.length.clamp(0, 8))}…'
+                    : 'Membresía asociación';
+                return Text(
+                  'Reportado ${df.format(payment.reportedAt)} · $label',
+                  style: const TextStyle(fontSize: 11, color: Colors.black54),
+                );
+              }
               final name = (payment.driverName ?? '').trim();
               final unit = (payment.driverVehicleNumber ?? '').trim();
               final who = name.isNotEmpty
