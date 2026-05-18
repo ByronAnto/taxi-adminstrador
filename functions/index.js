@@ -2020,21 +2020,21 @@ exports.enforcePayments = onSchedule(
         `[enforcePayments] suspended assoc ${doc.id} (${a.name || ""})`
       );
 
-      // FCM al admin
-      const adminSnap = await db
+      // FCM a TODOS los admins activos de la asoc (puede haber 2+ via addCoAdmin)
+      const adminsSnap = await db
         .collection("users")
         .where("associationId", "==", doc.id)
         .where("role", "==", "admin")
         .where("status", "==", "active")
-        .limit(1)
         .get();
-      if (!adminSnap.empty) {
-        const adminUid = adminSnap.docs[0].id;
-        await _sendFcmToUid(adminUid, {
-          title: "Cooperativa suspendida",
-          body: `Tu cooperativa ${a.name || ""} fue suspendida por mora. Paga la membresía para reactivarla.`,
-        }).catch((e) => console.error("FCM error admin", e));
-      }
+      await Promise.all(
+        adminsSnap.docs.map((aDoc) =>
+          _sendFcmToUid(aDoc.id, {
+            title: "Cooperativa suspendida",
+            body: `Tu cooperativa ${a.name || ""} fue suspendida por mora. Paga la membresía para reactivarla.`,
+          }).catch((e) => console.error("FCM error admin", e))
+        )
+      );
     }
 
     console.log(`[enforcePayments] A=${suspendedCount}`);
