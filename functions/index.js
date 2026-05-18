@@ -2686,11 +2686,19 @@ async function _runDispatchScheduledNotifications() {
           data: { type: "admin_notification", notifId: d.id },
         });
       }
-      await d.ref.update({
+      // TTL 72h: si el creador no seteó expiresAt, lo derivamos aquí
+      // como now + 72h. Después purgeExpiredNotifications borra el doc.
+      const update = {
         status: "dispatched",
         dispatchedAt: FieldValue.serverTimestamp(),
         recipientsCount: tokens.length,
-      });
+      };
+      if (!n.expiresAt) {
+        const exp = new Date();
+        exp.setHours(exp.getHours() + 72);
+        update.expiresAt = Timestamp.fromDate(exp);
+      }
+      await d.ref.update(update);
       dispatched++;
     } catch (e) {
       console.error("dispatch notif", d.id, e.message);
@@ -2716,6 +2724,52 @@ exports.dispatchScheduledNotifications = onSchedule(
   async () => {
     const summary = await _runDispatchScheduledNotifications();
     console.log("dispatchScheduledNotifications:", JSON.stringify(summary));
+    return summary;
+  }
+);
+
+// ───────────────────────────────────────────────────────────────────
+//  purgeExpiredNotifications — cron diario 02:30 ECU.
+//  Borra docs de `notifications` con expiresAt <= now. TTL típico 72h.
+//  (Los push de Android se borran solos del shade; este cron limpia el
+//   historial guardado en Firestore.)
+// ───────────────────────────────────────────────────────────────────
+
+async function _runPurgeExpiredNotifications() {
+  const now = Timestamp.now();
+  let deleted = 0;
+  let scanned = 0;
+  // Lotes de 200 para no excederse del límite de batch (500).
+  while (true) {
+    const snap = await db
+      .collection("notifications")
+      .where("expiresAt", "<=", now)
+      .limit(200)
+      .get();
+    if (snap.empty) break;
+    const batch = db.batch();
+    for (const d of snap.docs) {
+      batch.delete(d.ref);
+      scanned++;
+    }
+    await batch.commit();
+    deleted += snap.size;
+    if (snap.size < 200) break; // última tanda
+  }
+  return { ok: true, deleted, scanned };
+}
+
+exports.purgeExpiredNotifications = onSchedule(
+  {
+    schedule: "30 2 * * *",
+    timeZone: "America/Guayaquil",
+    timeoutSeconds: 540,
+    memory: "256MiB",
+    retryCount: 1,
+  },
+  async () => {
+    const summary = await _runPurgeExpiredNotifications();
+    console.log("purgeExpiredNotifications:", JSON.stringify(summary));
     return summary;
   }
 );
