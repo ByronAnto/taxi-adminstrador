@@ -5,6 +5,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
+import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
@@ -703,6 +704,34 @@ class _PaymentDetailDialog extends StatelessWidget {
                   ],
                 ),
               ),
+            // Botón anular pago — solo admin, solo si validated y no voided
+            Builder(builder: (ctx) {
+              final auth = ctx.read<AuthBloc>().state;
+              final isAdmin = auth is AuthAuthenticated &&
+                  auth.user.role == AppConstants.roleAdmin;
+              if (!isAdmin) return const SizedBox.shrink();
+              if (payment.status != PaymentStatus.validated) {
+                return const SizedBox.shrink();
+              }
+              if (payment.isVoided) return const SizedBox.shrink();
+
+              return Container(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    icon: const Icon(Icons.block, color: Colors.red),
+                    label: const Text('Anular pago',
+                        style: TextStyle(color: Colors.red)),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(color: Colors.red),
+                    ),
+                    onPressed: () =>
+                        _confirmAndVoid(ctx, payment),
+                  ),
+                ),
+              );
+            }),
           ],
         ),
       ),
@@ -796,6 +825,80 @@ class _PaymentDetailDialog extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+// ─────────────────── Standalone helper para anular pago ───────────────────
+
+Future<void> _confirmAndVoid(
+    BuildContext context, PaymentModel payment) async {
+  final reasonCtrl = TextEditingController();
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (ctx) => AlertDialog(
+      title: const Text('Anular pago'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Text(
+            'Esta acción bloquea al conductor inmediatamente. '
+            'Recibe FCM push con el motivo. ¿Continuar?',
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: reasonCtrl,
+            maxLines: 3,
+            decoration: const InputDecoration(
+              labelText: 'Motivo (mín 10 caracteres)',
+              border: OutlineInputBorder(),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(ctx).pop(false),
+          child: const Text('Cancelar'),
+        ),
+        ElevatedButton(
+          style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+          onPressed: () {
+            if (reasonCtrl.text.trim().length < 10) {
+              ScaffoldMessenger.of(ctx).showSnackBar(
+                const SnackBar(
+                    content:
+                        Text('Motivo debe tener al menos 10 caracteres')),
+              );
+              return;
+            }
+            Navigator.of(ctx).pop(true);
+          },
+          child: const Text('Anular'),
+        ),
+      ],
+    ),
+  );
+
+  if (confirmed != true) return;
+  if (!context.mounted) return;
+
+  final messenger = ScaffoldMessenger.of(context);
+  final navigator = Navigator.of(context);
+  try {
+    await FirebaseFunctions.instance.httpsCallable('voidPayment').call({
+      'paymentId': payment.uid,
+      'reason': reasonCtrl.text.trim(),
+    });
+    if (!context.mounted) return;
+    navigator.pop(); // cierra el detail dialog
+    messenger.showSnackBar(const SnackBar(
+      content: Text('Pago anulado y conductor bloqueado'),
+    ));
+  } on FirebaseFunctionsException catch (e) {
+    if (!context.mounted) return;
+    messenger.showSnackBar(SnackBar(
+      content: Text('Error: ${e.message ?? e.code}'),
+    ));
   }
 }
 
