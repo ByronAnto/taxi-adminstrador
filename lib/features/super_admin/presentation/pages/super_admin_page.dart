@@ -163,6 +163,20 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
             ),
             child: _buildPricingTiersList(),
           ),
+          const SizedBox(height: 16),
+          _buildSectionCard(
+            title: 'Configuración global',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                ElevatedButton.icon(
+                  icon: const Icon(Icons.message),
+                  label: const Text('Editar mensaje del banner de vencimiento'),
+                  onPressed: () => _editBannerMessage(context),
+                ),
+              ],
+            ),
+          ),
         ],
       ),
     );
@@ -888,6 +902,57 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(content: Text(message), backgroundColor: color),
+    );
+  }
+
+  // ─────────────────── Configuración global ───────────────────
+
+  Future<void> _editBannerMessage(BuildContext context) async {
+    final fs = FirebaseFirestore.instance;
+    final snap = await fs.collection('app_config').doc('global').get();
+    final current = snap.data()?['dueDateBannerMessage'] as String? ??
+        'Recuerde pagar {amount} antes de las 00:00 del {dueDate} o será bloqueado.';
+    final ctrl = TextEditingController(text: current);
+
+    if (!context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final saved = await showDialog<String?>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Mensaje del banner'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('Placeholders soportados:\n{amount}, {dueDate}',
+                style: TextStyle(fontSize: 12, color: Colors.grey)),
+            const SizedBox(height: 8),
+            TextField(controller: ctrl, maxLines: 4),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(null),
+            child: const Text('Cancelar'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(ctrl.text),
+            child: const Text('Guardar'),
+          ),
+        ],
+      ),
+    );
+
+    if (saved == null) return;
+
+    await fs.collection('app_config').doc('global').set({
+      'dueDateBannerMessage': saved,
+      'updatedAt': FieldValue.serverTimestamp(),
+    }, SetOptions(merge: true));
+
+    if (!context.mounted) return;
+    messenger.showSnackBar(
+      const SnackBar(content: Text('Mensaje guardado')),
     );
   }
 }
