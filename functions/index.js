@@ -1149,7 +1149,20 @@ exports.voidPayment = onCall({}, async (request) => {
     throw new HttpsError("failed-precondition", "Solo se anulan pagos validados (no anulados).");
   }
 
-  await _assertCanValidate(auth, p.associationId);
+  // Solo admin del tenant o super-admin (la operadora NO puede anular,
+  // solo validar/rechazar pagos pending).
+  const callerEmail = auth.token.email || "";
+  const isSuper = SUPER_ADMIN_EMAILS.includes(callerEmail);
+  if (!isSuper) {
+    const callerSnap = await db.collection("users").doc(auth.uid).get();
+    const caller = callerSnap.exists ? callerSnap.data() : null;
+    if (!caller || caller.role !== "admin" || caller.associationId !== p.associationId) {
+      throw new HttpsError(
+        "permission-denied",
+        "Solo admin del tenant o super-admin pueden anular un pago."
+      );
+    }
+  }
 
   const now = FieldValue.serverTimestamp();
   await paymentRef.update({
