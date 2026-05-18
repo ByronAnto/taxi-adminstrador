@@ -1735,6 +1735,84 @@ exports.purgeExpiredProofsNow = onCall({}, async (request) => {
   };
 });
 
+// ──────────────────────────────────────────────────────────────────
+//  enforcePayments — cron diario 00:00 America/Guayaquil
+//  Pase A: suspende asociaciones con paidUntil/trialEndsAt vencido.
+//  Pase B: bloquea conductores en mora (Task 7).
+//  Pase C: reactiva los que ya tienen pago al día (Task 8).
+// ──────────────────────────────────────────────────────────────────
+
+exports.enforcePayments = onSchedule(
+  {
+    schedule: "every day 00:00",
+    timeZone: "America/Guayaquil",
+    memory: "512MiB",
+    timeoutSeconds: 540,
+  },
+  async (event) => {
+    const now = Timestamp.now();
+    console.log("[enforcePayments] start", now.toDate().toISOString());
+
+    // ─── Pase A: asociaciones vencidas ───
+    const assocSnap = await db
+      .collection("associations")
+      .where("status", "in", ["active", "trial"])
+      .get();
+
+    let suspendedCount = 0;
+    for (const doc of assocSnap.docs) {
+      const a = doc.data();
+      const isTrial = a.status === "trial";
+      const expiry = isTrial ? a.trialEndsAt : a.paidUntil;
+      if (!expiry) continue;
+      const expiryDate = expiry.toDate ? expiry.toDate() : new Date(expiry);
+      if (expiryDate.getTime() > now.toMillis()) continue;
+
+      await doc.ref.update({
+        status: "suspended",
+        suspendedAt: now,
+        suspendedReason: isTrial ? "expired_trial" : "expired_paid_until",
+        updatedAt: now,
+      });
+      suspendedCount++;
+      console.log(
+        `[enforcePayments] suspended assoc ${doc.id} (${a.name || ""})`
+      );
+
+      // FCM al admin
+      const adminSnap = await db
+        .collection("users")
+        .where("associationId", "==", doc.id)
+        .where("role", "==", "admin")
+        .where("status", "==", "active")
+        .limit(1)
+        .get();
+      if (!adminSnap.empty) {
+        const adminUid = adminSnap.docs[0].id;
+        await _sendFcmToUid(adminUid, {
+          title: "Cooperativa suspendida",
+          body: `Tu cooperativa ${a.name || ""} fue suspendida por mora. Paga la membresía para reactivarla.`,
+        }).catch((e) => console.error("FCM error admin", e));
+      }
+    }
+
+    console.log(`[enforcePayments] A=${suspendedCount}`);
+    return { suspended: suspendedCount };
+  }
+);
+
+/// Helper interno para enviar FCM a un uid usando el fcmToken guardado.
+async function _sendFcmToUid(uid, payload) {
+  const u = await db.collection("users").doc(uid).get();
+  const token = u.data()?.fcmToken;
+  if (!token) return;
+  const { getMessaging } = require("firebase-admin/messaging");
+  await getMessaging().send({
+    token,
+    notification: { title: payload.title, body: payload.body },
+  });
+}
+
 // ───────────────────────────────────────────────────────────────────
 //  checkSubscriptions — cron diario 00:05 ECU.
 //  Para cada asociación:
