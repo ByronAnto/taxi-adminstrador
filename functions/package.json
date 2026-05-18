@@ -6,7 +6,8 @@
     "shell": "firebase functions:shell",
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",
-    "logs": "firebase functions:log"
+    "logs": "firebase functions:log",
+    "test": "jest"
   },
   "engines": {
     "node": "22"
@@ -18,5 +19,8 @@
     "firebase-functions": "^7.2.5",
     "nodemailer": "^6.10.1"
   },
-  "private": true
+  "private": true,
+  "devDependencies": {
+    "jest": "^30.4.2"
+  }
 }
