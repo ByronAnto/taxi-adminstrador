@@ -114,6 +114,7 @@ void _initAuth() {
   sl.registerLazySingleton(() => CheckAuthUseCase(sl<AuthRepository>()));
   sl.registerLazySingleton(() => ResetPasswordUseCase(sl<AuthRepository>()));
   sl.registerLazySingleton(() => UpdateProfileUseCase(sl<AuthRepository>()));
+  sl.registerLazySingleton(() => ChangePasswordUseCase(sl<AuthRepository>()));
 
   // Bloc
   sl.registerFactory<AuthBloc>(
@@ -124,6 +125,7 @@ void _initAuth() {
       checkAuthUseCase: sl<CheckAuthUseCase>(),
       resetPasswordUseCase: sl<ResetPasswordUseCase>(),
       updateProfileUseCase: sl<UpdateProfileUseCase>(),
+      changePasswordUseCase: sl<ChangePasswordUseCase>(),
     ),
   );
 }

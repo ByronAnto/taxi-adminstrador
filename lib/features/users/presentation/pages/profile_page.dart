@@ -201,46 +201,10 @@ class _ProfilePageState extends State<ProfilePage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Mi Perfil'),
+        // Las herramientas de administración ahora viven en el Panel
+        // (home → sección "Administración"), con tarjetas cuadradas más
+        // visibles. Acá solo dejamos editar perfil.
         actions: [
-          BlocBuilder<AuthBloc, AuthState>(
-            builder: (context, state) {
-              if (state is! AuthAuthenticated) return const SizedBox.shrink();
-              final isSuper =
-                  state.user.email == 'brealpeaymara@gmail.com';
-              final isAdmin = state.user.role == AppConstants.roleAdmin;
-              final isDriver =
-                  state.user.role == AppConstants.roleDriver || isAdmin;
-              return Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (isDriver)
-                    IconButton(
-                      icon: const Icon(Icons.payments),
-                      tooltip: 'Mis pagos',
-                      onPressed: () => context.go('/my-payments'),
-                    ),
-                  if (isAdmin || isSuper)
-                    IconButton(
-                      icon: const Icon(Icons.tune),
-                      tooltip: 'Config. cobros',
-                      onPressed: () => context.go('/billing-config'),
-                    ),
-                  if (isAdmin || isSuper)
-                    IconButton(
-                      icon: const Icon(Icons.people),
-                      tooltip: 'Gestionar socios',
-                      onPressed: () => context.go('/members'),
-                    ),
-                  if (isSuper)
-                    IconButton(
-                      icon: const Icon(Icons.shield),
-                      tooltip: 'Panel SaaS',
-                      onPressed: () => context.go('/super'),
-                    ),
-                ],
-              );
-            },
-          ),
           BlocBuilder<AuthBloc, AuthState>(
             builder: (context, state) {
               if (state is! AuthAuthenticated) return const SizedBox();
@@ -294,6 +258,20 @@ class _ProfilePageState extends State<ProfilePage> {
             );
             // Re-check auth to reload user
             context.read<AuthBloc>().add(AuthCheckRequested());
+          } else if (state is AuthPasswordChanged) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(
+                content: Text('Contraseña actualizada correctamente'),
+                backgroundColor: AppTheme.successColor,
+              ),
+            );
+          } else if (state is AuthPasswordChangeFailure) {
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(state.message),
+                backgroundColor: AppTheme.errorColor,
+              ),
+            );
           }
         },
         builder: (context, state) {
@@ -418,6 +396,27 @@ class _ProfilePageState extends State<ProfilePage> {
                 ),
 
                 const SizedBox(height: 24),
+
+                // Cambiar contraseña
+                SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton.icon(
+                    onPressed: () => _showChangePasswordDialog(context),
+                    icon: const Icon(Icons.lock_reset),
+                    label: const Text('Cambiar contraseña'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: AppTheme.primaryColor,
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      side: BorderSide(
+                          color: AppTheme.primaryColor.withValues(alpha: 0.5)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                    ),
+                  ),
+                ),
+
+                const SizedBox(height: 12),
 
                 // Logout button
                 SizedBox(
@@ -746,6 +745,133 @@ class _ProfilePageState extends State<ProfilePage> {
                 ),
         ),
       ),
+    );
+  }
+
+  Future<void> _showChangePasswordDialog(BuildContext outerCtx) async {
+    final formKey = GlobalKey<FormState>();
+    final currentCtrl = TextEditingController();
+    final newCtrl = TextEditingController();
+    final confirmCtrl = TextEditingController();
+    bool obscureCurrent = true;
+    bool obscureNew = true;
+    bool obscureConfirm = true;
+
+    await showDialog<void>(
+      context: outerCtx,
+      builder: (dCtx) {
+        return StatefulBuilder(
+          builder: (sCtx, setLocal) {
+            return AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.lock_reset, color: AppTheme.primaryColor),
+                  SizedBox(width: 8),
+                  Text('Cambiar contraseña'),
+                ],
+              ),
+              content: SingleChildScrollView(
+                child: Form(
+                  key: formKey,
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextFormField(
+                        controller: currentCtrl,
+                        obscureText: obscureCurrent,
+                        decoration: InputDecoration(
+                          labelText: 'Contraseña actual',
+                          prefixIcon: const Icon(Icons.lock_outline),
+                          suffixIcon: IconButton(
+                            icon: Icon(obscureCurrent
+                                ? Icons.visibility
+                                : Icons.visibility_off),
+                            onPressed: () => setLocal(
+                                () => obscureCurrent = !obscureCurrent),
+                          ),
+                          isDense: true,
+                          border: const OutlineInputBorder(),
+                        ),
+                        validator: (v) => (v == null || v.isEmpty)
+                            ? 'Requerido'
+                            : null,
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: newCtrl,
+                        obscureText: obscureNew,
+                        decoration: InputDecoration(
+                          labelText: 'Contraseña nueva',
+                          prefixIcon: const Icon(Icons.lock),
+                          suffixIcon: IconButton(
+                            icon: Icon(obscureNew
+                                ? Icons.visibility
+                                : Icons.visibility_off),
+                            onPressed: () =>
+                                setLocal(() => obscureNew = !obscureNew),
+                          ),
+                          isDense: true,
+                          border: const OutlineInputBorder(),
+                          helperText: 'Mínimo 6 caracteres.',
+                        ),
+                        validator: (v) {
+                          if (v == null || v.length < 6) {
+                            return 'Mínimo 6 caracteres';
+                          }
+                          if (v == currentCtrl.text) {
+                            return 'Debe ser distinta a la actual';
+                          }
+                          return null;
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      TextFormField(
+                        controller: confirmCtrl,
+                        obscureText: obscureConfirm,
+                        decoration: InputDecoration(
+                          labelText: 'Repetir contraseña nueva',
+                          prefixIcon: const Icon(Icons.lock),
+                          suffixIcon: IconButton(
+                            icon: Icon(obscureConfirm
+                                ? Icons.visibility
+                                : Icons.visibility_off),
+                            onPressed: () => setLocal(
+                                () => obscureConfirm = !obscureConfirm),
+                          ),
+                          isDense: true,
+                          border: const OutlineInputBorder(),
+                        ),
+                        validator: (v) =>
+                            (v != newCtrl.text) ? 'No coincide' : null,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(dCtx).pop(),
+                  child: const Text('Cancelar'),
+                ),
+                ElevatedButton.icon(
+                  onPressed: () {
+                    if (!formKey.currentState!.validate()) return;
+                    Navigator.of(dCtx).pop();
+                    outerCtx.read<AuthBloc>().add(
+                          AuthChangePasswordRequested(
+                            currentPassword: currentCtrl.text,
+                            newPassword: newCtrl.text,
+                          ),
+                        );
+                  },
+                  icon: const Icon(Icons.check),
+                  label: const Text('Guardar'),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 

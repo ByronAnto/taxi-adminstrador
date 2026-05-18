@@ -91,6 +91,12 @@ class TripModel {
   /// Origen del documento (uno de [TripSource]).
   final String source;
 
+  /// Si la carrera fue programada para una hora futura, este timestamp
+  /// indica CUÁNDO debe atenderse. El conductor ve esto en su tab de
+  /// "Activas" como una carrera pendiente con countdown / hora.
+  /// Null si es carrera inmediata.
+  final DateTime? scheduledFor;
+
   final DateTime createdAt;
   final DateTime updatedAt;
 
@@ -119,6 +125,7 @@ class TripModel {
     this.distanceKm,
     this.notes,
     this.source = TripSource.manual,
+    this.scheduledFor,
     required this.createdAt,
     DateTime? updatedAt,
   }) : updatedAt = updatedAt ?? createdAt;
@@ -155,6 +162,7 @@ class TripModel {
       distanceKm: data['distanceKm']?.toDouble(),
       notes: data['notes'],
       source: data['source'] ?? TripSource.manual,
+      scheduledFor: (data['scheduledFor'] as Timestamp?)?.toDate(),
       createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       updatedAt: (data['updatedAt'] as Timestamp?)?.toDate(),
     );
@@ -185,6 +193,8 @@ class TripModel {
       'distanceKm': distanceKm,
       'notes': notes,
       'source': source,
+      'scheduledFor':
+          scheduledFor != null ? Timestamp.fromDate(scheduledFor!) : null,
       'createdAt': Timestamp.fromDate(createdAt),
       'updatedAt': Timestamp.fromDate(updatedAt),
     };

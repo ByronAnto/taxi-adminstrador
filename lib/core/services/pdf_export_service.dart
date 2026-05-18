@@ -9,6 +9,7 @@ import 'package:printing/printing.dart';
 import 'package:http/http.dart' as http;
 
 import '../../features/admin/data/models/cashflow_model.dart';
+import '../../features/reports/data/weekly_closing_service.dart';
 
 /// Servicio para generar PDFs A4 con márgenes 2.5cm y branding por asociación.
 ///
@@ -294,6 +295,587 @@ class PdfExportService {
         section('Egresos', egresos, PdfColors.red800),
       ],
     );
+  }
+
+  // ─── Reporte semanal estilo Excel manual del admin ───
+  //
+  // Replica el formato que la administración maneja en hojas de cálculo:
+  //   - Tabla izquierda: lista de unidades con su VALOR ($) o color
+  //     rojo (NO PAGO) / azul (PERMISO).
+  //   - Tabla derecha arriba: pagos a operadoras separados por
+  //     Miércoles / Domingos / Extras + Total.
+  //   - Tabla GASTOS VARIOS (recargas, mantenimiento puntual, etc.).
+  //   - Tabla SOBRANTE SEMANA: Ingresos vs Egresos = balance.
+  //   - Caja NOVEDADES con texto libre del admin.
+  Future<Uint8List> buildWeeklyClosingPdf({
+    required WeeklyClosingReport report,
+    String? logoUrl,
+    PdfColor? primaryColor,
+  }) async {
+    final theme = await _theme();
+    final logoImage = await _loadLogo(logoUrl);
+    final primary = primaryColor ?? PdfColors.blue800;
+    final fmt = NumberFormat.currency(symbol: '\$', decimalDigits: 2);
+    final dateFmt = DateFormat('dd MMM yyyy', 'es');
+
+    // Colores de estado (igual que el Excel del admin).
+    const cellPaid = PdfColor.fromInt(0xFFFFF59D); // amarillo
+    const cellUnpaid = PdfColor.fromInt(0xFFE57373); // rojo
+    const cellPermission = PdfColor.fromInt(0xFF64B5F6); // azul
+    const headerYellow = PdfColor.fromInt(0xFFFFF59D);
+    const greenTotal = PdfColor.fromInt(0xFFC8E6C9);
+    const blueTotal = PdfColor.fromInt(0xFFBBDEFB);
+
+    final doc = pw.Document(theme: theme);
+    doc.addPage(
+      pw.MultiPage(
+        pageFormat: PdfPageFormat.a4.copyWith(
+          marginLeft: _marginCm,
+          marginRight: _marginCm,
+          marginTop: _marginCm,
+          marginBottom: _marginCm,
+        ),
+        header: (ctx) => _buildHeader(
+          report.associationName,
+          'Cierre semanal · ${dateFmt.format(report.weekStart)} al ${dateFmt.format(report.weekEnd)}',
+          logoImage,
+          primary,
+        ),
+        build: (ctx) => [
+          // Banda superior con título de la semana.
+          pw.Container(
+            width: double.infinity,
+            padding: const pw.EdgeInsets.all(8),
+            decoration: pw.BoxDecoration(
+              color: PdfColors.grey200,
+              border: pw.Border.all(color: PdfColors.grey400),
+            ),
+            alignment: pw.Alignment.center,
+            child: pw.Text(
+              'SEMANA DEL ${dateFmt.format(report.weekStart).toUpperCase()} AL ${dateFmt.format(report.weekEnd).toUpperCase()}',
+              style: pw.TextStyle(
+                fontWeight: pw.FontWeight.bold,
+                fontSize: 11,
+              ),
+            ),
+          ),
+          pw.SizedBox(height: 10),
+          // Layout 2 columnas: Tabla unidades a la izquierda + Resumen a la derecha.
+          pw.Row(
+            crossAxisAlignment: pw.CrossAxisAlignment.start,
+            children: [
+              // ─── Columna izquierda: unidades ───
+              pw.Expanded(
+                flex: 4,
+                child: _buildUnitsTable(report, fmt, headerYellow,
+                    cellPaid, cellUnpaid, cellPermission, blueTotal),
+              ),
+              pw.SizedBox(width: 12),
+              // ─── Columna derecha: operadoras + gastos + sobrante ───
+              pw.Expanded(
+                flex: 6,
+                child: pw.Column(
+                  crossAxisAlignment: pw.CrossAxisAlignment.start,
+                  children: [
+                    _buildOperatorsTable(
+                        report, fmt, headerYellow, greenTotal, blueTotal),
+                    pw.SizedBox(height: 14),
+                    _buildMiscExpensesTable(
+                        report, fmt, headerYellow, blueTotal),
+                    pw.SizedBox(height: 14),
+                    _buildBalanceTable(
+                        report, fmt, headerYellow, blueTotal),
+                    pw.SizedBox(height: 14),
+                    _buildLegend(cellUnpaid, cellPermission),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          if (report.novedades != null && report.novedades!.isNotEmpty) ...[
+            pw.SizedBox(height: 14),
+            _buildNovedadesBox(report.novedades!),
+          ],
+        ],
+      ),
+    );
+    return doc.save();
+  }
+
+  pw.Widget _buildUnitsTable(
+    WeeklyClosingReport r,
+    NumberFormat fmt,
+    PdfColor headerYellow,
+    PdfColor cellPaid,
+    PdfColor cellUnpaid,
+    PdfColor cellPermission,
+    PdfColor blueTotal,
+  ) {
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+      columnWidths: const {
+        0: pw.FixedColumnWidth(28),
+        1: pw.FlexColumnWidth(2.5),
+        2: pw.FlexColumnWidth(1),
+      },
+      children: [
+        pw.TableRow(
+          decoration: const pw.BoxDecoration(color: PdfColors.grey300),
+          children: [
+            _hCell('N°'),
+            _hCell('Número de Unidad'),
+            _hCellColored('VALOR', headerYellow),
+          ],
+        ),
+        for (var i = 0; i < r.units.length; i++)
+          pw.TableRow(children: [
+            _cell('${i + 1}'),
+            _cell('unidad ${r.units[i].unitNumber.padLeft(2, '0')}'),
+            _valorCell(r.units[i], fmt, cellPaid, cellUnpaid, cellPermission),
+          ]),
+        pw.TableRow(
+          decoration: pw.BoxDecoration(color: blueTotal),
+          children: [
+            _hCell(''),
+            _hCell('total'),
+            _hCell(fmt.format(r.totalUnits)),
+          ],
+        ),
+      ],
+    );
+  }
+
+  pw.Widget _buildOperatorsTable(
+    WeeklyClosingReport r,
+    NumberFormat fmt,
+    PdfColor headerYellow,
+    PdfColor greenTotal,
+    PdfColor blueTotal,
+  ) {
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+      children: [
+        pw.TableRow(
+          decoration: const pw.BoxDecoration(color: PdfColors.grey300),
+          children: [
+            _hCell('PAGOS DE OPERADORA'),
+            _hCell('MIÉRCOLES'),
+            _hCell('DOMINGOS'),
+            _hCell('EXTRAS'),
+            _hCell('Total'),
+          ],
+        ),
+        for (final op in r.operatorPayments)
+          pw.TableRow(children: [
+            _cell(op.operatorName),
+            _cell(fmt.format(op.miercoles)),
+            _cell(fmt.format(op.domingos)),
+            _cell(fmt.format(op.extras)),
+            _cellColored(fmt.format(op.total), greenTotal),
+          ]),
+        pw.TableRow(
+          decoration: pw.BoxDecoration(color: PdfColors.grey200),
+          children: [
+            _hCell('total'),
+            _hCell(fmt.format(r.operatorPayments
+                .fold(0.0, (a, b) => a + b.miercoles))),
+            _hCell(fmt.format(r.operatorPayments
+                .fold(0.0, (a, b) => a + b.domingos))),
+            _hCell(fmt.format(r.operatorPayments
+                .fold(0.0, (a, b) => a + b.extras))),
+            _hCellColored(fmt.format(r.totalOperators), blueTotal),
+          ],
+        ),
+      ],
+    );
+  }
+
+  pw.Widget _buildMiscExpensesTable(
+    WeeklyClosingReport r,
+    NumberFormat fmt,
+    PdfColor headerYellow,
+    PdfColor blueTotal,
+  ) {
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+      columnWidths: const {
+        0: pw.FlexColumnWidth(3),
+        1: pw.FlexColumnWidth(1),
+      },
+      children: [
+        pw.TableRow(
+          decoration: const pw.BoxDecoration(color: PdfColors.grey300),
+          children: [
+            _hCell('GASTOS VARIOS'),
+            _hCell('Valor'),
+          ],
+        ),
+        if (r.miscExpenses.isEmpty)
+          pw.TableRow(children: [_cell(''), _cell('')])
+        else
+          for (final e in r.miscExpenses)
+            pw.TableRow(children: [
+              _cell(e.description),
+              _cell(fmt.format(e.value)),
+            ]),
+        pw.TableRow(
+          decoration: pw.BoxDecoration(color: PdfColors.grey200),
+          children: [
+            _hCell('TOTAL'),
+            _hCellColored(fmt.format(r.totalMisc), blueTotal),
+          ],
+        ),
+      ],
+    );
+  }
+
+  pw.Widget _buildBalanceTable(
+    WeeklyClosingReport r,
+    NumberFormat fmt,
+    PdfColor headerYellow,
+    PdfColor blueTotal,
+  ) {
+    return pw.Table(
+      border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+      children: [
+        pw.TableRow(
+          decoration: const pw.BoxDecoration(color: PdfColors.grey300),
+          children: [
+            _hCell('SOBRANTE SEMANA'),
+            _hCell('INGRESOS'),
+            _hCell('EGRESOS'),
+          ],
+        ),
+        pw.TableRow(children: [
+          _cell('INGRESO DE UNIDADES'),
+          _cell(fmt.format(r.totalUnits)),
+          _cell(''),
+        ]),
+        pw.TableRow(children: [
+          _cell('PAGO DE OPERADORAS'),
+          _cell(''),
+          _cell(fmt.format(r.totalOperators)),
+        ]),
+        pw.TableRow(children: [
+          _cell('GASTOS VARIOS'),
+          _cell(''),
+          _cell(fmt.format(r.totalMisc)),
+        ]),
+        pw.TableRow(
+          decoration: pw.BoxDecoration(color: PdfColors.grey200),
+          children: [
+            _hCell('TOTAL SOBRANTE SEMANA'),
+            pw.Container(
+              padding: const pw.EdgeInsets.all(4),
+              decoration: pw.BoxDecoration(color: blueTotal),
+              alignment: pw.Alignment.center,
+              child: pw.Text(
+                fmt.format(r.balance),
+                style: pw.TextStyle(fontWeight: pw.FontWeight.bold),
+              ),
+            ),
+            _cell(''),
+          ],
+        ),
+      ],
+    );
+  }
+
+  pw.Widget _buildLegend(PdfColor cellUnpaid, PdfColor cellPermission) {
+    return pw.Row(children: [
+      _legendChip(cellUnpaid, 'NO PAGO'),
+      pw.SizedBox(width: 12),
+      _legendChip(cellPermission, 'PERMISO'),
+    ]);
+  }
+
+  pw.Widget _legendChip(PdfColor color, String label) {
+    return pw.Row(children: [
+      pw.Container(width: 16, height: 16, color: color),
+      pw.SizedBox(width: 4),
+      pw.Text(label, style: const pw.TextStyle(fontSize: 9)),
+    ]);
+  }
+
+  pw.Widget _buildNovedadesBox(String text) {
+    return pw.Container(
+      width: double.infinity,
+      padding: const pw.EdgeInsets.all(8),
+      decoration: pw.BoxDecoration(
+        border: pw.Border.all(color: PdfColors.grey600, width: 0.5),
+      ),
+      child: pw.Column(
+        crossAxisAlignment: pw.CrossAxisAlignment.start,
+        children: [
+          pw.Container(
+            width: double.infinity,
+            padding: const pw.EdgeInsets.all(4),
+            color: PdfColors.grey300,
+            alignment: pw.Alignment.center,
+            child: pw.Text('NOVEDADES',
+                style: pw.TextStyle(fontWeight: pw.FontWeight.bold)),
+          ),
+          pw.SizedBox(height: 6),
+          pw.Text(text, style: const pw.TextStyle(fontSize: 9)),
+        ],
+      ),
+    );
+  }
+
+  // ─── Helpers de celdas ───
+  pw.Widget _hCell(String text) => pw.Padding(
+        padding: const pw.EdgeInsets.all(4),
+        child: pw.Text(
+          text,
+          style: pw.TextStyle(
+              fontWeight: pw.FontWeight.bold, fontSize: 9),
+          textAlign: pw.TextAlign.center,
+        ),
+      );
+
+  pw.Widget _hCellColored(String text, PdfColor color) => pw.Container(
+        padding: const pw.EdgeInsets.all(4),
+        decoration: pw.BoxDecoration(color: color),
+        alignment: pw.Alignment.center,
+        child: pw.Text(text,
+            style: pw.TextStyle(
+                fontWeight: pw.FontWeight.bold, fontSize: 9)),
+      );
+
+  pw.Widget _cell(String text) => pw.Padding(
+        padding: const pw.EdgeInsets.all(4),
+        child: pw.Text(text,
+            style: const pw.TextStyle(fontSize: 9),
+            textAlign: pw.TextAlign.center),
+      );
+
+  pw.Widget _cellColored(String text, PdfColor color) => pw.Container(
+        padding: const pw.EdgeInsets.all(4),
+        decoration: pw.BoxDecoration(color: color),
+        alignment: pw.Alignment.center,
+        child: pw.Text(text, style: const pw.TextStyle(fontSize: 9)),
+      );
+
+  pw.Widget _valorCell(
+    WeeklyUnitRow u,
+    NumberFormat fmt,
+    PdfColor cellPaid,
+    PdfColor cellUnpaid,
+    PdfColor cellPermission,
+  ) {
+    switch (u.status) {
+      case WeeklyUnitPaymentStatus.paid:
+        return _cellColored(fmt.format(u.amount), cellPaid);
+      case WeeklyUnitPaymentStatus.unpaid:
+        return pw.Container(
+            padding: const pw.EdgeInsets.all(4),
+            decoration: pw.BoxDecoration(color: cellUnpaid),
+            alignment: pw.Alignment.center,
+            child: pw.Text(''));
+      case WeeklyUnitPaymentStatus.permission:
+        return _cellColored('PERMISO', cellPermission);
+    }
+  }
+
+  pw.Widget _buildHeader(String name, String subtitle,
+      pw.MemoryImage? logo, PdfColor primary) {
+    return pw.Container(
+      padding: const pw.EdgeInsets.only(bottom: 8),
+      decoration: pw.BoxDecoration(
+        border: pw.Border(bottom: pw.BorderSide(color: primary, width: 1.5)),
+      ),
+      child: pw.Row(
+        crossAxisAlignment: pw.CrossAxisAlignment.center,
+        children: [
+          if (logo != null)
+            pw.Container(
+                width: 36, height: 36, child: pw.Image(logo)),
+          if (logo != null) pw.SizedBox(width: 10),
+          pw.Expanded(
+            child: pw.Column(
+              crossAxisAlignment: pw.CrossAxisAlignment.start,
+              children: [
+                pw.Text(name,
+                    style: pw.TextStyle(
+                        color: primary,
+                        fontWeight: pw.FontWeight.bold,
+                        fontSize: 14)),
+                pw.Text(subtitle,
+                    style: const pw.TextStyle(
+                        fontSize: 9, color: PdfColors.grey700)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ─── Cierre mensual estilo Excel admin "MES X" ───
+  //
+  // Tabla con cabecera del mes + lista de semanas con su sobrante +
+  // total del mes. Si hay saldo del mes anterior, se incluye como
+  // primera fila (igual que en el Excel del admin).
+  Future<Uint8List> buildMonthlyClosingPdf({
+    required MonthlyClosingReport report,
+    String? logoUrl,
+    PdfColor? primaryColor,
+  }) async {
+    final theme = await _theme();
+    final logoImage = await _loadLogo(logoUrl);
+    final primary = primaryColor ?? PdfColors.blue800;
+    final fmt = NumberFormat.currency(symbol: '\$', decimalDigits: 2);
+    final dateFmt = DateFormat('dd MMM', 'es');
+
+    const headerYellow = PdfColor.fromInt(0xFFFFF59D);
+    const blueTotal = PdfColor.fromInt(0xFFBBDEFB);
+    const greenWeek = PdfColor.fromInt(0xFFC8E6C9);
+
+    final doc = pw.Document(theme: theme);
+    doc.addPage(pw.MultiPage(
+      pageFormat: PdfPageFormat.a4.copyWith(
+        marginLeft: _marginCm,
+        marginRight: _marginCm,
+        marginTop: _marginCm,
+        marginBottom: _marginCm,
+      ),
+      header: (ctx) => _buildHeader(
+        report.associationName,
+        'Cierre mensual · ${report.monthLabel}',
+        logoImage,
+        primary,
+      ),
+      build: (ctx) => [
+        pw.Container(
+          width: double.infinity,
+          padding: const pw.EdgeInsets.all(8),
+          decoration: pw.BoxDecoration(
+            color: PdfColors.purple50,
+            border: pw.Border.all(color: PdfColors.purple200),
+          ),
+          alignment: pw.Alignment.center,
+          child: pw.Text(
+            'SOBRANTE DE LAS UNIDADES SEMANALES ${report.monthLabel}',
+            style: pw.TextStyle(
+                fontWeight: pw.FontWeight.bold,
+                fontSize: 12,
+                color: PdfColors.purple800),
+          ),
+        ),
+        pw.SizedBox(height: 10),
+        pw.Table(
+          border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+          columnWidths: const {
+            0: pw.FlexColumnWidth(3),
+            1: pw.FlexColumnWidth(1),
+          },
+          children: [
+            pw.TableRow(
+              decoration: pw.BoxDecoration(color: blueTotal),
+              children: [
+                _hCell('SOBRANTE MES ANTERIOR'),
+                _hCellColored(
+                    fmt.format(report.previousMonthBalance), headerYellow),
+              ],
+            ),
+            for (final w in report.weeks)
+              pw.TableRow(
+                decoration: pw.BoxDecoration(color: greenWeek),
+                children: [
+                  _cell(
+                      'Semana del ${dateFmt.format(w.weekStart)} al ${dateFmt.format(w.weekEnd)}'),
+                  _cell(fmt.format(w.balance)),
+                ],
+              ),
+            pw.TableRow(
+              decoration: pw.BoxDecoration(color: blueTotal),
+              children: [
+                _hCell('SOBRANTE TOTAL DEL MES DE ${report.monthLabel.split(' ').first}'),
+                _hCellColored(fmt.format(report.monthTotal), headerYellow),
+              ],
+            ),
+          ],
+        ),
+        pw.SizedBox(height: 12),
+        pw.Text(
+          'Suma del mes (sin saldo previo): ${fmt.format(report.weeksTotal)}',
+          style: const pw.TextStyle(
+              fontSize: 9, color: PdfColors.grey700),
+        ),
+      ],
+    ));
+    return doc.save();
+  }
+
+  /// Cierre anual: tabla de 12 meses con sobrante de cada uno y total.
+  Future<Uint8List> buildAnnualClosingPdf({
+    required AnnualClosingReport report,
+    String? logoUrl,
+    PdfColor? primaryColor,
+  }) async {
+    final theme = await _theme();
+    final logoImage = await _loadLogo(logoUrl);
+    final primary = primaryColor ?? PdfColors.blue800;
+    final fmt = NumberFormat.currency(symbol: '\$', decimalDigits: 2);
+
+    const headerYellow = PdfColor.fromInt(0xFFFFF59D);
+    const blueTotal = PdfColor.fromInt(0xFFBBDEFB);
+
+    final doc = pw.Document(theme: theme);
+    doc.addPage(pw.MultiPage(
+      pageFormat: PdfPageFormat.a4.copyWith(
+        marginLeft: _marginCm,
+        marginRight: _marginCm,
+        marginTop: _marginCm,
+        marginBottom: _marginCm,
+      ),
+      header: (ctx) => _buildHeader(
+        report.associationName,
+        'Cierre anual · ${report.year}',
+        logoImage,
+        primary,
+      ),
+      build: (ctx) => [
+        pw.Table(
+          border: pw.TableBorder.all(color: PdfColors.grey600, width: 0.5),
+          columnWidths: const {
+            0: pw.FlexColumnWidth(3),
+            1: pw.FlexColumnWidth(1),
+            2: pw.FlexColumnWidth(1),
+            3: pw.FlexColumnWidth(1),
+          },
+          children: [
+            pw.TableRow(
+              decoration: const pw.BoxDecoration(color: PdfColors.grey300),
+              children: [
+                _hCell('Mes'),
+                _hCell('Saldo previo'),
+                _hCell('Sobrante mes'),
+                _hCell('Total acumulado'),
+              ],
+            ),
+            for (final m in report.months)
+              pw.TableRow(children: [
+                _cell(m.monthLabel),
+                _cell(fmt.format(m.previousMonthBalance)),
+                _cell(fmt.format(m.weeksTotal)),
+                _cellColored(fmt.format(m.monthTotal), headerYellow),
+              ]),
+            pw.TableRow(
+              decoration: pw.BoxDecoration(color: blueTotal),
+              children: [
+                _hCell('TOTAL ${report.year}'),
+                _hCell(''),
+                _hCell(fmt.format(
+                    report.months.fold<double>(0, (a, m) => a + m.weeksTotal))),
+                _hCellColored(fmt.format(report.yearTotal), headerYellow),
+              ],
+            ),
+          ],
+        ),
+      ],
+    ));
+    return doc.save();
   }
 
   // ─── Theme con fuente Roboto (soporta tildes y ñ) ───

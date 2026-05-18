@@ -101,9 +101,14 @@ service cloud.firestore {
     }
 
     // ===== ASOCIACIONES (SaaS multi-tenant) =====
+    // Lectura pública SOLO de asociaciones activas/trial: necesario
+    // para el selector de cooperativa en el registro del cliente web,
+    // que aún no está autenticado. El resto requiere auth + match de
+    // tenant.
     match /associations/{aid} {
       allow read: if isSuperAdmin()
-        || (isAuthenticated() && myAssociationId() == aid);
+        || (isAuthenticated() && myAssociationId() == aid)
+        || resource.data.get('status', '') in ['active', 'trial'];
       allow write: if isSuperAdmin();
     }
 
@@ -191,6 +196,19 @@ service cloud.firestore {
       allow delete: if isAdmin() && sameTenant(resource.data);
     }
 
+    // ===== PERMISOS (conductor que avisa que no trabaja X días) =====
+    // - Lectura: el dueño del permiso O cualquier admin/operadora del
+    //   tenant (necesario para mostrarlo en el cierre semanal).
+    // - Crear/actualizar: solo admin/operadora del tenant.
+    match /permissions/{permissionId} {
+      allow read: if canSubmitPayment() && sameTenant(resource.data) && (
+        isOwner(resource.data.driverId) || isOperatorOrAdmin()
+      );
+      allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
+      allow update: if isOperatorOrAdmin() && sameTenant(resource.data);
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
     // ===== GASTOS =====
     match /expenses/{expenseId} {
       allow read: if isActive() && sameTenant(resource.data) && (
@@ -207,17 +225,33 @@ service cloud.firestore {
     }
 
     // ===== CANALES (Walkie-Talkie) =====
+    // - Públicos: todos los del tenant que estén operativos.
+    // - Privados: solo si el usuario está en memberIds o es operador/admin.
     match /channels/{channelId} {
-      allow read: if canOperate() && sameTenant(resource.data);
+      allow read: if canOperate() && sameTenant(resource.data) && (
+        resource.data.get('type', 'publico') == 'publico'
+        || isOperatorOrAdmin()
+        || (request.auth.uid in resource.data.get('memberIds', []))
+      );
       allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
 
       allow update: if sameTenant(resource.data) && (
         isAdmin()
+        || _canModerateChannel()  // operadora/admin con status active o paymentPending
         || _isPttLockUpdate()
         || _isMemberIdsSelfUpdate()
       );
 
       allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
+    /// Operadora/admin puede moderar (cambiar miembros, defaults, type)
+    /// del canal incluso si está en paymentPending (igual que canOperate).
+    /// Antes la regla pedía isActive() y, si el JWT estaba un poco
+    /// desactualizado o el rol caía a paymentPending por algún ciclo de
+    /// pago, la op no podía activar/desactivar conductores en el radio.
+    function _canModerateChannel() {
+      return canOperate() && getRole() in ['admin', 'operadora'];
     }
 
     function _isPttLockUpdate() {
@@ -236,10 +270,17 @@ service cloud.firestore {
         && request.resource.data.currentSpeakerName is string
         && request.resource.data.speakerLockedAt == request.time;
 
+      // Release válido si: el speaker se libera a sí mismo, el lock
+      // expiró por timeout, o un admin/operadora desbloquea a otro
+      // (caso "PTT pegado" — desatasca el canal para todos).
       let isRelease = newSpeaker == null
         && request.resource.data.get('currentSpeakerName', null) == null
         && request.resource.data.get('speakerLockedAt', null) == null
-        && (oldSpeaker == request.auth.uid || pttLockExpired(resource.data));
+        && (
+          oldSpeaker == request.auth.uid
+          || pttLockExpired(resource.data)
+          || _canModerateChannel()
+        );
 
       return isTake || isRelease;
     }
@@ -425,6 +466,18 @@ service cloud.firestore {
     // ===== ANALYTICS (precomputado por cron, solo admin del tenant lo lee) =====
     match /analytics/{analyticsId} {
       allow read: if (isAdmin() || isSuperAdmin()) && sameTenant(resource.data);
+      allow write: if isSuperAdmin();
+    }
+
+    // ===== APP CONFIG (versionamiento por plataforma) =====
+    // Doc por plataforma: `app_config/android`, `app_config/ios`.
+    // Estructura:
+    //   { minRequiredBuild, latestBuild, storeUrl, message, updatedAt }
+    // - Lectura: cualquier autenticado (la necesita el VersionGateService
+    //   en el boot, ANTES de saber el rol del usuario).
+    // - Escritura: solo super-admin (publica nuevas versiones).
+    match /app_config/{platform} {
+      allow read: if isAuthenticated();
       allow write: if isSuperAdmin();
     }
   }

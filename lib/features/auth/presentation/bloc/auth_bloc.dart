@@ -1,7 +1,9 @@
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:equatable/equatable.dart';
 import '../../domain/usecases/auth_usecases.dart';
 import '../../data/models/user_model.dart';
+import '../../../../core/services/session_teardown_service.dart';
 import '../../../../core/usecases/usecase.dart';
 
 // ============ EVENTS ============
@@ -84,6 +86,19 @@ class AuthUpdateProfileRequested extends AuthEvent {
   List<Object?> get props => [user];
 }
 
+class AuthChangePasswordRequested extends AuthEvent {
+  final String currentPassword;
+  final String newPassword;
+
+  AuthChangePasswordRequested({
+    required this.currentPassword,
+    required this.newPassword,
+  });
+
+  @override
+  List<Object?> get props => [currentPassword, newPassword];
+}
+
 // ============ STATES ============
 
 abstract class AuthState extends Equatable {
@@ -119,6 +134,15 @@ class AuthPasswordResetSent extends AuthState {}
 
 class AuthProfileUpdated extends AuthState {}
 
+class AuthPasswordChanged extends AuthState {}
+
+class AuthPasswordChangeFailure extends AuthState {
+  final String message;
+  AuthPasswordChangeFailure(this.message);
+  @override
+  List<Object?> get props => [message];
+}
+
 // ============ BLOC ============
 
 class AuthBloc extends Bloc<AuthEvent, AuthState> {
@@ -128,6 +152,7 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
   final CheckAuthUseCase checkAuthUseCase;
   final ResetPasswordUseCase resetPasswordUseCase;
   final UpdateProfileUseCase updateProfileUseCase;
+  final ChangePasswordUseCase changePasswordUseCase;
 
   AuthBloc({
     required this.signInUseCase,
@@ -136,6 +161,7 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     required this.checkAuthUseCase,
     required this.resetPasswordUseCase,
     required this.updateProfileUseCase,
+    required this.changePasswordUseCase,
   }) : super(AuthInitial()) {
     on<AuthCheckRequested>(_onCheckRequested);
     on<AuthSignInRequested>(_onSignInRequested);
@@ -143,6 +169,7 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     on<AuthSignOutRequested>(_onSignOutRequested);
     on<AuthResetPasswordRequested>(_onResetPasswordRequested);
     on<AuthUpdateProfileRequested>(_onUpdateProfileRequested);
+    on<AuthChangePasswordRequested>(_onChangePasswordRequested);
   }
 
   Future<void> _onCheckRequested(
@@ -156,7 +183,7 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         if (user.isActive) {
           emit(AuthAuthenticated(user: user));
         } else {
-          await signOutUseCase(NoParams());
+          await _cleanSignOut();
           emit(AuthError(message: 'Tu cuenta ha sido desactivada. Contacta al administrador.'));
         }
       } else {
@@ -177,7 +204,7 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         SignInParams(email: event.email, password: event.password),
       );
       if (!user.isActive) {
-        await signOutUseCase(NoParams());
+        await _cleanSignOut();
         emit(AuthError(message: 'Tu cuenta ha sido desactivada. Contacta al administrador.'));
         return;
       }
@@ -238,8 +265,19 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     Emitter<AuthState> emit,
   ) async {
     emit(AuthLoading());
-    await signOutUseCase(NoParams());
+    await _cleanSignOut();
     emit(AuthUnauthenticated());
+  }
+
+  /// Cierra la sesión limpia: ejecuta el teardown coordinado (apaga
+  /// Agora, GPS, FGS, marca driver offline + isActive=false, retira FCM
+  /// token) ANTES del signOut. Sin esto, el conductor seguía visible
+  /// en el mapa de la operadora con su última posición y dentro del
+  /// canal de Agora consumiendo billing.
+  Future<void> _cleanSignOut() async {
+    final uid = FirebaseAuth.instance.currentUser?.uid;
+    await SessionTeardownService.disposeAll(uid: uid);
+    await signOutUseCase(NoParams());
   }
 
   Future<void> _onResetPasswordRequested(
@@ -265,6 +303,41 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
       emit(AuthProfileUpdated());
     } catch (e) {
       emit(AuthError(message: 'Error al actualizar perfil: $e'));
+    }
+  }
+
+  Future<void> _onChangePasswordRequested(
+    AuthChangePasswordRequested event,
+    Emitter<AuthState> emit,
+  ) async {
+    // Guardamos el usuario actual para restaurar su estado tras el cambio.
+    final currentState = state;
+    final currentUser =
+        currentState is AuthAuthenticated ? currentState.user : null;
+    try {
+      await changePasswordUseCase(ChangePasswordParams(
+        currentPassword: event.currentPassword,
+        newPassword: event.newPassword,
+      ));
+      emit(AuthPasswordChanged());
+    } catch (e) {
+      String msg = 'No pudimos cambiar tu contraseña.';
+      final s = e.toString();
+      if (s.contains('wrong-password') || s.contains('invalid-credential')) {
+        msg = 'La contraseña actual es incorrecta.';
+      } else if (s.contains('weak-password')) {
+        msg = 'La contraseña nueva es demasiado débil (mínimo 6 caracteres).';
+      } else if (s.contains('requires-recent-login')) {
+        msg = 'Por seguridad, vuelve a iniciar sesión y reintenta.';
+      } else if (s.contains('too-many-requests')) {
+        msg = 'Demasiados intentos. Intenta más tarde.';
+      }
+      emit(AuthPasswordChangeFailure(msg));
+    } finally {
+      // Restaurar AuthAuthenticated para que la UI no se quede en estado raro.
+      if (currentUser != null) {
+        emit(AuthAuthenticated(user: currentUser));
+      }
     }
   }
 }

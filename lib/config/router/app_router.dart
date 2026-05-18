@@ -13,6 +13,8 @@ import '../../features/users/presentation/pages/profile_page.dart';
 import '../../features/payments/presentation/pages/payments_page.dart';
 import '../../features/payments/presentation/pages/expenses_page.dart';
 import '../../features/reports/presentation/pages/reports_page.dart';
+import '../../features/reports/presentation/pages/driver_report_page.dart';
+import '../../features/reports/presentation/pages/operator_validations_page.dart';
 // Pantalla vieja de gestión de usuarios reemplazada por MembersPage,
 // que sí filtra por status (pendingApproval/active/suspended/rejected).
 // import '../../features/users/presentation/pages/user_management_page.dart';
@@ -26,6 +28,7 @@ import '../../features/admin/presentation/pages/cashflow_page.dart';
 import '../../features/admin/presentation/pages/cashflow_categories_page.dart';
 import '../../features/admin/presentation/pages/payment_concepts_page.dart';
 import '../../features/admin/presentation/pages/theme_settings_page.dart';
+import '../../features/admin/presentation/pages/stand_location_settings_page.dart';
 import '../../features/admin/presentation/pages/notifications_page.dart';
 import '../../features/admin/presentation/pages/trip_requests_page.dart';
 import '../../features/payments/presentation/pages/my_payments_page.dart';
@@ -126,6 +129,23 @@ class AppRouter {
           ),
         ),
         GoRoute(
+          path: '/driver-report',
+          name: 'driver-report',
+          builder: (context, state) {
+            final driverId = state.uri.queryParameters['driverId'];
+            final driverName = state.uri.queryParameters['name'];
+            return DriverReportPage(
+              driverId: driverId,
+              driverName: driverName,
+            );
+          },
+        ),
+        GoRoute(
+          path: '/operator-validations',
+          name: 'operator-validations',
+          builder: (context, state) => const OperatorValidationsPage(),
+        ),
+        GoRoute(
           path: '/users',
           name: 'users',
           // Redirige a la nueva MembersPage con filtros por status.
@@ -193,6 +213,11 @@ class AppRouter {
           path: '/theme-settings',
           name: 'theme-settings',
           builder: (context, state) => const ThemeSettingsPage(),
+        ),
+        GoRoute(
+          path: '/stand-location',
+          name: 'stand-location',
+          builder: (context, state) => const StandLocationSettingsPage(),
         ),
         GoRoute(
           path: '/payment-concepts',

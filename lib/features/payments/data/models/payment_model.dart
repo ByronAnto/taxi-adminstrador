@@ -132,6 +132,12 @@ class PaymentModel {
   final String associationId;
   final String driverId;
 
+  /// Denormalizado del conductor al momento del reporte. Permite mostrar
+  /// nombre + unidad en la lista del admin sin hacer un lookup adicional.
+  /// Puede ser null en docs antiguos creados antes de la denormalización.
+  final String? driverName;
+  final String? driverVehicleNumber;
+
   final double amount;
 
   /// cuota_mensual | cuota_semanal | multa | deuda | incentivo | ayuda
@@ -156,10 +162,27 @@ class PaymentModel {
   final DateTime? validatedAt;
   final String? rejectionReason;
 
+  /// True si fue **emitido por admin/operadora** como un cobro one-off
+  /// (multa, ayuda, deuda, cuota extra) en vez de generado automáticamente
+  /// por el ciclo de cuotas. El conductor ve estos como "Por pagar" y
+  /// debe reportarlos con comprobante.
+  final bool isOneOff;
+
+  /// uid del admin/operadora que emitió el cobro (solo si isOneOff=true).
+  final String? emittedBy;
+
+  /// Nombre legible del que emitió, para auditoría rápida.
+  final String? emittedByName;
+
+  /// Cuándo se emitió el cobro (server timestamp en creación).
+  final DateTime? emittedAt;
+
   const PaymentModel({
     required this.uid,
     required this.associationId,
     required this.driverId,
+    this.driverName,
+    this.driverVehicleNumber,
     required this.amount,
     required this.concept,
     this.status = PaymentStatus.pending,
@@ -171,7 +194,18 @@ class PaymentModel {
     this.validatedBy,
     this.validatedAt,
     this.rejectionReason,
+    this.isOneOff = false,
+    this.emittedBy,
+    this.emittedByName,
+    this.emittedAt,
   });
+
+  /// True si el conductor todavía no ha reportado el pago de un cobro
+  /// emitido por admin (sin proof). Esto distingue "Por pagar" (cobro
+  /// pendiente que NO se ha pagado) vs "Pendiente de validación" (ya
+  /// reportó pero no validaron).
+  bool get isUnpaidCharge =>
+      isOneOff && status == PaymentStatus.pending && proof == null;
 
   bool get isPending => status == PaymentStatus.pending;
   bool get isValidated => status == PaymentStatus.validated;
@@ -183,6 +217,8 @@ class PaymentModel {
       uid: doc.id,
       associationId: data['associationId'] as String? ?? '',
       driverId: data['driverId'] as String? ?? '',
+      driverName: data['driverName'] as String?,
+      driverVehicleNumber: data['driverVehicleNumber'] as String?,
       amount: (data['amount'] as num?)?.toDouble() ?? 0.0,
       concept: data['concept'] as String? ?? 'cuota_mensual',
       status: _statusFromString(data['status']),
@@ -198,6 +234,10 @@ class PaymentModel {
       validatedBy: data['validatedBy'] as String?,
       validatedAt: (data['validatedAt'] as Timestamp?)?.toDate(),
       rejectionReason: data['rejectionReason'] as String?,
+      isOneOff: data['isOneOff'] as bool? ?? false,
+      emittedBy: data['emittedBy'] as String?,
+      emittedByName: data['emittedByName'] as String?,
+      emittedAt: (data['emittedAt'] as Timestamp?)?.toDate(),
     );
   }
 
@@ -205,6 +245,8 @@ class PaymentModel {
     return {
       'associationId': associationId,
       'driverId': driverId,
+      'driverName': driverName,
+      'driverVehicleNumber': driverVehicleNumber,
       'amount': amount,
       'concept': concept,
       'status': status.name,
@@ -217,6 +259,11 @@ class PaymentModel {
       'validatedAt':
           validatedAt != null ? Timestamp.fromDate(validatedAt!) : null,
       'rejectionReason': rejectionReason,
+      'isOneOff': isOneOff,
+      'emittedBy': emittedBy,
+      'emittedByName': emittedByName,
+      'emittedAt':
+          emittedAt != null ? Timestamp.fromDate(emittedAt!) : null,
     };
   }
 

@@ -60,15 +60,11 @@ class OverlayPttService : Service() {
         super.onCreate()
         createNotificationChannel()
 
-        val notification = createNotification()
-        if (Build.VERSION.SDK_INT >= 34) {
-            startForeground(
-                NOTIFICATION_ID, notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
-            )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
+        // Arrancamos con tipo MEDIA_PLAYBACK (idle): el mic queda libre
+        // para que otras apps (WhatsApp, Zello, grabadora) puedan usarlo
+        // mientras el overlay solo está visible. Solo conmutamos a
+        // MICROPHONE cuando el usuario presiona el botón.
+        applyForegroundType(microphoneActive = false)
 
         // Wake lock parcial — mantiene el CPU activo mientras el overlay está
         // corriendo, evitando que Doze mode mate el isolate de Flutter (donde
@@ -99,6 +95,38 @@ class OverlayPttService : Service() {
             return START_NOT_STICKY
         }
         return START_STICKY
+    }
+
+    /**
+     * Aplica el tipo de foreground service.
+     *
+     * Cuando microphoneActive=true, Android marca la app como "en uso del
+     * micrófono" y bloquea otras apps que intenten capturarlo (WhatsApp
+     * no graba, Zello no transmite, etc.). Por eso solo lo activamos
+     * mientras el usuario presiona el PTT — el resto del tiempo usamos
+     * MEDIA_PLAYBACK que NO toma el mic.
+     *
+     * En API < 34 no existe el sistema de service types granular, así
+     * que no hace nada (la declaración del manifest cubre el permiso).
+     */
+    private fun applyForegroundType(microphoneActive: Boolean) {
+        val notification = createNotification()
+        if (Build.VERSION.SDK_INT >= 34) {
+            val type = if (microphoneActive) {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+            } else {
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            }
+            try {
+                startForeground(NOTIFICATION_ID, notification, type)
+            } catch (e: Exception) {
+                // Puede fallar si la app perdió permisos; no bloqueamos.
+            }
+        } else {
+            try {
+                startForeground(NOTIFICATION_ID, notification)
+            } catch (_: Exception) {}
+        }
     }
 
     override fun onDestroy() {
@@ -212,6 +240,8 @@ class OverlayPttService : Service() {
         val pttStartRunnable = Runnable {
             if (!isDragging) {
                 pttActivated = true
+                // Reclamar el micrófono ANTES de que Agora intente capturar.
+                applyForegroundType(microphoneActive = true)
                 updateButtonVisualState("connecting")
                 PttBridge.sendPttDown()
             }
@@ -244,6 +274,8 @@ class OverlayPttService : Service() {
                             pttActivated = false
                             updateButtonVisualState("idle")
                             PttBridge.sendPttUp()
+                            // Liberar mic — el usuario movió fuera y canceló PTT.
+                            applyForegroundType(microphoneActive = false)
                         }
                     }
 
@@ -264,6 +296,9 @@ class OverlayPttService : Service() {
                         pttActivated = false
                         updateButtonVisualState("idle")
                         PttBridge.sendPttUp()
+                        // Liberar el micrófono al sistema — otras apps
+                        // podrán usarlo de inmediato.
+                        applyForegroundType(microphoneActive = false)
                     }
 
                     isDragging = false

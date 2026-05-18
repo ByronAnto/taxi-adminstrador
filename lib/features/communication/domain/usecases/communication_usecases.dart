@@ -88,9 +88,16 @@ class LockChannelUseCase implements UseCase<bool, LockChannelParams> {
 class UnlockChannelParams extends Equatable {
   final String channelId;
   final String userId;
-  const UnlockChannelParams({required this.channelId, required this.userId});
+  /// Si true, libera el lock incondicionalmente (admin/op forzando).
+  /// Las reglas Firestore validan que solo admin/op puedan hacerlo.
+  final bool force;
+  const UnlockChannelParams({
+    required this.channelId,
+    required this.userId,
+    this.force = false,
+  });
   @override
-  List<Object?> get props => [channelId, userId];
+  List<Object?> get props => [channelId, userId, force];
 }
 
 class UnlockChannelUseCase implements UseCase<void, UnlockChannelParams> {
@@ -101,6 +108,7 @@ class UnlockChannelUseCase implements UseCase<void, UnlockChannelParams> {
       repository.unlockChannel(
         channelId: params.channelId,
         userId: params.userId,
+        force: params.force,
       );
 }
 

@@ -100,11 +100,24 @@ class CommunicationRemoteDatasource {
     });
   }
 
-  /// Libera el lock del canal (solo el que lo tiene puede liberarlo).
+  /// Libera el lock del canal.
+  /// - Si [force] es false (default): solo el speaker actual puede liberar.
+  /// - Si [force] es true: libera incondicionalmente. Usado por
+  ///   admin/operadora cuando alguien queda con el "PTT pegado" y
+  ///   bloquea el canal para todos. Las reglas Firestore validan el rol.
   Future<void> unlockChannel({
     required String channelId,
     required String userId,
+    bool force = false,
   }) async {
+    if (force) {
+      await _channelsRef.doc(channelId).update({
+        'currentSpeakerId': null,
+        'currentSpeakerName': null,
+        'speakerLockedAt': null,
+      });
+      return;
+    }
     return _firestore.runTransaction((transaction) async {
       final doc = await transaction.get(_channelsRef.doc(channelId));
       if (!doc.exists) return;

@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:logger/logger.dart';
 
+import 'connectivity_service.dart';
+
 /// Servicio singleton que gestiona el foreground service para el Radio
 /// (walkie-talkie) en segundo plano, similar a Zello.
 ///
@@ -16,6 +18,8 @@ class RadioForegroundService {
   bool _isRunning = false;
   bool _isStarting = false;
   String? _activeChannelName;
+  VoidCallback? _connListener;
+  bool _showingOfflineNotif = false;
 
   bool get isRunning => _isRunning;
   String? get activeChannelName => _activeChannelName;
@@ -44,7 +48,59 @@ class RadioForegroundService {
         allowWifiLock: true,
       ),
     );
+    _attachConnectivityMonitor();
+    _recoverIfZombie();
     _logger.i('RadioForegroundService initialized');
+  }
+
+  /// Si el FGS quedó corriendo de una sesión anterior (Android mató el
+  /// isolate Flutter pero el servicio sobrevivió), resincronizar el flag
+  /// `_isRunning` para que `stopService` pueda apagarlo correctamente.
+  /// Sin esto, la notificación se queda zombi hasta reinicio del celular.
+  Future<void> _recoverIfZombie() async {
+    try {
+      final running = await FlutterForegroundTask.isRunningService;
+      if (running && !_isRunning) {
+        _isRunning = true;
+        _logger.w('FGS zombie detectado tras cold-start: resincronizando flag');
+      }
+    } catch (_) {}
+  }
+
+  /// Suscribe la notificación al estado de internet. Si la conexión se
+  /// cae mientras el radio está activo, refleja "Sin conexión" en la
+  /// notificación para que el usuario no vea estados contradictorios
+  /// (app: "desconectado", notificación: "escuchando").
+  void _attachConnectivityMonitor() {
+    if (_connListener != null) return;
+    void listener() {
+      if (!_isRunning || _activeChannelName == null) return;
+      final online = ConnectivityService.instance.isConnected;
+      if (online) {
+        if (_showingOfflineNotif) {
+          _showingOfflineNotif = false;
+          _safeUpdateNotification(_activeChannelName!);
+        }
+      } else {
+        if (!_showingOfflineNotif) {
+          _showingOfflineNotif = true;
+          _showOfflineNotification();
+        }
+      }
+    }
+    ConnectivityService.instance.addListener(listener);
+    _connListener = listener;
+  }
+
+  Future<void> _showOfflineNotification() async {
+    try {
+      await FlutterForegroundTask.updateService(
+        notificationTitle: '📻 Radio sin conexión',
+        notificationText: 'Reconectando…',
+      );
+    } catch (e) {
+      _logger.e('Error mostrando notificación offline: $e');
+    }
   }
 
   /// Inicia el foreground service cuando se activa un canal.
@@ -170,25 +226,48 @@ class RadioForegroundService {
   }
 
   /// Detiene el foreground service al salir del radio o cerrar sesión.
+  ///
+  /// Si el plugin devuelve `ServiceRequestFailure` significa que Android
+  /// ya consideraba el FGS detenido (típico tras hot-reload, cold-start
+  /// con FGS huérfano, o pérdida de permisos en Android 14+). En ese
+  /// caso no es un error crítico: forzamos reset de los flags internos
+  /// para que el próximo `startService` funcione.
   Future<void> stopService() async {
     if (!_isRunning) return;
+
+    // Verificar primero si el FGS realmente está corriendo a nivel
+    // nativo. Si no, solo limpiamos los flags y salimos sin pedir stop.
+    bool nativeRunning = false;
+    try {
+      nativeRunning = await FlutterForegroundTask.isRunningService;
+    } catch (_) {}
+
+    if (!nativeRunning) {
+      _isRunning = false;
+      _activeChannelName = null;
+      _showingOfflineNotif = false;
+      _logger.i('FGS ya no estaba corriendo, solo limpio flags');
+      return;
+    }
 
     try {
       final result = await FlutterForegroundTask.stopService();
       if (result is ServiceRequestSuccess) {
-        _isRunning = false;
-        _activeChannelName = null;
         _logger.i('Radio foreground service stopped');
       } else {
-        _logger.e('Failed to stop radio foreground service: $result');
-        // Force reset state
-        _isRunning = false;
-        _activeChannelName = null;
+        // ServiceRequestFailure: el plugin no pudo detener pero Android
+        // suele limpiar la notificación poco después. Lo dejamos como
+        // warning, no como error.
+        _logger.w(
+            'stopService no exitoso (probable FGS ya detenido por SO): $result');
       }
     } catch (e) {
-      _logger.e('Exception stopping foreground service: $e');
+      _logger.w('Exception stopping FGS (no crítico): $e');
+    } finally {
+      // Sea cual sea el resultado, los flags internos quedan limpios.
       _isRunning = false;
       _activeChannelName = null;
+      _showingOfflineNotif = false;
     }
   }
 

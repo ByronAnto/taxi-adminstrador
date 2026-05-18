@@ -49,4 +49,10 @@ abstract class AuthRepository {
 
   /// Recuperar contraseña
   Future<void> resetPassword(String email);
+
+  /// Cambiar contraseña del usuario autenticado.
+  Future<void> changePassword({
+    required String currentPassword,
+    required String newPassword,
+  });
 }

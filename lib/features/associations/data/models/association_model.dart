@@ -191,6 +191,64 @@ class AssociationTheme {
 ///
 /// Cada doc tiene un slug interno (`id`) y un `code` corto público
 /// que los conductores escriben al registrarse.
+/// Ubicación física de la parada principal de la asociación + radio
+/// permitido para que un conductor se sume a la cola.
+///
+/// Si `lat`/`lng` están en null, la asociación NO tiene parada
+/// configurada y la validación de distancia queda deshabilitada
+/// (cualquier conductor puede entrar a la cola desde cualquier lugar,
+/// como funcionaba antes).
+class StandLocation {
+  final double? lat;
+  final double? lng;
+
+  /// Radio permitido en KM. Default 1 km.
+  /// Si el conductor está dentro de este radio, puede entrar a la cola.
+  final double radiusKm;
+
+  /// Etiqueta opcional de la parada (ej. "Parque central").
+  final String? label;
+
+  const StandLocation({
+    this.lat,
+    this.lng,
+    this.radiusKm = 1.0,
+    this.label,
+  });
+
+  bool get isConfigured => lat != null && lng != null;
+
+  factory StandLocation.fromMap(Map<String, dynamic>? data) {
+    if (data == null) return const StandLocation();
+    return StandLocation(
+      lat: (data['lat'] as num?)?.toDouble(),
+      lng: (data['lng'] as num?)?.toDouble(),
+      radiusKm: (data['radiusKm'] as num?)?.toDouble() ?? 1.0,
+      label: data['label'] as String?,
+    );
+  }
+
+  Map<String, dynamic> toMap() => {
+        'lat': lat,
+        'lng': lng,
+        'radiusKm': radiusKm,
+        'label': label,
+      };
+
+  StandLocation copyWith({
+    double? lat,
+    double? lng,
+    double? radiusKm,
+    String? label,
+  }) =>
+      StandLocation(
+        lat: lat ?? this.lat,
+        lng: lng ?? this.lng,
+        radiusKm: radiusKm ?? this.radiusKm,
+        label: label ?? this.label,
+      );
+}
+
 class AssociationModel {
   /// Slug interno único, ej. "jipijapa", "la-roldos".
   final String id;
@@ -216,6 +274,7 @@ class AssociationModel {
   final String ownerUid;       // uid del admin de la asociación
   final AssociationTheme theme;
   final BillingConfig billingConfig;
+  final StandLocation standLocation;
 
   final DateTime createdAt;
   final DateTime updatedAt;
@@ -237,6 +296,7 @@ class AssociationModel {
     required this.ownerUid,
     required this.theme,
     this.billingConfig = const BillingConfig(),
+    this.standLocation = const StandLocation(),
     required this.createdAt,
     required this.updatedAt,
   });
@@ -266,6 +326,8 @@ class AssociationModel {
       theme: AssociationTheme.fromMap(data['theme'] as Map<String, dynamic>?),
       billingConfig:
           BillingConfig.fromMap(data['billingConfig'] as Map<String, dynamic>?),
+      standLocation: StandLocation.fromMap(
+          data['standLocation'] as Map<String, dynamic>?),
       createdAt:
           (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       updatedAt:
@@ -292,6 +354,7 @@ class AssociationModel {
       'ownerUid': ownerUid,
       'theme': theme.toMap(),
       'billingConfig': billingConfig.toMap(),
+      'standLocation': standLocation.toMap(),
       'createdAt': Timestamp.fromDate(createdAt),
       'updatedAt': Timestamp.fromDate(updatedAt),
     };

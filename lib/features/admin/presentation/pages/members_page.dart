@@ -6,8 +6,13 @@ import 'package:go_router/go_router.dart';
 
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
+import 'package:intl/intl.dart';
+
+import '../../../associations/data/models/association_model.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
+import '../../../payments/presentation/widgets/create_charge_sheet.dart';
+import '../../../permissions/data/permission_service.dart';
 
 /// Pantalla de gestión de socios (admin de asociación y super-admin).
 ///
@@ -24,7 +29,7 @@ class MembersPage extends StatefulWidget {
   State<MembersPage> createState() => _MembersPageState();
 }
 
-enum _StatusFilter { all, pending, active, suspended, rejected }
+enum _StatusFilter { all, pending, active, suspended, rejected, deleted }
 
 class _MembersPageState extends State<MembersPage> {
   final _firestore = FirebaseFirestore.instance;
@@ -175,6 +180,8 @@ class _MembersPageState extends State<MembersPage> {
         return 'Suspendidos';
       case _StatusFilter.rejected:
         return 'Rechazados';
+      case _StatusFilter.deleted:
+        return 'Eliminados';
     }
   }
 
@@ -205,6 +212,13 @@ class _MembersPageState extends State<MembersPage> {
 
         // Filtros
         final filtered = users.where((u) {
+          // Excluir borrados de TODOS los filtros excepto cuando se
+          // pide explícitamente "Eliminados". Así Haydee borrada no
+          // aparece en "Todos" pero sigue accesible para revisión.
+          if (_filter != _StatusFilter.deleted &&
+              u.status == UserStatus.deleted) {
+            return false;
+          }
           // Status
           switch (_filter) {
             case _StatusFilter.all:
@@ -221,11 +235,16 @@ class _MembersPageState extends State<MembersPage> {
             case _StatusFilter.rejected:
               if (u.status != UserStatus.rejected) return false;
               break;
+            case _StatusFilter.deleted:
+              if (u.status != UserStatus.deleted) return false;
+              break;
           }
           // Search
           if (_query.isEmpty) return true;
-          final hay =
-              '${u.name} ${u.lastname} ${u.cedula} ${u.email}'.toLowerCase();
+          // Buscar también en archivedCedula/Email para encontrar
+          // deletados por sus datos originales.
+          final hay = '${u.name} ${u.lastname} ${u.cedula} ${u.email}'
+              .toLowerCase();
           return hay.contains(_query);
         }).toList();
 
@@ -280,6 +299,7 @@ class _MembersPageState extends State<MembersPage> {
       UserStatus.disabledByAdmin => Colors.red.shade900,
       UserStatus.suspended => Colors.red,
       UserStatus.rejected => Colors.grey,
+      UserStatus.deleted => Colors.grey.shade400,
     };
 
     final statusLabel = switch (u.status) {
@@ -290,6 +310,7 @@ class _MembersPageState extends State<MembersPage> {
       UserStatus.disabledByAdmin => 'Desactivado',
       UserStatus.suspended => 'Suspendido',
       UserStatus.rejected => 'Rechazado',
+      UserStatus.deleted => 'Eliminado',
     };
 
     final initials = '${u.name.isNotEmpty ? u.name[0] : ''}'
@@ -462,6 +483,54 @@ class _MembersPageState extends State<MembersPage> {
       ));
     }
 
+    // Crear cobro one-off: para conductores activos (multa/ayuda/deuda
+    // emitida por el admin). El conductor lo verá en /my-payments.
+    if (u.role == AppConstants.roleDriver) {
+      items.add(const PopupMenuItem(
+        value: 'view_report',
+        child: Row(children: [
+          Icon(Icons.bar_chart, size: 18, color: Colors.indigo),
+          SizedBox(width: 8),
+          Text('Ver reporte'),
+        ]),
+      ));
+    }
+    if (u.role == AppConstants.roleDriver &&
+        (u.status == UserStatus.active ||
+            u.status == UserStatus.paymentPending ||
+            u.status == UserStatus.paymentBlocked)) {
+      items.add(const PopupMenuItem(
+        value: 'create_charge',
+        child: Row(children: [
+          Icon(Icons.request_quote_outlined,
+              size: 18, color: AppTheme.primaryColor),
+          SizedBox(width: 8),
+          Text('Crear cobro'),
+        ]),
+      ));
+      // Permisos: el conductor avisa que se va X días. Mientras esté
+      // activo, su cuota se "congela". Al regresar se calcula proporción
+      // y se cobra solo lo que faltan trabajar del periodo.
+      items.add(const PopupMenuItem(
+        value: 'grant_permission',
+        child: Row(children: [
+          Icon(Icons.event_busy,
+              size: 18, color: Colors.indigo),
+          SizedBox(width: 8),
+          Text('Conceder permiso'),
+        ]),
+      ));
+      items.add(const PopupMenuItem(
+        value: 'close_permission',
+        child: Row(children: [
+          Icon(Icons.event_available,
+              size: 18, color: Colors.green),
+          SizedBox(width: 8),
+          Text('Registrar regreso'),
+        ]),
+      ));
+    }
+
     // Editar datos: siempre disponible para cualquier socio
     if (items.isNotEmpty) items.add(const PopupMenuDivider());
     items.add(const PopupMenuItem(
@@ -473,12 +542,16 @@ class _MembersPageState extends State<MembersPage> {
       ]),
     ));
 
-    // Eliminar permanente — solo si NO es admin actual y NO soy yo
-    if (u.role != AppConstants.roleAdmin && !isMe) {
+    // Eliminar (soft) — solo si NO es admin actual, NO soy yo, NO está
+    // ya eliminado. Soft-delete: marca el doc, libera email + cédula,
+    // preserva pagos / viajes para auditoría histórica.
+    if (u.role != AppConstants.roleAdmin &&
+        !isMe &&
+        u.status != UserStatus.deleted) {
       items.add(const PopupMenuItem(
         value: 'delete',
         child: Row(children: [
-          Icon(Icons.delete_forever, size: 18, color: Colors.red),
+          Icon(Icons.delete_outline, size: 18, color: Colors.red),
           SizedBox(width: 8),
           Text('Eliminar', style: TextStyle(color: Colors.red)),
         ]),
@@ -486,6 +559,347 @@ class _MembersPageState extends State<MembersPage> {
     }
 
     return items;
+  }
+
+  Future<void> _openCreateCharge(UserModel u, String aid) async {
+    final auth = context.read<AuthBloc>().state;
+    if (auth is! AuthAuthenticated) return;
+    await showCreateChargeSheet(
+      context,
+      target: u,
+      aid: aid,
+      emittedBy: auth.user,
+    );
+  }
+
+  Future<void> _openGrantPermission(UserModel u) async {
+    final auth = context.read<AuthBloc>().state;
+    if (auth is! AuthAuthenticated) return;
+    final approver = auth.user;
+
+    // Si ya tiene un permiso activo, avisamos.
+    final active = await PermissionService.instance.activeFor(u.uid);
+    if (active != null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              '${u.name} ya tiene un permiso activo desde ${DateFormat('dd MMM').format(active.startDate)}.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
+    DateTime startDate = DateTime.now();
+    DateTime? expectedEnd;
+    final reasonCtrl = TextEditingController();
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
+        final df = DateFormat('dd MMM yyyy', 'es');
+        return AlertDialog(
+          title: Text('Conceder permiso a ${u.name}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event_note),
+                title: const Text('Desde'),
+                subtitle: Text(df.format(startDate)),
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: ctx,
+                    initialDate: startDate,
+                    firstDate: DateTime.now()
+                        .subtract(const Duration(days: 7)),
+                    lastDate: DateTime.now()
+                        .add(const Duration(days: 365)),
+                  );
+                  if (picked != null) {
+                    setLocal(() => startDate = picked);
+                  }
+                },
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event),
+                title: const Text('Hasta (opcional)'),
+                subtitle: Text(expectedEnd == null
+                    ? 'Indefinido'
+                    : df.format(expectedEnd!)),
+                trailing: expectedEnd == null
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.clear, size: 18),
+                        onPressed: () =>
+                            setLocal(() => expectedEnd = null),
+                      ),
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: ctx,
+                    initialDate:
+                        expectedEnd ?? startDate.add(const Duration(days: 7)),
+                    firstDate: startDate,
+                    lastDate: DateTime.now()
+                        .add(const Duration(days: 365)),
+                  );
+                  if (picked != null) {
+                    setLocal(() => expectedEnd = picked);
+                  }
+                },
+              ),
+              const SizedBox(height: 8),
+              TextField(
+                controller: reasonCtrl,
+                maxLines: 2,
+                decoration: const InputDecoration(
+                  labelText: 'Motivo (opcional)',
+                  hintText: 'Ej. Vacaciones, problema mecánico, salud',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: const Text(
+                  'Mientras dure, el conductor aparece como PERMISO en '
+                  'el cierre semanal y no se cuenta su cuota.',
+                  style: TextStyle(fontSize: 11),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancelar')),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.pop(ctx, true),
+              icon: const Icon(Icons.check),
+              label: const Text('Conceder'),
+            ),
+          ],
+        );
+      }),
+    );
+    if (ok != true || !mounted) return;
+
+    try {
+      await PermissionService.instance.grant(
+        driver: u,
+        approver: approver,
+        startDate: startDate,
+        expectedEndDate: expectedEnd,
+        reason: reasonCtrl.text.trim().isEmpty
+            ? null
+            : reasonCtrl.text.trim(),
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('✅ Permiso otorgado a ${u.name}'),
+          backgroundColor: AppTheme.successColor,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    }
+  }
+
+  Future<void> _openClosePermission(UserModel u, String aid) async {
+    final auth = context.read<AuthBloc>().state;
+    if (auth is! AuthAuthenticated) return;
+    final approver = auth.user;
+
+    final permission = await PermissionService.instance.activeFor(u.uid);
+    if (permission == null && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('${u.name} no tiene permiso activo.'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+    if (!mounted) return;
+
+    // Cargar billing config para calcular el cobro proporcional.
+    final assocSnap =
+        await _firestore.collection('associations').doc(aid).get();
+    if (!assocSnap.exists || !mounted) return;
+    final billingConfig =
+        AssociationModel.fromFirestore(assocSnap).billingConfig;
+
+    DateTime returnDate = DateTime.now();
+    bool generateCharge = true;
+
+    final action = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
+        final quote = PermissionService.instance.quoteClose(
+          permission: permission!,
+          returnDate: returnDate,
+          billingConfig: billingConfig,
+        );
+        final df = DateFormat('dd MMM yyyy', 'es');
+        return AlertDialog(
+          title: Text('Registrar regreso de ${u.name}'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                'Permiso desde ${df.format(permission.startDate)}'
+                '${permission.expectedEndDate != null ? " hasta ${df.format(permission.expectedEndDate!)}" : ""}.',
+                style: const TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.event_available),
+                title: const Text('Fecha de regreso'),
+                subtitle: Text(df.format(returnDate)),
+                onTap: () async {
+                  final picked = await showDatePicker(
+                    context: ctx,
+                    initialDate: returnDate,
+                    firstDate: permission.startDate,
+                    lastDate: DateTime.now()
+                        .add(const Duration(days: 365)),
+                  );
+                  if (picked != null) {
+                    setLocal(() => returnDate = picked);
+                  }
+                },
+              ),
+              const Divider(),
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: quote.hasCharge
+                      ? Colors.amber.shade50
+                      : Colors.green.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      quote.hasCharge
+                          ? '💰 Cobro proporcional'
+                          : '✅ Sin cobro adicional',
+                      style: const TextStyle(
+                          fontWeight: FontWeight.w800, fontSize: 13),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      'Periodo: ${df.format(quote.periodStart)} – ${df.format(quote.periodEnd)} '
+                      '(${quote.periodLengthDays} días)',
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    Text(
+                      'Cuota completa: \$${quote.cuotaAmount.toStringAsFixed(2)} '
+                      '· por día: \$${(quote.cuotaAmount / quote.periodLengthDays).toStringAsFixed(2)}',
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    Text(
+                      'Días que trabajará: ${quote.daysToCharge}',
+                      style: const TextStyle(fontSize: 11),
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      'Total a cobrar: \$${quote.amountToCharge.toStringAsFixed(2)}',
+                      style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.w900,
+                          color: quote.hasCharge
+                              ? Colors.deepOrange
+                              : Colors.green),
+                    ),
+                  ],
+                ),
+              ),
+              if (quote.hasCharge) ...[
+                const SizedBox(height: 8),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  value: generateCharge,
+                  onChanged: (v) =>
+                      setLocal(() => generateCharge = v ?? true),
+                  title: const Text('Generar cobro automáticamente',
+                      style: TextStyle(fontSize: 13)),
+                  subtitle: const Text(
+                    'El conductor lo verá en sus pagos como POR PAGAR',
+                    style: TextStyle(fontSize: 11),
+                  ),
+                ),
+              ],
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancelar')),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.pop(ctx, true),
+              icon: const Icon(Icons.check),
+              label: const Text('Cerrar permiso'),
+            ),
+          ],
+        );
+      }),
+    );
+
+    if (action != true || !mounted) return;
+
+    try {
+      final quote = PermissionService.instance.quoteClose(
+        permission: permission!,
+        returnDate: returnDate,
+        billingConfig: billingConfig,
+      );
+      await PermissionService.instance.closeAndCharge(
+        permission: permission,
+        approver: approver,
+        returnDate: returnDate,
+        quote: quote,
+        generateCharge: generateCharge,
+        driver: u,
+      );
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(generateCharge && quote.hasCharge
+              ? '✅ ${u.name} regresó. Cobro de \$${quote.amountToCharge.toStringAsFixed(2)} generado.'
+              : '✅ ${u.name} regresó. Sin cobro adicional.'),
+          backgroundColor: AppTheme.successColor,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    }
   }
 
   Future<void> _onMemberAction(
@@ -524,6 +938,20 @@ class _MembersPageState extends State<MembersPage> {
       case 'make_admin':
         await _confirmTransferAdmin(u);
         break;
+      case 'view_report':
+        context.push(
+          '/driver-report?driverId=${u.uid}&name=${Uri.encodeComponent('${u.name} ${u.lastname}'.trim())}',
+        );
+        break;
+      case 'create_charge':
+        await _openCreateCharge(u, aid);
+        break;
+      case 'grant_permission':
+        await _openGrantPermission(u);
+        break;
+      case 'close_permission':
+        await _openClosePermission(u, aid);
+        break;
       case 'edit':
         await _showEditDialog(u);
         break;
@@ -538,31 +966,32 @@ class _MembersPageState extends State<MembersPage> {
     final ok = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('¿Eliminar permanentemente?'),
+        title: const Text('¿Eliminar este socio?'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              'Vas a borrar la cuenta de ${u.name} ${u.lastname} '
-              '(${u.email}).',
+              'Vas a eliminar a ${u.name} ${u.lastname} (${u.email}).',
             ),
             const SizedBox(height: 12),
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.red.shade50,
+                color: Colors.amber.shade50,
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.red.shade300),
+                border: Border.all(color: Colors.amber.shade300),
               ),
               child: const Text(
-                'Esta acción NO se puede deshacer:\n'
-                '• Se borra el documento del usuario.\n'
-                '• Se borra su cuenta de Firebase Auth.\n'
-                '• Sus viajes y pagos previos quedan en la base de datos '
-                'sin propietario.\n\n'
-                'Si solo quieres bloquearlo temporalmente, usa "Suspender" '
-                'en su lugar.',
+                'Eliminación con auditoría:\n'
+                '• El socio queda en estado "Eliminado" — visible solo '
+                'desde el filtro "Eliminados".\n'
+                '• Sus pagos, viajes y balance histórico se conservan '
+                'para auditoría.\n'
+                '• Su email y cédula quedan liberados — puedes crear '
+                'una cuenta nueva con esos mismos datos.\n\n'
+                'Si solo quieres pausar el acceso temporalmente, usa '
+                '"Suspender".',
                 style: TextStyle(fontSize: 12),
               ),
             ),
@@ -941,6 +1370,7 @@ class _MemberDetailDialog extends StatelessWidget {
       UserStatus.disabledByAdmin => Colors.red.shade900,
       UserStatus.suspended => Colors.red,
       UserStatus.rejected => Colors.grey,
+      UserStatus.deleted => Colors.grey.shade400,
     };
     final statusLabel = switch (user.status) {
       UserStatus.active => 'Activo',
@@ -950,6 +1380,7 @@ class _MemberDetailDialog extends StatelessWidget {
       UserStatus.disabledByAdmin => 'Desactivado',
       UserStatus.suspended => 'Suspendido',
       UserStatus.rejected => 'Rechazado',
+      UserStatus.deleted => 'Eliminado',
     };
     final initials = '${user.name.isNotEmpty ? user.name[0] : ''}'
             '${user.lastname.isNotEmpty ? user.lastname[0] : ''}'

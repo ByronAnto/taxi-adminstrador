@@ -45,6 +45,13 @@ dependencies:
   hive: ^2.2.3
   hive_flutter: ^1.1.0
 
+  # Versionado (force-update)
+  package_info_plus: ^8.0.2
+  # Play In-App Update API: cuando la app viene del Play Store, Google
+  # nos deja descargar+instalar la nueva versión SIN salir de la app
+  # (flujo "immediate update" — full-screen, bloqueante, oficial).
+  in_app_update: ^4.2.3
+
   # Network
   dio: ^5.8.0+1
   connectivity_plus: ^6.1.4

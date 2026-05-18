@@ -54,8 +54,8 @@ class DashboardKpis extends StatelessWidget {
 
     if (_canViewOpsKpis) {
       cards.add(_TripsTodayCard(aid: aid));
-      cards.add(_DriversCard(aid: aid, free: true));
-      cards.add(_DriversCard(aid: aid, free: false));
+      // "Libres ahora" / "Ocupados ahora" se quitaron del resumen — esa
+      // info ya está en el Mapa con los pines coloreados por estado.
     }
 
     if (_hasFinanceKpis) {
@@ -238,47 +238,6 @@ class _MyTripsTodayCard extends StatelessWidget {
           color: AppTheme.accentColor,
           label: 'Mis viajes hoy',
           value: '$count',
-          loading: loading,
-        );
-      },
-    );
-  }
-}
-
-// ─────────────────── Conductores libres / ocupados ───────────────────
-
-class _DriversCard extends StatelessWidget {
-  final String aid;
-  final bool free;
-  const _DriversCard({required this.aid, required this.free});
-
-  @override
-  Widget build(BuildContext context) {
-    return StreamBuilder<QuerySnapshot>(
-      stream: FirebaseFirestore.instance
-          .collection('drivers')
-          .where('associationId', isEqualTo: aid)
-          .where('isActive', isEqualTo: true)
-          .snapshots(),
-      builder: (_, snap) {
-        final loading = snap.connectionState == ConnectionState.waiting;
-        final docs = snap.data?.docs ?? [];
-        int count = 0;
-        for (final d in docs) {
-          final data = d.data() as Map<String, dynamic>;
-          final status = data['status'] as String?;
-          final isFree = status == AppConstants.statusFree;
-          if (free ? isFree : !isFree && status != AppConstants.statusOffline) {
-            count++;
-          }
-        }
-
-        return _Kpi(
-          icon: free ? Icons.check_circle : Icons.taxi_alert,
-          color: free ? AppTheme.successColor : AppTheme.warningColor,
-          label: free ? 'Libres ahora' : 'Ocupados ahora',
-          value: '$count',
-          subtitle: free ? 'Disponibles' : 'En servicio',
           loading: loading,
         );
       },

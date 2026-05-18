@@ -79,11 +79,16 @@
             android:foregroundServiceType="mediaPlayback"
             android:exported="false" />
 
-        <!-- Overlay PTT: botón flotante sobre todas las apps. Mantiene
-             microphone porque es exactamente para PTT en background. -->
+        <!-- Overlay PTT: botón flotante sobre todas las apps. Declara
+             AMBOS tipos (microphone | mediaPlayback) y alterna en runtime:
+              - Idle  → mediaPlayback: el mic queda libre para WhatsApp,
+                        Zello, grabadora, etc.
+              - PTT pressed → microphone: la app reclama el mic para
+                        transmitir.
+             El switch se hace con startForeground(id, notif, type). -->
         <service
             android:name=".OverlayPttService"
-            android:foregroundServiceType="microphone"
+            android:foregroundServiceType="microphone|mediaPlayback"
             android:exported="false" />
 
         <!-- Don't delete the meta-data below.

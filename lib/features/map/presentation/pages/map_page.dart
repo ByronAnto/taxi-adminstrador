@@ -6,10 +6,13 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../associations/data/models/association_model.dart';
+import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../users/data/models/driver_model.dart';
 import '../../data/models/taxi_stand_model.dart';
 import '../bloc/map_bloc.dart';
@@ -24,6 +27,13 @@ class MapPage extends StatefulWidget {
 
 class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
   final Completer<GoogleMapController> _mapController = Completer();
+  /// Controlador del sheet de "Conductores Cercanos" — permite expandirlo
+  /// programáticamente cuando el usuario toca el handle.
+  final DraggableScrollableController _sheetController =
+      DraggableScrollableController();
+  static const double _sheetMin = 0.12;
+  static const double _sheetMid = 0.4;
+  static const double _sheetMax = 0.7;
   final Set<String> _activeFilters = {
     AppConstants.statusFree,
     AppConstants.statusBusy,
@@ -33,21 +43,25 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
   LatLng? _animatedPosition; // posición interpolada para el marcador
   double _bearing = 0; // dirección del movimiento
   BitmapDescriptor? _myCarIcon; // ícono ámbar para mi ubicación
+  BitmapDescriptor? _operatorIcon; // ícono de persona "OP" para operadoras
   final Map<String, BitmapDescriptor> _driverIcons = {}; // íconos por status
   final Map<String, BitmapDescriptor> _driverNumberIcons = {}; // íconos con número
   StreamSubscription<Position>? _positionStream;
   AnimationController? _moveController;
   Animation<double>? _moveAnimation;
-  LatLng _selectedDestination = const LatLng(
-    AppConstants.baseLatitude,
-    AppConstants.baseLongitude,
-  );
-  String _selectedDestinationName = 'Estación Base';
+  /// Destino seleccionado en el dropdown. Inicialmente vacío hasta
+  /// que cargue la `standLocation` configurada por el admin.
+  LatLng? _selectedDestination;
+  String _selectedDestinationName = '';
 
-  static const LatLng _basePosition = LatLng(
-    AppConstants.baseLatitude,
-    AppConstants.baseLongitude,
-  );
+  /// Parada principal de la asociación (configurada por el admin en
+  /// "Ubicación parada"). Si no está configurada, queda null y no
+  /// aparece en el dropdown.
+  StandLocation? _associationStand;
+
+  /// Centro inicial del mapa. Cuando cargue la standLocation se
+  /// actualiza; mientras tanto usa Quito como fallback.
+  LatLng _initialCameraTarget = const LatLng(-0.1807, -78.4678);
 
   @override
   void initState() {
@@ -56,12 +70,59 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
     bloc.add(MapDriversWatchStarted());
     bloc.add(MapTaxiStandsWatchStarted());
     _requestLocationPermission();
+    _loadAssociationStand();
+  }
+
+  /// Carga la `standLocation` que el admin configuró en
+  /// "Ubicación parada". Reemplaza la base hardcoded por la real.
+  Future<void> _loadAssociationStand() async {
+    final auth = context.read<AuthBloc>().state;
+    if (auth is! AuthAuthenticated) return;
+    final aid = auth.user.associationId;
+    if (aid.isEmpty) return;
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('associations')
+          .doc(aid)
+          .get();
+      if (!snap.exists || !mounted) return;
+      final stand = AssociationModel.fromFirestore(snap).standLocation;
+      if (!stand.isConfigured) return;
+      final point = LatLng(stand.lat!, stand.lng!);
+      setState(() {
+        _associationStand = stand;
+        _initialCameraTarget = point;
+        // Si el usuario aún no eligió destino, lo dejamos en la parada
+        // de la asociación.
+        if (_selectedDestinationName.isEmpty &&
+            _selectedDestination == null) {
+          _selectedDestination = point;
+          _selectedDestinationName =
+              stand.label?.isNotEmpty == true ? stand.label! : 'Parada';
+        }
+      });
+    } catch (_) {}
+  }
+
+  /// Tap en el handle/header del sheet de conductores: alterna entre
+  /// minimizado y expandido. Si está al mínimo, expande al medio; si
+  /// está expandido (o entre medio y máximo), minimiza.
+  void _toggleSheet() {
+    if (!_sheetController.isAttached) return;
+    final size = _sheetController.size;
+    final target = size <= _sheetMin + 0.02 ? _sheetMid : _sheetMin;
+    _sheetController.animateTo(
+      target,
+      duration: const Duration(milliseconds: 250),
+      curve: Curves.easeOut,
+    );
   }
 
   @override
   void dispose() {
     _positionStream?.cancel();
     _moveController?.dispose();
+    _sheetController.dispose();
     // NO marcar desconectado al salir del mapa.
     // El estado online/offline lo gestiona DriverLocationService.
     super.dispose();
@@ -119,7 +180,104 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
       const Color(0xFF1976D2),
       borderColor: const Color(0xFF1976D2),
     );
+    // Operadora: persona en círculo morado con etiqueta "OP".
+    _operatorIcon = await _buildOperatorBitmap();
     if (mounted) setState(() {});
+  }
+
+  /// Genera el ícono de la operadora: círculo blanco con borde morado,
+  /// silueta de persona y etiqueta "OP" debajo. Se usa para los users
+  /// de rol operadora que aparecen en el mapa (los que no tienen
+  /// vehículo asignado).
+  Future<BitmapDescriptor> _buildOperatorBitmap() async {
+    const double size = 44;
+    const double labelHeight = 14;
+    const double totalHeight = size + labelHeight;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+    const center = Offset(size / 2, size / 2);
+    const radius = size / 2.4;
+    const purple = Color(0xFF7B1FA2);
+
+    // Sombra sutil
+    canvas.drawCircle(
+      Offset(center.dx, center.dy + 1),
+      radius,
+      Paint()
+        ..color = const Color(0x30000000)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 2),
+    );
+
+    // Fondo blanco
+    canvas.drawCircle(center, radius, Paint()..color = Colors.white);
+
+    // Borde morado
+    canvas.drawCircle(
+      center,
+      radius,
+      Paint()
+        ..color = purple
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2.0,
+    );
+
+    // Ícono de persona
+    const personIcon = Icons.person;
+    final iconPainter = TextPainter(textDirection: TextDirection.ltr);
+    iconPainter.text = TextSpan(
+      text: String.fromCharCode(personIcon.codePoint),
+      style: TextStyle(
+        fontSize: 22,
+        fontFamily: personIcon.fontFamily,
+        color: purple,
+      ),
+    );
+    iconPainter.layout();
+    iconPainter.paint(
+      canvas,
+      Offset(
+        (size - iconPainter.width) / 2,
+        (size - iconPainter.height) / 2,
+      ),
+    );
+
+    // Etiqueta "OP" en píldora morada bajo el círculo
+    final labelPainter = TextPainter(textDirection: TextDirection.ltr);
+    labelPainter.text = const TextSpan(
+      text: 'OP',
+      style: TextStyle(
+        fontSize: 10,
+        fontWeight: FontWeight.w900,
+        color: Colors.white,
+        height: 1.0,
+      ),
+    );
+    labelPainter.layout();
+    final labelW = labelPainter.width + 10;
+    final labelRect = Rect.fromLTWH(
+      (size - labelW) / 2,
+      size,
+      labelW,
+      labelHeight,
+    );
+    canvas.drawRRect(
+      RRect.fromRectAndRadius(labelRect, const Radius.circular(7)),
+      Paint()..color = purple,
+    );
+    labelPainter.paint(
+      canvas,
+      Offset(
+        (size - labelPainter.width) / 2,
+        size + (labelHeight - labelPainter.height) / 2,
+      ),
+    );
+
+    final image = await recorder.endRecording().toImage(
+      size.toInt(),
+      totalHeight.toInt(),
+    );
+    final data = await image.toByteData(format: ui.ImageByteFormat.png);
+    return BitmapDescriptor.bytes(data!.buffer.asUint8List());
   }
 
   /// Genera un BitmapDescriptor con un carrito pequeño estilo Uber
@@ -441,6 +599,31 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
     }
   }
 
+  /// Círculos de incertidumbre del GPS para cada conductor con
+  /// `locationAccuracy` reportada. Solo se muestran cuando el radio es
+  /// > 25 m (no contaminar visualmente con fixes precisos).
+  /// Cuando dos vehículos en el mismo lugar aparecen distantes en el
+  /// mapa, los círculos ayudan a entender que es jitter de GPS y no
+  /// que realmente estén separados.
+  Set<Circle> _buildAccuracyCircles(List<DriverModel> drivers) {
+    final circles = <Circle>{};
+    for (final d in drivers) {
+      final lat = d.currentLatitude;
+      final lng = d.currentLongitude;
+      final acc = d.locationAccuracy;
+      if (lat == null || lng == null || acc == null || acc < 25) continue;
+      circles.add(Circle(
+        circleId: CircleId('acc_${d.uid}'),
+        center: LatLng(lat, lng),
+        radius: acc,
+        strokeWidth: 1,
+        strokeColor: Colors.blue.withValues(alpha: 0.4),
+        fillColor: Colors.blue.withValues(alpha: 0.08),
+      ));
+    }
+    return circles;
+  }
+
   Set<Marker> _buildMarkers(
       List<DriverModel> drivers, List<TaxiStandModel> stands) {
     final markers = <Marker>{};
@@ -455,7 +638,9 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
       final lng = driver.currentLongitude;
       if (lat == null || lng == null) continue;
 
-      // Usar ícono con número si está cacheado, sino ícono por status
+      // Usar ícono con número si está cacheado, sino ícono por status.
+      // Si no hay vehicleNumber, asumimos que es operadora (los conductores
+      // siempre tienen unidad asignada) y mostramos icono de persona "OP".
       BitmapDescriptor? driverIcon;
       if (driver.vehicleNumber.isNotEmpty) {
         final key = '${driver.vehicleNumber}_${driver.status}';
@@ -466,7 +651,7 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
           driverIcon = _driverIcons[driver.status];
         }
       } else {
-        driverIcon = _driverIcons[driver.status];
+        driverIcon = _operatorIcon ?? _driverIcons[driver.status];
       }
 
       markers.add(Marker(
@@ -527,16 +712,18 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
               state is MapLoaded ? state.taxiStands : <TaxiStandModel>[];
           final drivers = _filteredDrivers(allDrivers);
           final markers = _buildMarkers(drivers, taxiStands);
+          final circles = _buildAccuracyCircles(drivers);
 
           return Stack(
             children: [
               // ── Google Map ──
               GoogleMap(
-                initialCameraPosition: const CameraPosition(
-                  target: _basePosition,
+                initialCameraPosition: CameraPosition(
+                  target: _initialCameraTarget,
                   zoom: 14.0,
                 ),
                 markers: markers,
+                circles: circles,
                 polylines: _buildRoutePolylines(),
                 myLocationEnabled: _myCarIcon == null,
                 myLocationButtonEnabled: false,
@@ -551,35 +738,48 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
                 },
               ),
 
-              // Filter chips at top
-              Positioned(
-                top: 12,
-                left: 12,
-                right: 12,
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    SingleChildScrollView(
-                      scrollDirection: Axis.horizontal,
-                      child: Row(
-                        children: [
-                          _buildFilterChip(AppConstants.statusFree, 'Libre', AppTheme.statusFree),
-                          const SizedBox(width: 8),
-                          _buildFilterChip(
-                              AppConstants.statusBusy, 'Con pasajero', AppTheme.statusBusy),
-                          const SizedBox(width: 8),
-                          _buildFilterChip(
-                              AppConstants.statusReturning, 'En camino', AppTheme.statusReturning),
-                          const SizedBox(width: 8),
-                          _buildStandLegendChip(taxiStands.where((s) => s.isActive).length),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    _buildDestinationSelector(taxiStands),
-                  ],
-                ),
-              ),
+              // Filter chips at top — solo útil para admin/operadora
+              // que filtra al asignar carrera. Para conductor son
+              // ruido visual (solo quiere ver dónde están los demás).
+              Builder(builder: (ctx) {
+                final auth = ctx.read<AuthBloc>().state;
+                final isOpOrAdmin = auth is AuthAuthenticated &&
+                    (auth.user.role == AppConstants.roleOperator ||
+                        auth.user.role == AppConstants.roleAdmin);
+                return Positioned(
+                  top: 12,
+                  left: 12,
+                  right: 12,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      if (isOpOrAdmin)
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            children: [
+                              _buildFilterChip(AppConstants.statusFree,
+                                  'Libre', AppTheme.statusFree),
+                              const SizedBox(width: 8),
+                              _buildFilterChip(AppConstants.statusBusy,
+                                  'Con pasajero', AppTheme.statusBusy),
+                              const SizedBox(width: 8),
+                              _buildFilterChip(
+                                  AppConstants.statusReturning,
+                                  'En camino',
+                                  AppTheme.statusReturning),
+                              const SizedBox(width: 8),
+                              _buildStandLegendChip(
+                                  taxiStands.where((s) => s.isActive).length),
+                            ],
+                          ),
+                        ),
+                      if (isOpOrAdmin) const SizedBox(height: 8),
+                      _buildDestinationSelector(taxiStands),
+                    ],
+                  ),
+                );
+              }),
 
               // FAB to center on my location
               Positioned(
@@ -603,8 +803,13 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
                   backgroundColor: Colors.white,
                   onPressed: () async {
                     final controller = await _mapController.future;
+                    // Centrar en la parada de la asociación; si no hay
+                    // configurada, usar el centro inicial (Quito).
                     controller.animateCamera(
-                      CameraUpdate.newLatLngZoom(_basePosition, 14.0),
+                      CameraUpdate.newLatLngZoom(
+                        _initialCameraTarget,
+                        14.0,
+                      ),
                     );
                   },
                   child: const Icon(Icons.home,
@@ -627,9 +832,12 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
 
               // Bottom driver list sheet
               DraggableScrollableSheet(
-                initialChildSize: 0.3,
-                minChildSize: 0.1,
-                maxChildSize: 0.7,
+                controller: _sheetController,
+                initialChildSize: _sheetMid,
+                minChildSize: _sheetMin,
+                maxChildSize: _sheetMax,
+                snap: true,
+                snapSizes: const [_sheetMin, _sheetMid, _sheetMax],
                 builder: (context, scrollController) {
                   return Container(
                     decoration: const BoxDecoration(
@@ -646,43 +854,64 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
                     ),
                     child: Column(
                       children: [
-                        // Handle
-                        Container(
-                          margin: const EdgeInsets.symmetric(vertical: 8),
-                          width: 40,
-                          height: 4,
-                          decoration: BoxDecoration(
-                            color: Colors.grey[300],
-                            borderRadius: BorderRadius.circular(2),
+                        // Handle: tap → expande el sheet. Toda la zona
+                        // del header es tocable para que minimizar y
+                        // re-expandir sea trivial.
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: _toggleSheet,
+                          child: Padding(
+                            padding: const EdgeInsets.only(top: 8, bottom: 4),
+                            child: Center(
+                              child: Container(
+                                width: 48,
+                                height: 5,
+                                decoration: BoxDecoration(
+                                  color: Colors.grey[400],
+                                  borderRadius: BorderRadius.circular(3),
+                                ),
+                              ),
+                            ),
                           ),
                         ),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 16, vertical: 4),
-                          child: Row(
-                            children: [
-                              const Text(
-                                'Conductores Cercanos',
-                                style: TextStyle(
-                                    fontWeight: FontWeight.bold, fontSize: 16),
-                              ),
-                              const Spacer(),
-                              Container(
-                                padding: const EdgeInsets.symmetric(
-                                    horizontal: 8, vertical: 2),
-                                decoration: BoxDecoration(
-                                  color: AppTheme.primaryColor
-                                      .withValues(alpha: 0.1),
-                                  borderRadius: BorderRadius.circular(12),
+                        GestureDetector(
+                          behavior: HitTestBehavior.opaque,
+                          onTap: _toggleSheet,
+                          child: Padding(
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 8),
+                            child: Row(
+                              children: [
+                                const Text(
+                                  'Conductores Cercanos',
+                                  style: TextStyle(
+                                      fontWeight: FontWeight.bold,
+                                      fontSize: 16),
                                 ),
-                                child: Text(
-                                  '${drivers.length}',
-                                  style: const TextStyle(
-                                      color: AppTheme.primaryColor,
-                                      fontWeight: FontWeight.bold),
+                                const Spacer(),
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 8, vertical: 2),
+                                  decoration: BoxDecoration(
+                                    color: AppTheme.primaryColor
+                                        .withValues(alpha: 0.1),
+                                    borderRadius: BorderRadius.circular(12),
+                                  ),
+                                  child: Text(
+                                    '${drivers.length}',
+                                    style: const TextStyle(
+                                        color: AppTheme.primaryColor,
+                                        fontWeight: FontWeight.bold),
+                                  ),
                                 ),
-                              ),
-                            ],
+                                const SizedBox(width: 8),
+                                Icon(
+                                  Icons.keyboard_arrow_up,
+                                  size: 20,
+                                  color: Colors.grey[600],
+                                ),
+                              ],
+                            ),
                           ),
                         ),
                         const Divider(height: 1),
@@ -746,11 +975,14 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
   // ── Ruta al destino (polilínea punteada) ──
   Set<Polyline> _buildRoutePolylines() {
     final pos = _animatedPosition ?? _myPosition;
-    if (pos == null || _selectedDestinationName.isEmpty) return {};
+    final dest = _selectedDestination;
+    if (pos == null || dest == null || _selectedDestinationName.isEmpty) {
+      return {};
+    }
     return {
       Polyline(
         polylineId: const PolylineId('route_to_dest'),
-        points: [pos, _selectedDestination],
+        points: [pos, dest],
         color: const Color(0xFFFFA000),
         width: 4,
         patterns: [PatternItem.dash(20), PatternItem.gap(10)],
@@ -825,21 +1057,37 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
                 ),
               ),
               const Divider(height: 1),
-              ListTile(
-                leading: const Icon(Icons.home, color: AppTheme.primaryColor),
-                title: const Text('Estación Base'),
-                subtitle: Text(AppConstants.baseAddress),
-                selected: _selectedDestinationName == 'Estación Base',
-                selectedTileColor:
-                    AppTheme.primaryColor.withValues(alpha: 0.08),
-                onTap: () {
-                  setState(() {
-                    _selectedDestination = _basePosition;
-                    _selectedDestinationName = 'Estación Base';
-                  });
-                  Navigator.pop(ctx);
-                },
-              ),
+              // Parada principal de la asociación (la que el admin
+              // configura en "Ubicación parada"). Solo se muestra si
+              // está configurada — antes era hardcoded a una dirección
+              // de prueba.
+              if (_associationStand != null && _associationStand!.isConfigured)
+                ListTile(
+                  leading:
+                      const Icon(Icons.home, color: AppTheme.primaryColor),
+                  title: Text(
+                    _associationStand!.label?.isNotEmpty == true
+                        ? _associationStand!.label!
+                        : 'Parada principal',
+                  ),
+                  subtitle: Text(
+                      'Radio: ${_associationStand!.radiusKm.toStringAsFixed(1)} km'),
+                  selected: _selectedDestinationName ==
+                      (_associationStand!.label ?? 'Parada principal'),
+                  selectedTileColor:
+                      AppTheme.primaryColor.withValues(alpha: 0.08),
+                  onTap: () {
+                    setState(() {
+                      _selectedDestination = LatLng(
+                          _associationStand!.lat!, _associationStand!.lng!);
+                      _selectedDestinationName =
+                          _associationStand!.label?.isNotEmpty == true
+                              ? _associationStand!.label!
+                              : 'Parada principal';
+                    });
+                    Navigator.pop(ctx);
+                  },
+                ),
               ...stands.where((s) => s.isActive).map(
                     (stand) => ListTile(
                       leading:
@@ -1219,13 +1467,17 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
                   style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
                 ),
                 const SizedBox(height: 8),
-                // Estación Base principal
-                _buildDistanceRow(
-                  Icons.home,
-                  'Estación Base',
-                  _haversineKm(lat, lng,
-                      AppConstants.baseLatitude, AppConstants.baseLongitude),
-                ),
+                // Distancia a la parada de la asociación (configurada).
+                if (_associationStand != null &&
+                    _associationStand!.isConfigured)
+                  _buildDistanceRow(
+                    Icons.home,
+                    _associationStand!.label?.isNotEmpty == true
+                        ? _associationStand!.label!
+                        : 'Parada principal',
+                    _haversineKm(lat, lng, _associationStand!.lat!,
+                        _associationStand!.lng!),
+                  ),
                 // Paradas de taxi registradas
                 ...stands.where((s) => s.isActive).map(
                   (stand) => _buildDistanceRow(

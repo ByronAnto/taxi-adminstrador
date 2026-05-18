@@ -137,3 +137,27 @@ class UpdateProfileUseCase extends UseCase<void, UserModel> {
     return repository.updateProfile(user);
   }
 }
+
+/// Caso de uso: Cambiar contraseña (re-auth + updatePassword).
+class ChangePasswordParams {
+  final String currentPassword;
+  final String newPassword;
+  ChangePasswordParams({
+    required this.currentPassword,
+    required this.newPassword,
+  });
+}
+
+class ChangePasswordUseCase extends UseCase<void, ChangePasswordParams> {
+  final AuthRepository repository;
+
+  ChangePasswordUseCase(this.repository);
+
+  @override
+  Future<void> call(ChangePasswordParams params) {
+    return repository.changePassword(
+      currentPassword: params.currentPassword,
+      newPassword: params.newPassword,
+    );
+  }
+}

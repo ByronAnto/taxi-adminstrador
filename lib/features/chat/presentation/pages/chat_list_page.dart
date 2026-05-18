@@ -132,17 +132,72 @@ class _ChatListPageState extends State<ChatListPage>
                   }
 
                   if (rooms.isEmpty) {
-                    return Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.chat_bubble_outline,
-                              size: 64, color: Colors.grey[300]),
-                          const SizedBox(height: 16),
-                          Text('Sin conversaciones',
+                    return Padding(
+                      padding: const EdgeInsets.all(32),
+                      child: Center(
+                        child: Column(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            Icon(Icons.chat_bubble_outline,
+                                size: 72, color: Colors.grey[300]),
+                            const SizedBox(height: 20),
+                            const Text(
+                              'Aún no tienes conversaciones',
                               style: TextStyle(
-                                  color: Colors.grey[500], fontSize: 16)),
-                        ],
+                                fontSize: 16,
+                                fontWeight: FontWeight.w700,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 12),
+                            Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: Colors.blue.shade50,
+                                borderRadius: BorderRadius.circular(12),
+                                border:
+                                    Border.all(color: Colors.blue.shade100),
+                              ),
+                              child: Column(
+                                crossAxisAlignment:
+                                    CrossAxisAlignment.start,
+                                children: [
+                                  Row(
+                                    children: [
+                                      Icon(Icons.lightbulb_outline,
+                                          size: 18,
+                                          color: Colors.blue.shade700),
+                                      const SizedBox(width: 6),
+                                      Text(
+                                        'Cómo iniciar un chat',
+                                        style: TextStyle(
+                                          fontWeight: FontWeight.w800,
+                                          color: Colors.blue.shade900,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                  const SizedBox(height: 6),
+                                  const Text(
+                                    'Toca un conductor en el Mapa o un socio en la lista para abrir un chat 1-a-1 con texto e imágenes (estilo WhatsApp).',
+                                    style: TextStyle(
+                                        fontSize: 12, height: 1.4),
+                                  ),
+                                ],
+                              ),
+                            ),
+                            const SizedBox(height: 12),
+                            Text(
+                              'La pestaña "Radio" muestra el historial de audios y mensajes del canal de la cooperativa.',
+                              style: TextStyle(
+                                  color: Colors.grey[600],
+                                  fontSize: 12,
+                                  fontStyle: FontStyle.italic),
+                              textAlign: TextAlign.center,
+                            ),
+                          ],
+                        ),
                       ),
                     );
                   }

@@ -31,19 +31,37 @@ class StandQueueBar extends StatefulWidget {
 
 class _StandQueueBarState extends State<StandQueueBar> {
   Timer? _ticker;
+  final ScrollController _scrollCtrl = ScrollController();
+  bool _canScrollLeft = false;
+  bool _canScrollRight = false;
 
   @override
   void initState() {
     super.initState();
-    // Re-render cada 30s para refrescar etiqueta de tiempo de espera.
     _ticker = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted) setState(() {});
     });
+    _scrollCtrl.addListener(_updateScrollIndicators);
+  }
+
+  void _updateScrollIndicators() {
+    if (!_scrollCtrl.hasClients) return;
+    final p = _scrollCtrl.position;
+    final left = p.pixels > 4;
+    final right = p.pixels < p.maxScrollExtent - 4;
+    if (left != _canScrollLeft || right != _canScrollRight) {
+      setState(() {
+        _canScrollLeft = left;
+        _canScrollRight = right;
+      });
+    }
   }
 
   @override
   void dispose() {
     _ticker?.cancel();
+    _scrollCtrl.removeListener(_updateScrollIndicators);
+    _scrollCtrl.dispose();
     super.dispose();
   }
 
@@ -81,14 +99,42 @@ class _StandQueueBarState extends State<StandQueueBar> {
                       size: 18, color: Colors.amber.shade800),
                   const SizedBox(width: 6),
                   Expanded(
-                    child: Text(
-                      isOperator
-                          ? 'Cola de la parada (${queue.length})'
-                          : 'En la parada (${queue.length})',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w700,
-                        color: Colors.amber.shade900,
+                    child: InkWell(
+                      onTap: queue.length > 4
+                          ? () => _showFullQueueSheet(
+                              context, queue, user, isOperator)
+                          : null,
+                      borderRadius: BorderRadius.circular(4),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 2),
+                        child: Row(
+                          children: [
+                            Text(
+                              isOperator
+                                  ? 'Cola de la parada (${queue.length})'
+                                  : 'En la parada (${queue.length})',
+                              style: TextStyle(
+                                fontSize: 12,
+                                fontWeight: FontWeight.w700,
+                                color: Colors.amber.shade900,
+                              ),
+                            ),
+                            if (queue.length > 4) ...[
+                              const SizedBox(width: 4),
+                              Icon(Icons.unfold_more,
+                                  size: 14, color: Colors.amber.shade800),
+                              Text(
+                                'ver todas',
+                                style: TextStyle(
+                                  fontSize: 10,
+                                  fontWeight: FontWeight.w600,
+                                  color: Colors.amber.shade800,
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                            ],
+                          ],
+                        ),
                       ),
                     ),
                   ),
@@ -124,26 +170,89 @@ class _StandQueueBarState extends State<StandQueueBar> {
                               fontStyle: FontStyle.italic),
                         ),
                       )
-                    : ListView.builder(
-                        scrollDirection: Axis.horizontal,
-                        itemCount: queue.length,
-                        itemBuilder: (_, i) {
-                          final unit = queue[i];
-                          final isMyUnit = unit.userId == user.uid;
-                          return Padding(
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 4),
-                            child: _UnitQueueChip(
-                              order: i + 1,
-                              unit: unit,
-                              isMine: isMyUnit,
-                              isOperator: isOperator,
-                              onTap: isOperator
-                                  ? () => _assignToUnit(context, user, unit)
-                                  : null,
-                            ),
-                          );
+                    : NotificationListener<ScrollMetricsNotification>(
+                        onNotification: (_) {
+                          // Cuando cambia la longitud de la lista re-evalúa indicadores.
+                          WidgetsBinding.instance.addPostFrameCallback(
+                              (_) => _updateScrollIndicators());
+                          return false;
                         },
+                        child: Stack(
+                          children: [
+                            ListView.builder(
+                              controller: _scrollCtrl,
+                              scrollDirection: Axis.horizontal,
+                              itemCount: queue.length,
+                              itemBuilder: (_, i) {
+                                final unit = queue[i];
+                                final isMyUnit = unit.userId == user.uid;
+                                return Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 4),
+                                  child: _UnitQueueChip(
+                                    order: i + 1,
+                                    unit: unit,
+                                    isMine: isMyUnit,
+                                    isOperator: isOperator,
+                                    onTap: isOperator
+                                        ? () =>
+                                            _assignToUnit(context, user, unit)
+                                        : null,
+                                    onLongPress: isOperator
+                                        ? () => _showOperatorChipMenu(
+                                            context, user, unit, i,
+                                            queue.length)
+                                        : null,
+                                  ),
+                                );
+                              },
+                            ),
+                            if (_canScrollLeft)
+                              Positioned(
+                                left: 0,
+                                top: 0,
+                                bottom: 0,
+                                child: IgnorePointer(
+                                  child: Container(
+                                    width: 18,
+                                    decoration: BoxDecoration(
+                                      gradient: LinearGradient(
+                                        begin: Alignment.centerLeft,
+                                        end: Alignment.centerRight,
+                                        colors: [
+                                          Colors.amber.shade50,
+                                          Colors.amber.shade50
+                                              .withValues(alpha: 0),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            if (_canScrollRight)
+                              Positioned(
+                                right: 0,
+                                top: 0,
+                                bottom: 0,
+                                child: IgnorePointer(
+                                  child: Container(
+                                    width: 18,
+                                    decoration: BoxDecoration(
+                                      gradient: LinearGradient(
+                                        begin: Alignment.centerRight,
+                                        end: Alignment.centerLeft,
+                                        colors: [
+                                          Colors.amber.shade50,
+                                          Colors.amber.shade50
+                                              .withValues(alpha: 0),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
                       ),
               ),
             ],
@@ -153,9 +262,245 @@ class _StandQueueBarState extends State<StandQueueBar> {
     );
   }
 
+  /// Bottom-sheet que muestra TODA la cola en grid (útil cuando hay muchas
+  /// unidades y la barra horizontal queda muy larga). Tap en una unidad
+  /// abre el mismo flujo de asignación rápida (operadora) o cierra (conductor).
+  Future<void> _showFullQueueSheet(
+    BuildContext context,
+    List<QueuedUnit> queue,
+    user,
+    bool isOperator,
+  ) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: Colors.transparent,
+      builder: (sheetCtx) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.6,
+          minChildSize: 0.4,
+          maxChildSize: 0.9,
+          expand: false,
+          builder: (_, scrollCtrl) => Container(
+            decoration: const BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+            ),
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                Center(
+                  child: Container(
+                    width: 40,
+                    height: 4,
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: Colors.grey.shade300,
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                ),
+                Row(
+                  children: [
+                    Icon(Icons.local_taxi, color: Colors.amber.shade800),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Cola completa (${queue.length})',
+                      style: const TextStyle(
+                          fontSize: 18, fontWeight: FontWeight.w700),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  isOperator
+                      ? 'Toca una unidad para asignarle un cliente.'
+                      : 'Tu posición está marcada en azul.',
+                  style: TextStyle(
+                      fontSize: 12, color: Colors.grey.shade700),
+                ),
+                const SizedBox(height: 12),
+                Expanded(
+                  child: GridView.builder(
+                    controller: scrollCtrl,
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 4,
+                      crossAxisSpacing: 8,
+                      mainAxisSpacing: 8,
+                      childAspectRatio: 0.95,
+                    ),
+                    itemCount: queue.length,
+                    itemBuilder: (_, i) {
+                      final unit = queue[i];
+                      final isMine = unit.userId == user.uid;
+                      return _UnitQueueChip(
+                        order: i + 1,
+                        unit: unit,
+                        isMine: isMine,
+                        isOperator: isOperator,
+                        onTap: isOperator
+                            ? () {
+                                Navigator.of(sheetCtx).pop();
+                                _assignToUnit(context, user, unit);
+                              }
+                            : null,
+                        onLongPress: isOperator
+                            ? () {
+                                Navigator.of(sheetCtx).pop();
+                                _showOperatorChipMenu(
+                                    context, user, unit, i, queue.length);
+                              }
+                            : null,
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
   /// Modal para que la operadora agregue MANUALMENTE una unidad a la cola.
   /// Útil cuando el conductor está online pero no tap "Entrar a parada"
   /// en su propia app.
+  /// Long-press en un chip por la operadora/admin: menú compacto con
+  /// las acciones de reorder + sacar de cola.
+  ///
+  /// Caso típico: alguien se reportó por voz antes pero el otro alcanzó
+  /// a registrarse en la app primero. La operadora corrige el orden
+  /// subiendo al que tiene prioridad real.
+  Future<void> _showOperatorChipMenu(
+    BuildContext context,
+    user,
+    QueuedUnit unit,
+    int index,
+    int total,
+  ) async {
+    HapticFeedback.lightImpact();
+    await showModalBottomSheet<void>(
+      context: context,
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: Container(
+                width: 36,
+                height: 36,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: AppTheme.primaryColor.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(8),
+                ),
+                child: Text('#${unit.vehicleNumber}',
+                    style: TextStyle(
+                        fontWeight: FontWeight.w800,
+                        color: AppTheme.primaryColor)),
+              ),
+              title: Text(unit.driverName.isEmpty
+                  ? 'Conductor'
+                  : unit.driverName),
+              subtitle: Text(
+                  'Posición ${index + 1} de $total · ${unit.waitingTimeLabel}'),
+              dense: true,
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: const Icon(Icons.arrow_upward, color: Colors.green),
+              title: const Text('Subir uno'),
+              subtitle: index == 0
+                  ? const Text('Ya está al inicio',
+                      style: TextStyle(fontSize: 11))
+                  : Text(
+                      'Pasa a la posición $index de $total',
+                      style: const TextStyle(fontSize: 11),
+                    ),
+              enabled: index > 0,
+              onTap: () async {
+                Navigator.of(ctx).pop();
+                await _doMove(unit, user.associationId, up: true);
+              },
+            ),
+            ListTile(
+              leading:
+                  const Icon(Icons.arrow_downward, color: Colors.orange),
+              title: const Text('Bajar uno'),
+              subtitle: index >= total - 1
+                  ? const Text('Ya está al final',
+                      style: TextStyle(fontSize: 11))
+                  : Text(
+                      'Pasa a la posición ${index + 2} de $total',
+                      style: const TextStyle(fontSize: 11),
+                    ),
+              enabled: index < total - 1,
+              onTap: () async {
+                Navigator.of(ctx).pop();
+                await _doMove(unit, user.associationId, up: false);
+              },
+            ),
+            const Divider(height: 1),
+            ListTile(
+              leading: Icon(Icons.exit_to_app, color: Colors.red.shade700),
+              title: Text('Sacar de la cola',
+                  style: TextStyle(color: Colors.red.shade700)),
+              onTap: () async {
+                Navigator.of(ctx).pop();
+                await StandQueueService.instance.leaveQueue(unit.driverDocId);
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    SnackBar(
+                      content: Text(
+                          'Unidad #${unit.vehicleNumber} retirada de la cola'),
+                      duration: const Duration(seconds: 2),
+                    ),
+                  );
+                }
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _doMove(
+      QueuedUnit unit, String aid, {required bool up}) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      if (up) {
+        await StandQueueService.instance
+            .moveUp(unit.driverDocId, associationId: aid);
+      } else {
+        await StandQueueService.instance
+            .moveDown(unit.driverDocId, associationId: aid);
+      }
+      HapticFeedback.mediumImpact();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(up
+              ? 'Unidad #${unit.vehicleNumber} subió uno'
+              : 'Unidad #${unit.vehicleNumber} bajó uno'),
+          backgroundColor: AppTheme.successColor,
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(e.toString().replaceFirst('Exception: ', '')),
+          backgroundColor: Colors.orange.shade800,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
   Future<void> _showOperatorAddToQueue(
       BuildContext context, String aid) async {
     await showModalBottomSheet<void>(
@@ -239,9 +584,26 @@ class _StandQueueBarState extends State<StandQueueBar> {
                         ),
                       );
                     }
-                    // Filtrar las que ya están en cola (no las mostramos otra vez).
+                    // Filtros defensivos:
+                    //  - Que no esté ya en la cola.
+                    //  - Que no sea un conductor archivado / eliminado:
+                    //    si `deleteUser` aplicó la cascada, tendrá
+                    //    `archivedAt`/`deletedAt`. Sin esto, un usuario
+                    //    eliminado seguía apareciendo duplicado en la
+                    //    lista junto al conductor real con la misma
+                    //    unidad.
+                    //  - Que `isActive` no sea explícitamente false.
+                    //  - Que tenga vehicleNumber (excluye operadoras y
+                    //    docs sin unidad).
                     final notInQueue = docs.where((d) {
-                      return d.data()['inQueueAt'] == null;
+                      final data = d.data();
+                      if (data['inQueueAt'] != null) return false;
+                      if (data['archivedAt'] != null) return false;
+                      if (data['deletedAt'] != null) return false;
+                      if (data['isActive'] == false) return false;
+                      final vn = (data['vehicleNumber'] as String?) ?? '';
+                      if (vn.isEmpty) return false;
+                      return true;
                     }).toList()
                       ..sort((a, b) {
                         final na = int.tryParse(
@@ -279,8 +641,13 @@ class _StandQueueBarState extends State<StandQueueBar> {
                             borderRadius: BorderRadius.circular(12),
                             onTap: () async {
                               HapticFeedback.lightImpact();
-                              await StandQueueService.instance
-                                  .joinQueue(docId);
+                              // La operadora ve la cola desde lejos
+                              // (puede no estar físicamente en la parada),
+                              // por eso bypassDistanceCheck = true.
+                              await StandQueueService.instance.joinQueue(
+                                docId,
+                                bypassDistanceCheck: true,
+                              );
                               if (context.mounted) {
                                 Navigator.of(context).pop();
                                 ScaffoldMessenger.of(context).showSnackBar(
@@ -435,6 +802,7 @@ class _UnitQueueChip extends StatelessWidget {
   final bool isMine;
   final bool isOperator;
   final VoidCallback? onTap;
+  final VoidCallback? onLongPress;
 
   const _UnitQueueChip({
     required this.order,
@@ -442,6 +810,7 @@ class _UnitQueueChip extends StatelessWidget {
     required this.isMine,
     required this.isOperator,
     this.onTap,
+    this.onLongPress,
   });
 
   @override
@@ -456,6 +825,7 @@ class _UnitQueueChip extends StatelessWidget {
       child: InkWell(
         borderRadius: BorderRadius.circular(10),
         onTap: onTap,
+        onLongPress: onLongPress,
         child: Container(
           width: 84,
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
@@ -505,34 +875,99 @@ class _UnitQueueChip extends StatelessWidget {
   }
 }
 
-class _DriverQueueButton extends StatelessWidget {
+class _DriverQueueButton extends StatefulWidget {
   final List<QueuedUnit> queue;
   const _DriverQueueButton({required this.queue});
 
   @override
+  State<_DriverQueueButton> createState() => _DriverQueueButtonState();
+}
+
+class _DriverQueueButtonState extends State<_DriverQueueButton> {
+  /// True mientras una solicitud de joinQueue está en vuelo (GPS + Firestore).
+  /// Mientras esté en true, el botón se deshabilita: evita el spam de
+  /// snackbars cuando el usuario tapea repetidamente y el GPS demora 1-3s.
+  bool _busy = false;
+
+  Future<void> _handlePress(String myDriverId, String aid, bool iAmInQueue) async {
+    if (_busy) return; // Click guard
+    setState(() => _busy = true);
+    HapticFeedback.lightImpact();
+    final messenger = ScaffoldMessenger.of(context);
+    // Limpiar snackbars previos para que no se apilen (importante cuando
+    // el conductor da varios taps en rápida sucesión).
+    messenger.clearSnackBars();
+    try {
+      if (iAmInQueue) {
+        await StandQueueService.instance.leaveQueue(myDriverId);
+        return;
+      }
+      await StandQueueService.instance.joinQueue(
+        myDriverId,
+        associationId: aid,
+      );
+      if (!mounted) return;
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('🚖 Estás en la cola de la parada'),
+          backgroundColor: AppTheme.successColor,
+          duration: Duration(seconds: 2),
+        ),
+      );
+    } on StandQueueOutOfRange catch (e) {
+      if (!mounted) return;
+      HapticFeedback.heavyImpact();
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text(e.userMessage),
+          backgroundColor: e.reason == StandQueueErrorReason.gpsUnavailable
+              ? Colors.red
+              : Colors.orange.shade800,
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final auth = context.watch<AuthBloc>().state;
+    final aid = (auth is AuthAuthenticated) ? auth.user.associationId : null;
     final loc = DriverLocationService.instance;
     final myDriverId = loc.driverId;
-    final iAmInQueue =
-        myDriverId != null && queue.any((u) => u.driverDocId == myDriverId);
+    final iAmInQueue = myDriverId != null &&
+        widget.queue.any((u) => u.driverDocId == myDriverId);
+
+    final disabled = myDriverId == null || aid == null || _busy;
 
     return TextButton.icon(
-      onPressed: myDriverId == null
+      onPressed: disabled
           ? null
-          : () async {
-              HapticFeedback.lightImpact();
-              if (iAmInQueue) {
-                await StandQueueService.instance.leaveQueue(myDriverId);
-              } else {
-                await StandQueueService.instance.joinQueue(myDriverId);
-              }
-            },
-      icon: Icon(
-        iAmInQueue ? Icons.exit_to_app : Icons.local_taxi,
-        size: 16,
-      ),
+          : () => _handlePress(myDriverId, aid, iAmInQueue),
+      icon: _busy
+          ? const SizedBox(
+              width: 12,
+              height: 12,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : Icon(
+              iAmInQueue ? Icons.exit_to_app : Icons.local_taxi,
+              size: 16,
+            ),
       label: Text(
-        iAmInQueue ? 'Salir' : 'Entrar a parada',
+        _busy
+            ? 'Verificando…'
+            : (iAmInQueue ? 'Salir' : 'Entrar a parada'),
         style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w700),
       ),
       style: TextButton.styleFrom(

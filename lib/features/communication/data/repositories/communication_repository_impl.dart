@@ -47,8 +47,13 @@ class CommunicationRepositoryImpl implements CommunicationRepository {
   Future<void> unlockChannel({
     required String channelId,
     required String userId,
+    bool force = false,
   }) =>
-      _datasource.unlockChannel(channelId: channelId, userId: userId);
+      _datasource.unlockChannel(
+        channelId: channelId,
+        userId: userId,
+        force: force,
+      );
 
   @override
   Stream<List<MessageModel>> watchChannelMessages(String channelId) =>

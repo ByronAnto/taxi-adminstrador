@@ -83,9 +83,15 @@ class PttLockRequested extends CommunicationEvent {
 class PttUnlockRequested extends CommunicationEvent {
   final String channelId;
   final String userId;
-  PttUnlockRequested({required this.channelId, required this.userId});
+  /// True si admin/op está liberando un PTT pegado de otra persona.
+  final bool force;
+  PttUnlockRequested({
+    required this.channelId,
+    required this.userId,
+    this.force = false,
+  });
   @override
-  List<Object?> get props => [channelId, userId];
+  List<Object?> get props => [channelId, userId, force];
 }
 
 class ActiveChannelUpdated extends CommunicationEvent {
@@ -415,6 +421,7 @@ class CommunicationBloc extends Bloc<CommunicationEvent, CommunicationState> {
       await _retryFirestore(() => unlockChannel(UnlockChannelParams(
         channelId: event.channelId,
         userId: event.userId,
+        force: event.force,
       )));
       // El stream de watchChannel emitirá la actualización
     } catch (e) {

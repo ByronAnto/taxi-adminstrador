@@ -60,6 +60,9 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
       );
     }
 
+    final auth = context.read<AuthBloc>().state;
+    final isSuper = auth is AuthAuthenticated &&
+        auth.user.email == 'brealpeaymara@gmail.com';
     return Scaffold(
       appBar: AppBar(
         title: const Text('Validar pagos'),
@@ -70,6 +73,14 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
           onPressed: () =>
               context.canPop() ? context.pop() : context.go('/home'),
         ),
+        actions: [
+          if (isSuper)
+            IconButton(
+              tooltip: 'Backfill nombres conductor (super-admin)',
+              icon: const Icon(Icons.healing),
+              onPressed: _runBackfill,
+            ),
+        ],
       ),
       body: Column(
         children: [
@@ -210,6 +221,65 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
         onReject: () => _reject(p),
       ),
     );
+  }
+
+  /// Llama la Cloud Function backfillPayments. Solo super-admin.
+  /// Recorre todos los payments donde driverName == null y los rellena
+  /// con un lookup a users/{driverId}.
+  Future<void> _runBackfill() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Backfill nombres conductor'),
+        content: const Text(
+          'Recorre todos los pagos antiguos sin nombre y los completa '
+          'con un lookup a users/. Es seguro de re-ejecutar (saltea los '
+          'que ya tienen nombre).',
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('Cancelar')),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, true),
+            icon: const Icon(Icons.healing),
+            label: const Text('Ejecutar'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => const Center(child: CircularProgressIndicator()),
+    );
+    try {
+      final res = await _functions
+          .httpsCallable('backfillPayments')
+          .call({});
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      final data = (res.data as Map?) ?? const {};
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+              '✅ Backfill: ${data['updated']} actualizados, '
+              '${data['skipped']} saltados, ${data['scanned']} totales'),
+          backgroundColor: AppTheme.successColor,
+          duration: const Duration(seconds: 5),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      Navigator.of(context, rootNavigator: true).pop();
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    }
   }
 
   Future<void> _approve(PaymentModel p) async {
@@ -367,11 +437,19 @@ class _PaymentTile extends StatelessWidget {
               '${PaymentConcepts.label(payment.concept)} · $methodLabel',
               style: const TextStyle(fontSize: 12),
             ),
-            Text(
-              'Reportado ${df.format(payment.reportedAt)} · '
-              'Conductor: ${payment.driverId.substring(0, 8)}…',
-              style: const TextStyle(fontSize: 11, color: Colors.black54),
-            ),
+            // Nombre + unidad denormalizados al doc en el reporte. Si
+            // no están (doc antiguo), caemos al UID truncado.
+            Builder(builder: (_) {
+              final name = (payment.driverName ?? '').trim();
+              final unit = (payment.driverVehicleNumber ?? '').trim();
+              final who = name.isNotEmpty
+                  ? (unit.isNotEmpty ? '$name · Unidad #$unit' : name)
+                  : 'Conductor: ${payment.driverId.substring(0, 8)}…';
+              return Text(
+                'Reportado ${df.format(payment.reportedAt)} · $who',
+                style: const TextStyle(fontSize: 11, color: Colors.black54),
+              );
+            }),
             if (payment.proof?.photoUrl != null)
               const Padding(
                 padding: EdgeInsets.only(top: 2),

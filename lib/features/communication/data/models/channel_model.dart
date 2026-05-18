@@ -16,6 +16,12 @@ class ChannelModel {
   final bool isActive;
   final DateTime createdAt;
 
+  /// Roles que entran a este canal por defecto cuando no tienen otro
+  /// canal seleccionado. Ej. ['conductor'] hace que todos los conductores
+  /// caigan acá al abrir Radio. Si vacío, no es default para nadie.
+  /// Cualquier canal puede ser default; el último creado gana si hay 2.
+  final List<String> defaultForRoles;
+
   // === PTT Lock (Zello-style) ===
   final String? currentSpeakerId;
   final String? currentSpeakerName;
@@ -34,7 +40,24 @@ class ChannelModel {
     this.currentSpeakerId,
     this.currentSpeakerName,
     this.speakerLockedAt,
+    this.defaultForRoles = const [],
   });
+
+  /// True si este canal es el default para [role] (admin/operadora/conductor).
+  bool isDefaultForRole(String role) => defaultForRoles.contains(role);
+
+  /// True si [userId] puede ver/usar este canal:
+  /// - Canal público: todos los del tenant.
+  /// - Canal privado: solo si está en memberIds (o el admin que lo creó).
+  bool isAccessibleBy({
+    required String userId,
+    required String role,
+  }) {
+    if (type == 'publico') return true;
+    if (createdBy == userId) return true;
+    if (memberIds.contains(userId)) return true;
+    return false;
+  }
 
   /// Verifica si el canal está bloqueado por algún hablante
   bool get isLocked => currentSpeakerId != null && currentSpeakerId!.isNotEmpty;
@@ -63,6 +86,8 @@ class ChannelModel {
       currentSpeakerId: data['currentSpeakerId'],
       currentSpeakerName: data['currentSpeakerName'],
       speakerLockedAt: (data['speakerLockedAt'] as Timestamp?)?.toDate(),
+      defaultForRoles:
+          List<String>.from(data['defaultForRoles'] ?? const []),
     );
   }
 
@@ -81,6 +106,7 @@ class ChannelModel {
       'speakerLockedAt': speakerLockedAt != null
           ? Timestamp.fromDate(speakerLockedAt!)
           : null,
+      'defaultForRoles': defaultForRoles,
     };
   }
 
@@ -93,10 +119,12 @@ class ChannelModel {
     String? currentSpeakerId,
     String? currentSpeakerName,
     DateTime? speakerLockedAt,
+    List<String>? defaultForRoles,
     bool clearSpeaker = false,
   }) {
     return ChannelModel(
       uid: uid,
+      associationId: associationId,
       name: name ?? this.name,
       description: description ?? this.description,
       type: type ?? this.type,
@@ -107,6 +135,7 @@ class ChannelModel {
       currentSpeakerId: clearSpeaker ? null : (currentSpeakerId ?? this.currentSpeakerId),
       currentSpeakerName: clearSpeaker ? null : (currentSpeakerName ?? this.currentSpeakerName),
       speakerLockedAt: clearSpeaker ? null : (speakerLockedAt ?? this.speakerLockedAt),
+      defaultForRoles: defaultForRoles ?? this.defaultForRoles,
     );
   }
 }

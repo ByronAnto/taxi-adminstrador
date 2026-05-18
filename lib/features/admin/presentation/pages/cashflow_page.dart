@@ -8,6 +8,7 @@ import '../../../../core/services/excel_export_service.dart';
 import '../../../../core/services/pdf_export_service.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
+import '../../../reports/data/weekly_closing_service.dart';
 import '../../data/models/cashflow_model.dart';
 
 /// Pantalla "Caja" del admin: resumen, movimientos y pagos a operadoras.
@@ -89,6 +90,38 @@ class _CashflowPageState extends State<CashflowPage>
             tooltip: 'Exportar PDF',
             icon: const Icon(Icons.picture_as_pdf),
             onPressed: () => _exportPdf(aid),
+          ),
+          PopupMenuButton<String>(
+            tooltip: 'Cierres',
+            icon: const Icon(Icons.assignment_outlined),
+            onSelected: (v) {
+              if (v == 'weekly') _showWeeklyClosingDialog(aid);
+              if (v == 'monthly') _showMonthlyClosingDialog(aid);
+              if (v == 'annual') _showAnnualClosingDialog(aid);
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                  value: 'weekly',
+                  child: Row(children: [
+                    Icon(Icons.calendar_view_week, size: 18),
+                    SizedBox(width: 8),
+                    Text('Cierre semanal'),
+                  ])),
+              PopupMenuItem(
+                  value: 'monthly',
+                  child: Row(children: [
+                    Icon(Icons.calendar_month, size: 18),
+                    SizedBox(width: 8),
+                    Text('Cierre mensual'),
+                  ])),
+              PopupMenuItem(
+                  value: 'annual',
+                  child: Row(children: [
+                    Icon(Icons.calendar_today, size: 18),
+                    SizedBox(width: 8),
+                    Text('Cierre anual'),
+                  ])),
+            ],
           ),
         ],
         bottom: TabBar(
@@ -498,6 +531,322 @@ class _CashflowPageState extends State<CashflowPage>
           backgroundColor: AppTheme.errorColor,
         ),
       );
+    }
+  }
+
+  /// Muestra dialog para elegir semana (lunes anterior, esta semana,
+  /// otra) y genera el cierre semanal estilo Excel del admin en PDF
+  /// o Excel real.
+  Future<void> _showWeeklyClosingDialog(String aid) async {
+    final now = DateTime.now();
+    // Lunes de esta semana (DateTime.monday == 1).
+    final mondayThisWeek =
+        DateTime(now.year, now.month, now.day - (now.weekday - 1));
+    final sundayThisWeek = mondayThisWeek.add(const Duration(days: 6));
+    final mondayPrev = mondayThisWeek.subtract(const Duration(days: 7));
+    final sundayPrev = mondayPrev.add(const Duration(days: 6));
+    DateTime selStart = mondayThisWeek;
+    DateTime selEnd = sundayThisWeek;
+    final df = DateFormat('dd MMM', 'es');
+
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
+        Widget radio(String label, DateTime s, DateTime e) {
+          final selected = selStart == s;
+          return RadioListTile<DateTime>(
+            value: s,
+            groupValue: selStart,
+            onChanged: (v) => setLocal(() {
+              selStart = s;
+              selEnd = e;
+            }),
+            title: Text(label),
+            subtitle: Text('${df.format(s)} – ${df.format(e)}'),
+            selected: selected,
+          );
+        }
+
+        return AlertDialog(
+          title: const Text('Cierre semanal'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Genera el reporte semanal de la administración con el '
+                'formato del Excel manual (unidades, operadoras, '
+                'gastos, sobrante).',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+              radio('Esta semana', mondayThisWeek, sundayThisWeek),
+              radio('Semana pasada', mondayPrev, sundayPrev),
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.calendar_today),
+                title: const Text('Otro rango…'),
+                onTap: () async {
+                  final picked = await showDateRangePicker(
+                    context: ctx,
+                    firstDate: DateTime(2024),
+                    lastDate: DateTime(2030),
+                    initialDateRange:
+                        DateTimeRange(start: selStart, end: selEnd),
+                  );
+                  if (picked != null) {
+                    setLocal(() {
+                      selStart = picked.start;
+                      selEnd = picked.end;
+                    });
+                  }
+                },
+                subtitle: Text(
+                  '${df.format(selStart)} – ${df.format(selEnd)}',
+                  style: const TextStyle(fontSize: 11),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancelar'),
+            ),
+            TextButton.icon(
+              onPressed: () => Navigator.pop(ctx, 'excel'),
+              icon: const Icon(Icons.table_chart),
+              label: const Text('Excel'),
+            ),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.pop(ctx, 'pdf'),
+              icon: const Icon(Icons.picture_as_pdf),
+              label: const Text('PDF'),
+            ),
+          ],
+        );
+      }),
+    );
+    if (action == null || !mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(SnackBar(
+        content: Text(action == 'pdf'
+            ? 'Generando PDF…'
+            : 'Generando Excel…')));
+    try {
+      // Normalizar el rango: 00:00 inicio, 23:59 fin.
+      final from = DateTime(selStart.year, selStart.month, selStart.day);
+      final to =
+          DateTime(selEnd.year, selEnd.month, selEnd.day, 23, 59, 59);
+      final report = await WeeklyClosingService.instance.build(
+        associationId: aid,
+        weekStart: from,
+        weekEnd: to,
+      );
+      final ymd = DateFormat('yyyyMMdd').format(from);
+      if (action == 'pdf') {
+        final assoc = await PdfExportService.instance.loadAssociation(aid);
+        final bytes = await PdfExportService.instance.buildWeeklyClosingPdf(
+          report: report,
+          logoUrl: assoc.logoUrl,
+          primaryColor: assoc.primary,
+        );
+        await PdfExportService.instance.share(
+          bytes,
+          fileName: 'cierre_semanal_$ymd.pdf',
+        );
+      } else {
+        final bytes =
+            ExcelExportService.instance.buildWeeklyClosingReport(report);
+        await ExcelExportService.instance.share(
+          bytes,
+          fileName: 'cierre_semanal_$ymd.xlsx',
+        );
+      }
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    }
+  }
+
+  Future<void> _showMonthlyClosingDialog(String aid) async {
+    final now = DateTime.now();
+    int year = now.year;
+    int month = now.month;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
+        const monthNames = [
+          '', 'Enero', 'Febrero', 'Marzo', 'Abril', 'Mayo', 'Junio',
+          'Julio', 'Agosto', 'Septiembre', 'Octubre', 'Noviembre', 'Diciembre',
+        ];
+        return AlertDialog(
+          title: const Text('Cierre mensual'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Reporte con todas las semanas del mes + saldo acumulado del mes anterior. Replica el formato del Excel del admin.',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<int>(
+                initialValue: month,
+                decoration: const InputDecoration(
+                  labelText: 'Mes',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: List.generate(
+                    12,
+                    (i) => DropdownMenuItem(
+                          value: i + 1,
+                          child: Text(monthNames[i + 1]),
+                        )),
+                onChanged: (v) => setLocal(() => month = v ?? month),
+              ),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<int>(
+                initialValue: year,
+                decoration: const InputDecoration(
+                  labelText: 'Año',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: [
+                  for (int y = now.year - 2; y <= now.year + 1; y++)
+                    DropdownMenuItem(value: y, child: Text('$y'))
+                ],
+                onChanged: (v) => setLocal(() => year = v ?? year),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancelar')),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.pop(ctx, 'pdf'),
+              icon: const Icon(Icons.picture_as_pdf),
+              label: const Text('PDF'),
+            ),
+          ],
+        );
+      }),
+    );
+    if (action == null || !mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(const SnackBar(
+        content: Text('Generando cierre mensual… (puede tomar unos segundos)')));
+    try {
+      final report = await WeeklyClosingService.instance.buildMonth(
+        associationId: aid,
+        year: year,
+        month: month,
+      );
+      // Cachear el balance final para el siguiente mes.
+      await WeeklyClosingService.instance.cacheMonthlyBalance(report);
+      final assoc = await PdfExportService.instance.loadAssociation(aid);
+      final bytes = await PdfExportService.instance.buildMonthlyClosingPdf(
+        report: report,
+        logoUrl: assoc.logoUrl,
+        primaryColor: assoc.primary,
+      );
+      await PdfExportService.instance.share(
+        bytes,
+        fileName:
+            'cierre_mensual_${year}_${month.toString().padLeft(2, '0')}.pdf',
+      );
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+        content: Text('Error: $e'),
+        backgroundColor: AppTheme.errorColor,
+      ));
+    }
+  }
+
+  Future<void> _showAnnualClosingDialog(String aid) async {
+    final now = DateTime.now();
+    int year = now.year;
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => StatefulBuilder(builder: (ctx, setLocal) {
+        return AlertDialog(
+          title: const Text('Cierre anual'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Reporte de los 12 meses con sobrante acumulado.',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+              const Text(
+                '⚠️ Este reporte agrega 12 meses × N semanas, puede tardar un minuto.',
+                style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic),
+              ),
+              const SizedBox(height: 12),
+              DropdownButtonFormField<int>(
+                initialValue: year,
+                decoration: const InputDecoration(
+                  labelText: 'Año',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: [
+                  for (int y = now.year - 2; y <= now.year + 1; y++)
+                    DropdownMenuItem(value: y, child: Text('$y'))
+                ],
+                onChanged: (v) => setLocal(() => year = v ?? year),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('Cancelar')),
+            ElevatedButton.icon(
+              onPressed: () => Navigator.pop(ctx, 'pdf'),
+              icon: const Icon(Icons.picture_as_pdf),
+              label: const Text('PDF'),
+            ),
+          ],
+        );
+      }),
+    );
+    if (action == null || !mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.showSnackBar(
+        const SnackBar(content: Text('Generando cierre anual…')));
+    try {
+      final report = await WeeklyClosingService.instance.buildYear(
+        associationId: aid,
+        year: year,
+      );
+      final assoc = await PdfExportService.instance.loadAssociation(aid);
+      final bytes = await PdfExportService.instance.buildAnnualClosingPdf(
+        report: report,
+        logoUrl: assoc.logoUrl,
+        primaryColor: assoc.primary,
+      );
+      await PdfExportService.instance.share(
+        bytes,
+        fileName: 'cierre_anual_$year.pdf',
+      );
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(
+        content: Text('Error: $e'),
+        backgroundColor: AppTheme.errorColor,
+      ));
     }
   }
 

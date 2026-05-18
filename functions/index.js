@@ -4,7 +4,7 @@ const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { defineSecret } = require("firebase-functions/params");
 const { initializeApp } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
-const { getFirestore, FieldValue } = require("firebase-admin/firestore");
+const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
 const { getStorage } = require("firebase-admin/storage");
 const { RtcTokenBuilder, RtcRole } = require("agora-token");
 
@@ -25,6 +25,17 @@ const SUPER_ADMIN_EMAILS = ["brealpeaymara@gmail.com"];
 const AGORA_APP_ID = defineSecret("AGORA_APP_ID");
 const AGORA_APP_CERTIFICATE = defineSecret("AGORA_APP_CERTIFICATE");
 const GEMINI_API_KEY = defineSecret("GEMINI_API_KEY");
+// Credenciales SMTP propias para enviar el correo de recuperación de
+// contraseña. Usamos Gmail con App Password para máxima entregabilidad
+// (los correos de noreply@taxis-f0f51.firebaseapp.com llegan a spam).
+//
+// Setup (una sola vez):
+//   1. Activar 2FA en cuenta Gmail.
+//   2. https://myaccount.google.com/apppasswords → crear "taxis app".
+//   3. firebase functions:secrets:set GMAIL_USER  (= correo Gmail)
+//      firebase functions:secrets:set GMAIL_APP_PASSWORD  (= app password 16 chars)
+const GMAIL_USER = defineSecret("GMAIL_USER");
+const GMAIL_APP_PASSWORD = defineSecret("GMAIL_APP_PASSWORD");
 
 // ───────────────────────────────────────────────────────────────────
 //  Helpers
@@ -265,6 +276,79 @@ exports.approveDriver = onCall({}, async (request) => {
     approvedAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
   });
+
+  // Si el rol del usuario es 'conductor', garantizamos que también
+  // exista un doc en `drivers/` con datos denormalizados para que el
+  // mapa, la cola y los servicios de ubicación funcionen. Las reglas
+  // Firestore no permiten al propio conductor crear su doc (solo
+  // admin/operadora), así que lo creamos acá con Admin SDK.
+  //
+  // Idempotente: si ya existe un driver doc con userId == driverUid,
+  // no creamos otro.
+  if (driver.role === "conductor") {
+    const existing = await db
+      .collection("drivers")
+      .where("userId", "==", driverUid)
+      .limit(1)
+      .get();
+    if (existing.empty) {
+      await db.collection("drivers").add({
+        userId: driverUid,
+        associationId: aid,
+        driverName: [driver.name, driver.lastname]
+          .filter(Boolean).join(" ").trim(),
+        vehicleNumber: driver.numeroVehiculo || "",
+        plate: driver.placa || "",
+        status: "desconectado",
+        isActive: true,
+        licenseNumber: driver.licenseNumber || "",
+        licenseType: driver.licenseType || "",
+        licenseExpiry: driver.licenseExpiry || new Date(),
+        rating: 5.0,
+        totalTrips: 0,
+        totalPoints: 0,
+        vehicleIds: [],
+        createdAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      console.log(`approveDriver: driver doc creado para ${driverUid}`);
+    }
+  }
+
+  // Auto-agregar al usuario aprobado a los canales del tenant que
+  // estén marcados como `defaultForRoles` para su rol. Antes el admin
+  // tenía que aprobar Y luego entrar al canal y agregarlo a mano —
+  // ahora la aprobación implica acceso inmediato al radio por defecto.
+  // Idempotente: arrayUnion no duplica si ya está.
+  try {
+    const channelsSnap = await db
+      .collection("channels")
+      .where("associationId", "==", aid)
+      .get();
+    const role = driver.role || "conductor";
+    let added = 0;
+    for (const ch of channelsSnap.docs) {
+      const data = ch.data();
+      const defaults = Array.isArray(data.defaultForRoles)
+        ? data.defaultForRoles
+        : [];
+      if (!defaults.includes(role)) continue;
+      await ch.ref.update({
+        memberIds: FieldValue.arrayUnion(driverUid),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      added++;
+    }
+    if (added > 0) {
+      console.log(
+        `approveDriver: ${driverUid} agregado a ${added} canal(es) default de rol "${role}"`,
+      );
+    }
+  } catch (e) {
+    console.warn(
+      `approveDriver: error auto-añadiendo a canales default: ${e.message}`,
+    );
+  }
 
   return { ok: true };
 });
@@ -587,10 +671,66 @@ exports.deleteUser = onCall({}, async (request) => {
     );
   }
 
-  // 1) Borrar el doc de Firestore
-  await userRef.delete();
+  // 1) Soft-delete: marcamos el doc en vez de borrarlo, para que los
+  //    pagos / viajes / cobros históricos sigan teniendo a quién apuntar
+  //    y el admin pueda revisar el balance pendiente del ex-conductor.
+  //
+  //    Liberamos cédula y email para que SÍ se pueda crear un usuario
+  //    nuevo con esos mismos datos:
+  //    - cedula → archivedCedula + cedula = "_deleted_<ts>_<original>"
+  //    - email  → eliminamos la cuenta Auth (libera el email para re-uso)
+  const now = FieldValue.serverTimestamp();
+  const ts = Date.now();
+  const archivedCedula = userData.cedula || null;
+  const archivedEmail = userData.email || null;
+  const archivedRole = userData.role || null;
 
-  // 2) Borrar la cuenta de Firebase Auth (si aún existe)
+  await userRef.update({
+    deletedAt: now,
+    deletedBy: auth.uid,
+    status: "deleted",
+    archivedCedula,
+    archivedEmail,
+    archivedRole,
+    cedula: archivedCedula
+      ? `_deleted_${ts}_${archivedCedula}`
+      : `_deleted_${ts}`,
+    // Apagamos el doc para todas las queries de usuarios activos.
+    isActive: false,
+    updatedAt: now,
+  });
+
+  // 1.b) Cascada al doc en `drivers/`: lo apagamos y borramos posición.
+  //      Sin esto, el ex-conductor sigue apareciendo en el mapa y la
+  //      operadora ve un fantasma con su última coordenada.
+  try {
+    const driverRef = db.collection("drivers").doc(userUid);
+    const driverSnap = await driverRef.get();
+    if (driverSnap.exists) {
+      await driverRef.update({
+        isActive: false,
+        archivedAt: now,
+        deletedAt: now,
+        // Limpiar posición y status para que ningún cliente lo pinte.
+        currentPosition: null,
+        currentLat: null,
+        currentLng: null,
+        currentLatitude: null,
+        currentLongitude: null,
+        status: "offline",
+        inQueueAt: null,
+        updatedAt: now,
+      });
+    }
+  } catch (e) {
+    console.warn(`deleteUser: no pude apagar drivers/${userUid}`, e);
+  }
+
+  // 2) Borrar la cuenta de Firebase Auth (libera el email).
+  //    Esto invalida el refresh token, así que el celular zombi pierde
+  //    sesión la próxima vez que intente refrescar el ID token (~1h).
+  //    El doc en `users/{uid}` con status='deleted' además provoca que
+  //    el ClaimsRefreshService del cliente haga signOut inmediato.
   try {
     await getAuth().deleteUser(userUid);
   } catch (e) {
@@ -600,8 +740,63 @@ exports.deleteUser = onCall({}, async (request) => {
     }
   }
 
-  return { ok: true, deletedUid: userUid };
+  // 3) Revocar refresh tokens — corta la sesión del celular zombi al
+  //    próximo intento de refresh, en lugar de esperar la hora del ID
+  //    token cacheado. Hacemos esto ANTES de deleteUser fallaría porque
+  //    ya no existe; lo intentamos igual y silenciamos el error si
+  //    deleteUser ya lo limpió.
+  try {
+    await getAuth().revokeRefreshTokens(userUid);
+  } catch (_) {}
+
+  return {
+    ok: true,
+    deletedUid: userUid,
+    softDeleted: true,
+    archivedCedula,
+    archivedEmail,
+  };
 });
+
+// ───────────────────────────────────────────────────────────────────
+//  checkCedulaAvailable — verifica si una cédula está disponible
+//  para registro. Llamada desde la pantalla de signup ANTES de
+//  createUserWithEmailAndPassword: las reglas de Firestore no dejan
+//  al usuario recién creado consultar la colección users por cedula
+//  (no es owner, no es active, no tiene tenant), así que la query
+//  directa fallaba con PERMISSION_DENIED y bloqueaba la registración
+//  legítima.
+//
+//  Esta función:
+//  - Es callable SIN autenticación (igual que sendPasswordResetEmail).
+//  - Usa Admin SDK que ignora reglas → puede listar users.
+//  - Considera "disponibles" las cédulas que no existen O que solo
+//    pertenecen a usuarios soft-deleted (deletedAt != null).
+// ───────────────────────────────────────────────────────────────────
+
+exports.checkCedulaAvailable = onCall(
+  { region: "us-central1" },
+  async (request) => {
+    const cedula = (request.data?.cedula || "").toString().trim();
+    if (!cedula) {
+      throw new HttpsError("invalid-argument", "cedula requerida.");
+    }
+    const snap = await db
+      .collection("users")
+      .where("cedula", "==", cedula)
+      .get();
+    let active = 0;
+    for (const d of snap.docs) {
+      if (!d.data().deletedAt) active++;
+    }
+    return {
+      available: active === 0,
+      total: snap.size,
+      activeCount: active,
+    };
+  }
+);
+
 
 // ───────────────────────────────────────────────────────────────────
 //  updateUser — admin/operadora actualiza datos de un socio
@@ -788,10 +983,72 @@ exports.reportPayment = onCall({}, async (request) => {
     proof.photoExpired = false;
   }
 
+  // Si viene un chargeId, el conductor está pagando un cobro one-off
+  // emitido previamente por el admin. Validamos ownership y actualizamos
+  // el doc existente en vez de crear uno nuevo. Mantiene la trazabilidad
+  // emisión → pago → validación en un solo registro.
+  if (data.chargeId) {
+    const chargeRef = db.collection("payments").doc(String(data.chargeId));
+    const chargeSnap = await chargeRef.get();
+    if (!chargeSnap.exists) {
+      throw new HttpsError("not-found", "El cobro no existe.");
+    }
+    const charge = chargeSnap.data();
+    if (charge.driverId !== auth.uid) {
+      throw new HttpsError(
+        "permission-denied",
+        "Este cobro no es tuyo."
+      );
+    }
+    if (charge.isOneOff !== true) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Solo se puede pagar así un cobro emitido por admin."
+      );
+    }
+    if (charge.proof != null) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Este cobro ya fue reportado."
+      );
+    }
+    if (charge.status !== "pending") {
+      throw new HttpsError(
+        "failed-precondition",
+        "El cobro ya no está en estado pendiente."
+      );
+    }
+    // Denormalizamos por si el doc no traía el nombre (compat con docs
+    // creados antes de este cambio).
+    const dName = [user.name, user.lastname]
+      .filter(Boolean)
+      .join(" ")
+      .trim() || null;
+    await chargeRef.update({
+      paymentDate,
+      proof,
+      reportedAt: FieldValue.serverTimestamp(),
+      driverName: dName,
+      driverVehicleNumber: user.numeroVehiculo || null,
+    });
+    return { ok: true, paymentId: chargeRef.id, updatedCharge: true };
+  }
+
+  // Denormalizamos nombre + unidad del conductor para que admin/operadora
+  // puedan listar pagos sin tener que hacer un lookup adicional por
+  // driverId. El usuario lo cargamos arriba en `user`.
+  const driverName = [user.name, user.lastname]
+    .filter(Boolean)
+    .join(" ")
+    .trim() || null;
+  const driverVehicleNumber = user.numeroVehiculo || null;
+
   const ref = db.collection("payments").doc();
   await ref.set({
     associationId: aid,
     driverId: auth.uid,
+    driverName,
+    driverVehicleNumber,
     amount,
     concept,
     status: "pending",
@@ -803,6 +1060,7 @@ exports.reportPayment = onCall({}, async (request) => {
     validatedBy: null,
     validatedAt: null,
     rejectionReason: null,
+    isOneOff: false,
   });
 
   return { ok: true, paymentId: ref.id };
@@ -1686,21 +1944,82 @@ exports.checkSubscriptionsNow = onCall({}, async (request) => {
 
 async function _fetchEventsFromGemini(apiKey, dateLabel) {
   const prompt = `Eres un asistente para conductores de taxi en Quito, Ecuador.
-Responde SOLO con un JSON válido (sin markdown, sin explicación) que liste
-los eventos públicos masivos previstos para HOY (${dateLabel}) en Quito que
-puedan generar aglomeración de gente o tráfico. Incluye: conciertos, partidos
-de fútbol del Estadio Olímpico Atahualpa, Casa de la Cultura, marchas
-sindicales, feriados religiosos, ferias, festivales, eventos en el Coliseo
-Rumiñahui, eventos universitarios.
+Usa búsqueda en tiempo real para encontrar TODOS los eventos públicos
+previstos para HOY (${dateLabel}) en Quito y el Distrito Metropolitano que
+puedan generar aglomeración de gente, demanda de taxis o tráfico.
 
-Formato exacto:
-{"events":[{"name":string,"venue":string,"startTime":string ISO8601 EC,"type":"concierto"|"deporte"|"teatro"|"marcha"|"feria"|"otro","expectedAttendance":"baja"|"media"|"alta","approxLocation":{"lat":number,"lng":number}}]}
+Cubre AMPLIAMENTE estas categorías y venues (la lista NO es exhaustiva, si
+encuentras otros eventos relevantes inclúyelos):
 
-Si no hay eventos conocidos, devuelve {"events":[]}. NO inventes datos. Si
-no estás seguro, omite el evento.`;
+- Deportes: Estadio Olímpico Atahualpa, Estadio Casa Blanca (LDU), Coliseo
+  General Rumiñahui, Coliseo Julio César Hidalgo, Plaza de Toros Quito,
+  partidos LigaPro, copas internacionales, encuentros de selección.
+- Carreras y ciclismo: 5K/10K, media maratón, maratón, Ruta de las Iglesias,
+  Quito 11K, ciclopaseo dominical (cierre de la 6 de Diciembre/Amazonas),
+  triatlones, eventos UCI.
+- Conciertos y espectáculos: Coliseo Rumiñahui, Ágora Casa de la Cultura,
+  Teatro Nacional CCE, Teatro Sucre, Teatro Bolívar, Teatro México, Centro
+  de Convenciones Quorum (Cumbayá), Plaza Foch, Itchimbía, Bicentenario,
+  Quitumbe, La Carolina, Parque Metropolitano, La Concha Acústica.
+- Ferias, festivales y mercados: Quito Fest, Fiestas de Quito (diciembre),
+  Carnaval, Inti Raymi, festivales gastronómicos, ferias del libro/tecnología/
+  vehículos, Expoflor, ferias en Centro de Exposiciones Quito (CEMEXPO).
+- Eventos cívico-religiosos: procesiones (Jesús del Gran Poder, Semana Santa),
+  feriados nacionales/locales, desfiles cívicos, posesiones presidenciales.
+- Marchas, paros y manifestaciones: marchas sindicales, indígenas (CONAIE),
+  estudiantiles, gremiales; bloqueos de vías. Revisa redes y prensa local.
+- Universitarios y educativos: graduaciones masivas (PUCE, UCE, USFQ, EPN,
+  Politécnica), inicios/fines de ciclo, congresos académicos.
+- Centros comerciales con eventos especiales: Quicentro Norte/Sur, CCI,
+  El Recreo, Condado, San Luis, Scala (lanzamientos, ferias, conciertos).
+- Iglesia/turismo masivo: Mitad del Mundo, TelefériQo, Panecillo en feriados.
+- Otros: convenciones internacionales, cumbres, Expo, ferias en Plataforma
+  Gubernamental, eventos del Municipio, La Mariscal nocturna en fines de
+  semana de feriado.
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${encodeURIComponent(apiKey)}`;
-  const body = {
+Para cada evento devuelve:
+- name: nombre del evento
+- venue: lugar exacto (no genérico)
+- startTime: ISO8601 con offset -05:00 (Ecuador)
+- endTime: ISO8601 si se conoce, null si no
+- type: "concierto" | "deporte" | "teatro" | "marcha" | "feria" |
+  "religioso" | "deportivo_calle" | "ciclopaseo" | "feriado" |
+  "academico" | "convencion" | "otro"
+- expectedAttendance: "baja" (<500) | "media" (500-3000) | "alta"
+  (3000-15000) | "muy_alta" (>15000)
+- approxLocation: { lat, lng } coordenadas del venue
+- affectedZones: array de zonas con tráfico afectado, p. ej.
+  ["La Carolina","Iñaquito","Norte","Centro Histórico","Cumbayá","Sur",
+   "Valle de los Chillos","Quitumbe","Calderón","Pomasqui","Mitad del Mundo"]
+- trafficPeakHours: array de strings "HH:MM" con horas pico estimadas de
+  llegada/salida (ej. ["18:00","23:30"])
+- taxiDemand: "baja" | "media" | "alta" — qué tan probable es que los
+  asistentes pidan taxi al salir
+- source: URL de la fuente donde verificaste el evento (importante)
+
+Responde SOLO con JSON válido en este formato exacto, sin markdown ni
+explicación:
+{"events":[ ... ]}
+
+Reglas:
+- NO inventes datos. Si no estás seguro de un campo, usa null.
+- Si un evento es recurrente (ciclopaseo dominical, ferias semanales),
+  inclúyelo solo si HOY corresponde.
+- Prefiere eventos confirmados con fuente verificable.
+- Si no encuentras NINGÚN evento confirmado, devuelve {"events":[]}.
+- Devuelve hasta 25 eventos máximo, priorizados por taxiDemand alta.`;
+
+  // Body con Google Search grounding: el modelo busca en tiempo real
+  // eventos reales para la fecha actual. responseMimeType es incompatible
+  // con tools, así que parseamos el texto crudo con regex.
+  const bodyGrounded = {
+    contents: [{ parts: [{ text: prompt }] }],
+    tools: [{ google_search: {} }],
+    generationConfig: { temperature: 0.2 },
+  };
+  // Body sin grounding como fallback si la búsqueda no está disponible
+  // o el modelo no la soporta.
+  const bodyPlain = {
     contents: [{ parts: [{ text: prompt }] }],
     generationConfig: {
       temperature: 0.2,
@@ -1708,24 +2027,98 @@ no estás seguro, omite el evento.`;
     },
   };
 
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Gemini API ${res.status}: ${text.slice(0, 200)}`);
+  // Extrae el JSON {"events":[...]} de un texto que puede venir envuelto
+  // en markdown, prosa o citas de grounding.
+  const parseEvents = (text) => {
+    if (!text) return [];
+    // Intento 1: parsear todo como JSON puro.
+    try {
+      const p = JSON.parse(text);
+      if (Array.isArray(p.events)) return p.events;
+      if (Array.isArray(p)) return p;
+    } catch (_) {
+      // sigue
+    }
+    // Intento 2: extraer el primer bloque {...} que contenga "events".
+    const m = text.match(/\{[\s\S]*?"events"[\s\S]*?\}\s*\}?/);
+    if (m) {
+      try {
+        const p = JSON.parse(m[0]);
+        if (Array.isArray(p.events)) return p.events;
+      } catch (_) {
+        // sigue
+      }
+    }
+    // Intento 3: extraer un array [...] si el modelo devolvió solo eso.
+    const arr = text.match(/\[[\s\S]*\]/);
+    if (arr) {
+      try {
+        const p = JSON.parse(arr[0]);
+        if (Array.isArray(p)) return p;
+      } catch (_) {
+        // sigue
+      }
+    }
+    return [];
+  };
+
+  // Lista de modelos a probar en orden. Si gemini-2.5-flash está
+  // saturado (503), caemos a 1.5-flash que suele tener menos demanda.
+  const models = ["gemini-2.5-flash", "gemini-1.5-flash"];
+  // Cada modelo se intenta primero con grounding, luego sin grounding.
+  const variants = [
+    { body: bodyGrounded, label: "grounded" },
+    { body: bodyPlain, label: "plain" },
+  ];
+
+  let lastErr;
+  for (const model of models) {
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`;
+    for (const variant of variants) {
+      // Retry interno con back-off exponencial para 429/503/504.
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(variant.body),
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const text =
+              data?.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            const events = parseEvents(text);
+            console.log(
+              `fetchQuitoEvents: ${model}/${variant.label} → ${events.length} eventos`,
+            );
+            return events;
+          }
+          const status = res.status;
+          const text = await res.text();
+          lastErr = new Error(`Gemini API ${status}: ${text.slice(0, 200)}`);
+          // 400 con grounding = el modelo no soporta tools → siguiente variante.
+          if (status === 400 && variant.label === "grounded") break;
+          // 429/503/504 son transitorios → retry. 4xx (no 429) → no retry.
+          if (status !== 429 && status !== 503 && status !== 504) break;
+          // Back-off: 2s, 4s, 8s.
+          await new Promise((r) =>
+            setTimeout(r, 2000 * Math.pow(2, attempt - 1)),
+          );
+        } catch (e) {
+          lastErr = e;
+          if (attempt < 3) {
+            await new Promise((r) =>
+              setTimeout(r, 2000 * Math.pow(2, attempt - 1)),
+            );
+          }
+        }
+      }
+      console.warn(
+        `fetchQuitoEvents: ${model}/${variant.label} falló, probando siguiente…`,
+      );
+    }
   }
-  const data = await res.json();
-  const text = data?.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-  let parsed;
-  try {
-    parsed = JSON.parse(text);
-  } catch (e) {
-    throw new Error(`Gemini respuesta no es JSON válido: ${text.slice(0, 200)}`);
-  }
-  return Array.isArray(parsed.events) ? parsed.events : [];
+  throw lastErr || new Error("Gemini: todos los modelos fallaron");
 }
 
 async function _runFetchQuitoEvents(apiKey) {
@@ -1738,6 +2131,11 @@ async function _runFetchQuitoEvents(apiKey) {
     year: "numeric",
     timeZone: "America/Guayaquil",
   });
+  // expireAt: 36 h después del cron de hoy → Firestore borra el doc
+  // automáticamente (TTL configurado en eventsQuito.expireAt). Margen
+  // de 12 h por encima de 24 h para que el doc esté visible toda la
+  // jornada de hoy y madrugada de mañana antes de desaparecer.
+  const expireAt = Timestamp.fromMillis(now.getTime() + 36 * 60 * 60 * 1000);
 
   if (!apiKey) {
     console.warn("fetchQuitoEvents: GEMINI_API_KEY no configurada, skip.");
@@ -1756,6 +2154,7 @@ async function _runFetchQuitoEvents(apiKey) {
         events: [],
         error: e.message,
         updatedAt: FieldValue.serverTimestamp(),
+        expireAt,
       },
       { merge: true }
     );
@@ -1767,6 +2166,7 @@ async function _runFetchQuitoEvents(apiKey) {
     events,
     error: null,
     updatedAt: FieldValue.serverTimestamp(),
+    expireAt,
   });
 
   return { ok: true, dateKey, count: events.length };
@@ -2170,4 +2570,588 @@ exports.backfillAssociationId = onCall(
     return { ok: true, associationId: aid, ...summary };
   },
 );
+
+// ───────────────────────────────────────────────────────────────────
+//  sendPasswordResetEmail — envía correo de recuperación con SMTP propio
+// ───────────────────────────────────────────────────────────────────
+//
+// Por qué no usamos directamente `auth.sendPasswordResetEmail` del Web
+// SDK: el remitente por defecto `noreply@taxis-f0f51.firebaseapp.com`
+// tiene reputación baja en Gmail y los correos terminan en spam (o no
+// llegan). Esta función:
+//
+//   1. Genera el link de reset con Admin SDK (no envía nada).
+//   2. Envía el correo nosotros mismos vía nodemailer + Gmail SMTP.
+//
+// Es **NO autenticada** (público) — igual que el endpoint nativo de
+// Firebase, debe poder usarse sin estar logueado. La protección
+// anti-enumeración: no revelamos si el email existe o no, siempre
+// respondemos `{ ok: true }`.
+//
+// Setup de secrets (una sola vez):
+//   firebase functions:secrets:set GMAIL_USER
+//   firebase functions:secrets:set GMAIL_APP_PASSWORD
+//
+exports.sendPasswordResetEmail = onCall(
+  {
+    secrets: [GMAIL_USER, GMAIL_APP_PASSWORD],
+    region: "us-central1",
+    enforceAppCheck: false,
+  },
+  async (request) => {
+    const email = (request.data?.email || "").toString().trim().toLowerCase();
+    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      throw new HttpsError("invalid-argument", "Email inválido.");
+    }
+
+    // Rate-limit suave por email: si ya pidieron un reset hace menos de
+    // 60s, devolvemos ok pero no enviamos otro correo.
+    const rateRef = db
+      .collection("password_reset_throttle")
+      .doc(Buffer.from(email).toString("base64").replace(/=/g, ""));
+    try {
+      const snap = await rateRef.get();
+      const last = snap.data()?.lastSentAt?.toMillis?.() ?? 0;
+      if (Date.now() - last < 60_000) {
+        console.log(`reset throttled for ${email}`);
+        return { ok: true, throttled: true };
+      }
+    } catch (e) {
+      // No bloqueamos por error de rate-limit
+      console.warn("rate-limit check failed:", e?.message);
+    }
+
+    let link;
+    try {
+      link = await getAuth().generatePasswordResetLink(email, {
+        url: "https://taxis-f0f51.firebaseapp.com/__/auth/action",
+        handleCodeInApp: false,
+      });
+    } catch (e) {
+      // Si el email no está registrado, NO revelamos eso al cliente
+      // (anti-enumeración). Logueamos y respondemos ok normal.
+      const code = e?.errorInfo?.code || e?.code || "";
+      if (
+        code === "auth/user-not-found" ||
+        code === "auth/email-not-found"
+      ) {
+        console.log(`reset attempt for non-existing user: ${email}`);
+        return { ok: true };
+      }
+      console.error("generatePasswordResetLink error:", e);
+      throw new HttpsError("internal", "No pudimos generar el link.");
+    }
+
+    // Enviar el correo con nodemailer.
+    const nodemailer = require("nodemailer");
+    const transporter = nodemailer.createTransport({
+      service: "gmail",
+      auth: {
+        user: GMAIL_USER.value(),
+        pass: GMAIL_APP_PASSWORD.value(),
+      },
+    });
+
+    const html = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; background: #f7f7f7;">
+        <div style="background: #fff; border-radius: 12px; padding: 32px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
+          <h1 style="color: #1976D2; margin: 0 0 16px; font-size: 22px;">🚖 Taxis App</h1>
+          <h2 style="margin: 0 0 12px; font-size: 18px; color: #222;">Recuperar contraseña</h2>
+          <p style="color: #444; line-height: 1.5; font-size: 15px;">
+            Recibimos una solicitud para restablecer tu contraseña.
+            Haz clic en el botón para fijar una nueva:
+          </p>
+          <div style="text-align: center; margin: 24px 0;">
+            <a href="${link}" style="display: inline-block; background: #1976D2; color: #fff; text-decoration: none; padding: 12px 28px; border-radius: 8px; font-weight: 600; font-size: 15px;">Restablecer contraseña</a>
+          </div>
+          <p style="color: #777; font-size: 13px; line-height: 1.5;">
+            Si tú no pediste esto, puedes ignorar este correo: tu cuenta sigue
+            siendo segura. El enlace caduca en 1 hora.
+          </p>
+          <p style="color: #aaa; font-size: 12px; margin-top: 24px; word-break: break-all;">
+            Si el botón no funciona, copia y pega este enlace en tu navegador:<br>
+            ${link}
+          </p>
+        </div>
+        <p style="text-align: center; color: #aaa; font-size: 11px; margin-top: 16px;">
+          Taxis App · Sistema de gestión de cooperativas de taxi
+        </p>
+      </div>
+    `;
+
+    try {
+      await transporter.sendMail({
+        from: `"Taxis App" <${GMAIL_USER.value()}>`,
+        to: email,
+        subject: "Restablece tu contraseña - Taxis App",
+        text:
+          `Recibimos una solicitud para restablecer tu contraseña.\n\n` +
+          `Abre este enlace para crear una nueva (válido 1h):\n${link}\n\n` +
+          `Si no fuiste tú, ignora este correo.`,
+        html,
+      });
+      await rateRef.set(
+        { lastSentAt: FieldValue.serverTimestamp(), email },
+        { merge: true },
+      );
+      console.log(`reset email sent to ${email}`);
+      return { ok: true };
+    } catch (e) {
+      console.error("nodemailer sendMail error:", e?.message || e);
+      throw new HttpsError(
+        "internal",
+        "No pudimos enviar el correo. Intenta de nuevo.",
+      );
+    }
+  },
+);
+
+
+// ───────────────────────────────────────────────────────────────────
+//  backfillPayments — rellena driverName + driverVehicleNumber en docs antiguos
+// ───────────────────────────────────────────────────────────────────
+//
+// Antes la función reportPayment NO denormalizaba el nombre/unidad del
+// conductor al doc del pago. La UI del admin hacía fallback al UID
+// truncado ('Conductor: YWRERZrs…'). Esta función limpia esos docs:
+// recorre los payments donde driverName == null, hace lookup a
+// users/{driverId} y completa los campos.
+//
+// Es **callable** y solo el super-admin puede ejecutarla. Se llama una
+// sola vez tras el deploy de los cambios de denormalización; después
+// queda dormant.
+//
+// Uso desde el cliente (admin):
+//   await FirebaseFunctions.instance
+//     .httpsCallable('backfillPayments').call({});
+//
+// Devuelve { ok: true, scanned, updated, skipped }.
+//
+exports.backfillPayments = onCall(
+  { region: 'us-central1', timeoutSeconds: 300 },
+  async (request) => {
+    requireSuperAdmin(request);
+
+    let scanned = 0;
+    let updated = 0;
+    let skipped = 0;
+    const userCache = new Map();
+
+    // Procesamos en lotes de 200 con cursor — evita cargar toda la
+    // colección a memoria si hay miles de pagos.
+    const pageSize = 200;
+    let lastDoc = null;
+
+    while (true) {
+      let q = db.collection('payments').orderBy('reportedAt').limit(pageSize);
+      if (lastDoc) q = q.startAfter(lastDoc);
+      const snap = await q.get();
+      if (snap.empty) break;
+
+      const batch = db.batch();
+      let pendingWrites = 0;
+
+      for (const doc of snap.docs) {
+        scanned++;
+        const data = doc.data();
+        // Si ya tiene driverName, saltar.
+        if (data.driverName && data.driverName.length > 0) {
+          skipped++;
+          continue;
+        }
+        const driverId = data.driverId;
+        if (!driverId) {
+          skipped++;
+          continue;
+        }
+        let user = userCache.get(driverId);
+        if (user === undefined) {
+          const uSnap = await db.collection('users').doc(driverId).get();
+          user = uSnap.exists ? uSnap.data() : null;
+          userCache.set(driverId, user);
+        }
+        if (!user) {
+          skipped++;
+          continue;
+        }
+        const fullName = [user.name, user.lastname]
+          .filter(Boolean).join(' ').trim();
+        const update = {};
+        if (fullName) update.driverName = fullName;
+        if (user.numeroVehiculo) {
+          update.driverVehicleNumber = user.numeroVehiculo;
+        }
+        if (Object.keys(update).length === 0) {
+          skipped++;
+          continue;
+        }
+        batch.update(doc.ref, update);
+        pendingWrites++;
+        updated++;
+      }
+
+      if (pendingWrites > 0) {
+        await batch.commit();
+      }
+
+      lastDoc = snap.docs[snap.docs.length - 1];
+      if (snap.docs.length < pageSize) break;
+    }
+
+    console.log(`backfillPayments: scanned=${scanned} updated=${updated} skipped=${skipped}`);
+    return { ok: true, scanned, updated, skipped };
+  },
+);
+
+
+
+// ───────────────────────────────────────────────────────────────────
+//  inheritArchivedRecords — al re-registrarse con la misma cédula que
+//  un usuario soft-deleted, transferir los pagos / viajes / gastos
+//  históricos al nuevo UID para que el conductor vea su balance.
+// ───────────────────────────────────────────────────────────────────
+//
+// Caso típico: el admin elimina a Haydee (soft-delete → archivedCedula
+// guardada). Haydee se vuelve a crear cuenta con la misma cédula y el
+// mismo tenant. Sin migración, sus $X de saldo previo quedan huérfanos
+// (driverId apunta al UID viejo borrado). Con esta función:
+//   - Busca users con archivedCedula == miCedula y associationId == mío
+//     y status == 'deleted'.
+//   - Para cada uno, transfiere TODOS sus pagos / trips / expenses al
+//     nuevo UID con un campo 'inheritedFrom: oldUid' para auditoría.
+//   - Marca el doc soft-deleted con 'migratedTo: newUid' para que no se
+//     vuelva a migrar dos veces.
+//
+// Es callable y solo lo puede invocar el dueño del nuevo UID
+// (request.auth.uid == data.newUid). Sin auth → throw.
+//
+// Es **idempotente**: si vuelve a correr, no hace nada porque el old
+// user ya tiene migratedTo.
+
+exports.inheritArchivedRecords = onCall(
+  { region: "us-central1" },
+  async (request) => {
+    const auth = requireAuth(request);
+    const newUid = auth.uid;
+
+    // Cargar el usuario nuevo (yo) para sacar cedula + tenant.
+    const myRef = db.collection("users").doc(newUid);
+    const mySnap = await myRef.get();
+    if (!mySnap.exists) {
+      throw new HttpsError("not-found", "Tu doc de usuario no existe.");
+    }
+    const me = mySnap.data();
+    const myCedula = (me.cedula || "").toString();
+    const myAid = me.associationId;
+    if (!myCedula || !myAid) {
+      throw new HttpsError(
+        "failed-precondition",
+        "Faltan cedula o associationId en tu perfil.",
+      );
+    }
+
+    // Buscar usuarios soft-deleted con misma cédula y mismo tenant.
+    const candidates = await db
+      .collection("users")
+      .where("archivedCedula", "==", myCedula)
+      .where("associationId", "==", myAid)
+      .get();
+
+    const ancestors = candidates.docs.filter((d) => {
+      const data = d.data();
+      return (
+        d.id !== newUid &&
+        data.status === "deleted" &&
+        !data.migratedTo // todavía no se migró
+      );
+    });
+
+    if (ancestors.length === 0) {
+      return { ok: true, ancestorsFound: 0, migrated: { payments: 0, trips: 0, expenses: 0 } };
+    }
+
+    let movedPayments = 0;
+    let movedTrips = 0;
+    let movedExpenses = 0;
+
+    for (const ancestor of ancestors) {
+      const oldUid = ancestor.id;
+      // Transferir payments del ancestor.
+      const payments = await db
+        .collection("payments")
+        .where("driverId", "==", oldUid)
+        .get();
+      for (const chunk of chunkArray(payments.docs, 400)) {
+        const batch = db.batch();
+        for (const p of chunk) {
+          batch.update(p.ref, {
+            driverId: newUid,
+            inheritedFrom: oldUid,
+            // Refresca también el nombre denormalizado al actual.
+            driverName: [me.name, me.lastname].filter(Boolean).join(" ").trim() || null,
+            driverVehicleNumber: me.numeroVehiculo || null,
+          });
+          movedPayments++;
+        }
+        await batch.commit();
+      }
+
+      // Trips
+      const trips = await db
+        .collection("trips")
+        .where("driverId", "==", oldUid)
+        .get();
+      for (const chunk of chunkArray(trips.docs, 400)) {
+        const batch = db.batch();
+        for (const t of chunk) {
+          batch.update(t.ref, {
+            driverId: newUid,
+            inheritedFrom: oldUid,
+          });
+          movedTrips++;
+        }
+        await batch.commit();
+      }
+
+      // Expenses
+      const expenses = await db
+        .collection("expenses")
+        .where("driverId", "==", oldUid)
+        .get();
+      for (const chunk of chunkArray(expenses.docs, 400)) {
+        const batch = db.batch();
+        for (const e of chunk) {
+          batch.update(e.ref, {
+            driverId: newUid,
+            inheritedFrom: oldUid,
+          });
+          movedExpenses++;
+        }
+        await batch.commit();
+      }
+
+      // Marcar al ancestor como migrado.
+      await ancestor.ref.update({
+        migratedTo: newUid,
+        migratedAt: FieldValue.serverTimestamp(),
+      });
+    }
+
+    console.log(
+      `inheritArchivedRecords: new=${newUid} ancestors=${ancestors.length} ` +
+        `payments=${movedPayments} trips=${movedTrips} expenses=${movedExpenses}`,
+    );
+    return {
+      ok: true,
+      ancestorsFound: ancestors.length,
+      migrated: {
+        payments: movedPayments,
+        trips: movedTrips,
+        expenses: movedExpenses,
+      },
+    };
+  },
+);
+
+function chunkArray(arr, size) {
+  const chunks = [];
+  for (let i = 0; i < arr.length; i += size) {
+    chunks.push(arr.slice(i, i + size));
+  }
+  return chunks;
+}
+
+// ───────────────────────────────────────────────────────────────────
+//  cleanupOrphanedDrivers — limpieza histórica de "drivers fantasma".
+//
+//  Recorre `drivers/` (filtra por associationId si se pasa) y para
+//  cada doc verifica que su `users/{userId}` exista y NO esté marcado
+//  como `status='deleted'`. Si está huérfano, lo apaga (isActive=false,
+//  status='offline', currentPosition=null, archivedAt=now).
+//
+//  Esto repara los conductores que fueron eliminados ANTES de que el
+//  fix de cascada en `deleteUser` existiera — quedaban con isActive=true
+//  y aparecían duplicados en el modal "Agregar a la cola" y en el mapa.
+//
+//  Permisos: super-admin O admin de la asociación que se está limpiando.
+//  Idempotente: vuelve a correrlo cuantas veces sea necesario.
+// ───────────────────────────────────────────────────────────────────
+
+exports.cleanupOrphanedDrivers = onCall({}, async (request) => {
+  const auth = requireAuth(request);
+  const { associationId } = request.data || {};
+
+  const callerEmail = auth.token.email || "";
+  const isSuper = SUPER_ADMIN_EMAILS.includes(callerEmail);
+
+  // Validar permisos:
+  //  - super-admin puede limpiar cualquier asociación (o todas si no se
+  //    pasa associationId)
+  //  - admin solo puede limpiar la suya
+  let scopedAid = associationId;
+  if (!isSuper) {
+    const callerSnap = await db.collection("users").doc(auth.uid).get();
+    const callerData = callerSnap.exists ? callerSnap.data() : null;
+    if (!callerData || callerData.role !== "admin") {
+      throw new HttpsError("permission-denied", "Sin permisos.");
+    }
+    if (associationId && associationId !== callerData.associationId) {
+      throw new HttpsError(
+        "permission-denied",
+        "Solo puedes limpiar tu asociación."
+      );
+    }
+    scopedAid = callerData.associationId;
+  }
+
+  let driversQuery = db.collection("drivers");
+  if (scopedAid) {
+    driversQuery = driversQuery.where("associationId", "==", scopedAid);
+  }
+  const driversSnap = await driversQuery.get();
+
+  const now = FieldValue.serverTimestamp();
+  let scanned = 0;
+  let cleaned = 0;
+  const cleanedSummary = [];
+
+  for (const d of driversSnap.docs) {
+    scanned++;
+    const data = d.data();
+    if (data.archivedAt || data.deletedAt) continue; // ya limpio
+
+    const userId = data.userId;
+    let orphan = false;
+    let reason = "";
+
+    if (!userId) {
+      orphan = true;
+      reason = "sin userId";
+    } else {
+      const userSnap = await db.collection("users").doc(userId).get();
+      if (!userSnap.exists) {
+        orphan = true;
+        reason = "users doc no existe";
+      } else {
+        const userData = userSnap.data();
+        if (userData.status === "deleted" || userData.deletedAt) {
+          orphan = true;
+          reason = "user soft-deleted";
+        }
+      }
+    }
+
+    if (!orphan) continue;
+
+    await d.ref.update({
+      isActive: false,
+      archivedAt: now,
+      deletedAt: now,
+      currentPosition: null,
+      currentLat: null,
+      currentLng: null,
+      currentLatitude: null,
+      currentLongitude: null,
+      status: "offline",
+      inQueueAt: null,
+      updatedAt: now,
+    });
+    cleaned++;
+    cleanedSummary.push({
+      id: d.id,
+      vehicleNumber: data.vehicleNumber || null,
+      reason,
+    });
+  }
+
+  return {
+    ok: true,
+    scanned,
+    cleaned,
+    associationId: scopedAid || "(todas)",
+    cleanedSummary,
+  };
+});
+
+// ───────────────────────────────────────────────────────────────────
+//  markStaleDriversOffline — cron de presencia.
+//
+//  Cada conductor con la app viva escribe `updatedAt = now` en cada
+//  update de GPS (cada 5-30s según movimiento). Si un conductor lleva
+//  más de [staleMinutes] sin actualizar, asumimos que su sesión murió
+//  (app cerrada, batería agotada, sin red, crash) y lo apagamos:
+//    isActive=false, status='offline', currentPosition=null, inQueueAt=null
+//
+//  Esto resuelve el bug "el conductor se ve en el mapa pero no escucha
+//  audio porque cerró sesión / mató la app". La operadora deja de verlo
+//  como disponible y los demás dejan de esperarlo.
+//
+//  Cron cada 2 minutos. Threshold: 3 minutos sin updatedAt.
+// ───────────────────────────────────────────────────────────────────
+
+const STALE_MINUTES = 3;
+
+async function _runMarkStaleDriversOffline() {
+  const cutoffMs = Date.now() - STALE_MINUTES * 60 * 1000;
+  const cutoff = Timestamp.fromMillis(cutoffMs);
+
+  const snap = await db
+    .collection("drivers")
+    .where("isActive", "==", true)
+    .where("updatedAt", "<", cutoff)
+    .limit(500)
+    .get();
+
+  let scanned = snap.size;
+  let marked = 0;
+
+  for (const d of snap.docs) {
+    const data = d.data();
+    if (!data.updatedAt) continue;
+    try {
+      await d.ref.update({
+        isActive: false,
+        status: "offline",
+        currentPosition: null,
+        currentLatitude: null,
+        currentLongitude: null,
+        inQueueAt: null,
+        offlineReason: "stale_no_heartbeat",
+        offlineAt: FieldValue.serverTimestamp(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      marked++;
+    } catch (e) {
+      console.warn(
+        `markStaleDriversOffline: ${d.id} update falló`,
+        e.message,
+      );
+    }
+  }
+
+  return { ok: true, scanned, marked, staleMinutes: STALE_MINUTES };
+}
+
+exports.markStaleDriversOffline = onSchedule(
+  {
+    schedule: "*/2 * * * *",
+    timeZone: "America/Guayaquil",
+    timeoutSeconds: 60,
+    memory: "256MiB",
+    retryCount: 1,
+  },
+  async () => {
+    const summary = await _runMarkStaleDriversOffline();
+    if (summary.marked > 0) {
+      console.log("markStaleDriversOffline:", JSON.stringify(summary));
+    }
+    return summary;
+  },
+);
+
+exports.markStaleDriversOfflineNow = onCall({}, async (request) => {
+  requireSuperAdmin(request);
+  const summary = await _runMarkStaleDriversOffline();
+  return summary;
+});
 

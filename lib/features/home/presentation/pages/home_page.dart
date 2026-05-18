@@ -3,18 +3,28 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../auth/data/models/user_model.dart';
+import '../../../../core/services/connectivity_service.dart';
+import '../../../../core/services/radio_power_service.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/constants/app_constants.dart';
-import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/widgets/availability_toggle.dart';
 import '../../../../core/widgets/payment_pending_banner.dart';
 import '../../../map/presentation/pages/map_page.dart';
 import '../../../communication/presentation/pages/walkie_talkie_page.dart';
-import '../../../trips/presentation/pages/trips_page.dart';
 import '../../../chat/presentation/pages/chat_list_page.dart';
 import '../widgets/dashboard_kpis.dart';
+import '../widgets/notifications_bell_button.dart';
+import '../widgets/radio_wave_button.dart';
 
-/// Página principal con navegación inferior
+/// Página principal con navegación inferior y dashboard por rol.
+///
+/// Diseño:
+/// - Saludo: card con avatar, nombre, rol → tap abre el perfil.
+/// - Acciones del día: lo que el usuario hace TODOS los días (su mic
+///   carga rápida, sus pagos, sus viajes).
+/// - Administración (solo admin): tarjetas cuadradas para todas las
+///   herramientas de gestión, reemplazando los iconos minúsculos que
+///   antes vivían en el AppBar del perfil.
 class HomePage extends StatefulWidget {
   const HomePage({super.key});
 
@@ -23,10 +33,8 @@ class HomePage extends StatefulWidget {
 }
 
 class _HomePageState extends State<HomePage> {
-  int _currentIndex = -1; // Se inicializa al index del Radio
+  int _currentIndex = -1;
 
-  /// ¿Este usuario envía GPS (y por tanto debe ver el switch Activo/Inactivo)?
-  /// Mismo criterio que en `main.dart` al inicializar el location service.
   bool _sendsGps(UserModel user) {
     if (user.role == AppConstants.roleDriver) return true;
     if (user.role == AppConstants.roleAdmin && user.numeroVehiculo.isNotEmpty) {
@@ -35,16 +43,9 @@ class _HomePageState extends State<HomePage> {
     return false;
   }
 
-  int _radioIndexForRole(String role) {
-    switch (role) {
-      case AppConstants.roleAdmin:
-      case AppConstants.roleOperator:
-        return 3; // [Panel, Mapa, Viajes, Radio, Chat]
-      case AppConstants.roleDriver:
-      default:
-        return 2; // [Inicio, Mapa, Radio, Viajes, Chat]
-    }
-  }
+  /// Índice de Radio en el IndexedStack: siempre el 2 (3er página) tras
+  /// la limpieza del nav. Layout fijo: [Panel/Inicio, Mapa, Radio, Chat].
+  static const int _radioStackIndex = 2;
 
   @override
   Widget build(BuildContext context) {
@@ -57,34 +58,28 @@ class _HomePageState extends State<HomePage> {
         }
 
         final user = state.user;
-        // Inicializar al tab de Radio la primera vez
         if (_currentIndex == -1) {
-          _currentIndex = _radioIndexForRole(user.role);
+          _currentIndex = _radioStackIndex;
         }
         final pages = _getPagesForRole(user);
-        final navItems = _getNavItemsForRole(user);
 
         return Scaffold(
           appBar: AppBar(
+            leading: NotificationsBellButton(user: user),
             title: const Text(AppConstants.appName),
             actions: [
-              // Switch general "Activo/Inactivo" — solo para conductores y
-              // admins con vehículo (los que envían GPS).
               if (_sendsGps(user))
                 Padding(
                   padding: const EdgeInsets.only(right: 4),
                   child: Center(child: const AvailabilityToggle()),
                 ),
-              // Botón de pánico / emergencia
               IconButton(
                 onPressed: () => _showEmergencyDialog(context),
                 icon: const Icon(Icons.sos, color: AppTheme.errorColor),
                 tooltip: 'Emergencia',
               ),
               IconButton(
-                onPressed: () {
-                  context.push('/profile');
-                },
+                onPressed: () => context.push('/profile'),
                 icon: const CircleAvatar(
                   radius: 16,
                   backgroundColor: AppTheme.secondaryColor,
@@ -99,14 +94,116 @@ class _HomePageState extends State<HomePage> {
               children: pages,
             ),
           ),
-          bottomNavigationBar: BottomNavigationBar(
-            currentIndex: _currentIndex,
-            onTap: (index) {
-              setState(() {
-                _currentIndex = index;
-              });
-            },
-            items: navItems,
+          bottomNavigationBar: _buildCustomNav(user),
+        );
+      },
+    );
+  }
+
+  /// Bottom nav custom con Radio al centro.
+  ///
+  /// Layout: [Inicio/Panel] [Mapa] [🎙️ Radio (grande, ondas)] [Chat]
+  /// [Mis pagos / Validar pagos]
+  ///
+  /// Radio al centro siempre, con animación de ondas concéntricas
+  /// cuando el radio está encendido (RadioPowerService.isOn). Los demás
+  /// items son normales (icon + label).
+  Widget _buildCustomNav(UserModel user) {
+    final isDriver = user.role == AppConstants.roleDriver;
+    final isAdmin = user.role == AppConstants.roleAdmin;
+    final isOperator = user.role == AppConstants.roleOperator;
+    final canDrive = isDriver || (isAdmin && user.numeroVehiculo.isNotEmpty);
+
+    // 5º item según rol: lo más usado por ese perfil.
+    final IconData fifthIcon;
+    final String fifthLabel;
+    final VoidCallback fifthOnTap;
+    if (isAdmin || isOperator) {
+      fifthIcon = Icons.fact_check_outlined;
+      fifthLabel = 'Validar';
+      fifthOnTap = () => context.push('/payment-approvals');
+    } else if (canDrive) {
+      fifthIcon = Icons.payments_outlined;
+      fifthLabel = 'Mis pagos';
+      fifthOnTap = () => context.push('/my-payments');
+    } else {
+      fifthIcon = Icons.notifications_outlined;
+      fifthLabel = 'Avisos';
+      fifthOnTap = () => context.push('/notifications');
+    }
+
+    return ListenableBuilder(
+      listenable: Listenable.merge([
+        RadioPowerService.instance,
+        ConnectivityService.instance,
+      ]),
+      builder: (context, _) {
+        // Radio "activo" para la animación: encendido + con internet.
+        final radioActive = RadioPowerService.instance.isOn &&
+            ConnectivityService.instance.isConnected;
+        return Container(
+          decoration: BoxDecoration(
+            color: Colors.white,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.08),
+                blurRadius: 8,
+                offset: const Offset(0, -2),
+              ),
+            ],
+          ),
+          child: SafeArea(
+            top: false,
+            child: SizedBox(
+              height: 76,
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: _NavBarItem(
+                      icon: isDriver ? Icons.home : Icons.dashboard,
+                      label: isDriver ? 'Inicio' : 'Panel',
+                      selected: _currentIndex == 0,
+                      onTap: () => setState(() => _currentIndex = 0),
+                    ),
+                  ),
+                  Expanded(
+                    child: _NavBarItem(
+                      icon: Icons.map,
+                      label: 'Mapa',
+                      selected: _currentIndex == 1,
+                      onTap: () => setState(() => _currentIndex = 1),
+                    ),
+                  ),
+                  Expanded(
+                    child: Center(
+                      child: RadioWaveButton(
+                        selected: _currentIndex == _radioStackIndex,
+                        active: radioActive,
+                        onTap: () => setState(
+                            () => _currentIndex = _radioStackIndex),
+                      ),
+                    ),
+                  ),
+                  Expanded(
+                    child: _NavBarItem(
+                      icon: Icons.chat,
+                      label: 'Chat',
+                      selected: _currentIndex == 3,
+                      onTap: () => setState(() => _currentIndex = 3),
+                    ),
+                  ),
+                  Expanded(
+                    child: _NavBarItem(
+                      icon: fifthIcon,
+                      label: fifthLabel,
+                      selected: false,
+                      onTap: fifthOnTap,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         );
       },
@@ -114,380 +211,206 @@ class _HomePageState extends State<HomePage> {
   }
 
   List<Widget> _getPagesForRole(UserModel user) {
-    switch (user.role) {
-      case AppConstants.roleAdmin:
-        return [
-          _buildDashboard(user),
-          const MapPage(),
-          const TripsPage(),
-          const WalkieTalkiePage(),
-          const ChatListPage(),
-        ];
-      case AppConstants.roleOperator:
-        return [
-          _buildDashboard(user),
-          const MapPage(),
-          const TripsPage(),
-          const WalkieTalkiePage(),
-          const ChatListPage(),
-        ];
-      case AppConstants.roleDriver:
-      default:
-        return [
-          _buildDashboard(user),
-          const MapPage(),
-          const WalkieTalkiePage(),
-          const TripsPage(),
-          const ChatListPage(),
-        ];
-    }
+    // Layout único para los 3 roles: el 5º slot del nav navega a otra
+    // ruta (push), por eso solo necesitamos 4 páginas en el stack.
+    return [
+      _buildDashboard(user),
+      const MapPage(),
+      const WalkieTalkiePage(),
+      const ChatListPage(),
+    ];
   }
 
-  List<BottomNavigationBarItem> _getNavItemsForRole(UserModel user) {
-    switch (user.role) {
-      case AppConstants.roleAdmin:
-        return const [
-          BottomNavigationBarItem(icon: Icon(Icons.dashboard), label: 'Panel'),
-          BottomNavigationBarItem(icon: Icon(Icons.map), label: 'Mapa'),
-          BottomNavigationBarItem(icon: Icon(Icons.directions_car), label: 'Viajes'),
-          BottomNavigationBarItem(icon: Icon(Icons.mic), label: 'Radio'),
-          BottomNavigationBarItem(icon: Icon(Icons.chat), label: 'Chat'),
-        ];
-      case AppConstants.roleOperator:
-        return const [
-          BottomNavigationBarItem(icon: Icon(Icons.dashboard), label: 'Panel'),
-          BottomNavigationBarItem(icon: Icon(Icons.map), label: 'Mapa'),
-          BottomNavigationBarItem(icon: Icon(Icons.directions_car), label: 'Viajes'),
-          BottomNavigationBarItem(icon: Icon(Icons.mic), label: 'Radio'),
-          BottomNavigationBarItem(icon: Icon(Icons.chat), label: 'Chat'),
-        ];
-      case AppConstants.roleDriver:
-      default:
-        return const [
-          BottomNavigationBarItem(icon: Icon(Icons.home), label: 'Inicio'),
-          BottomNavigationBarItem(icon: Icon(Icons.map), label: 'Mapa'),
-          BottomNavigationBarItem(icon: Icon(Icons.mic), label: 'Radio'),
-          BottomNavigationBarItem(icon: Icon(Icons.directions_car), label: 'Viajes'),
-          BottomNavigationBarItem(icon: Icon(Icons.chat), label: 'Chat'),
-        ];
-    }
-  }
+  // ────────────────────────── DASHBOARD ──────────────────────────
 
   Widget _buildDashboard(UserModel user) {
+    final isSuper = user.email == 'brealpeaymara@gmail.com';
     return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.fromLTRB(16, 16, 16, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Saludo
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Row(
-                children: [
-                  CircleAvatar(
-                    radius: 30,
-                    backgroundColor: AppTheme.primaryColor,
-                    child: Text(
-                      user.name.isNotEmpty ? user.name[0].toUpperCase() : '?',
-                      style: const TextStyle(
-                        fontSize: 24,
-                        fontWeight: FontWeight.bold,
-                        color: AppTheme.secondaryColor,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 16),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '¡Hola, ${user.name}!',
-                          style: const TextStyle(
-                            fontSize: 20,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                        const SizedBox(height: 4),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 2,
-                          ),
-                          decoration: BoxDecoration(
-                            color: _getRoleColor(user.role),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: Text(
-                            _getRoleName(user.role),
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 12,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          // Accesos rápidos
-          const Text(
-            'Accesos Rápidos',
-            style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
-          ),
-          const SizedBox(height: 12),
-          GridView.count(
-            crossAxisCount: 2,
-            shrinkWrap: true,
-            physics: const NeverScrollableScrollPhysics(),
-            crossAxisSpacing: 12,
-            mainAxisSpacing: 12,
-            childAspectRatio: 1.4,
-            children: _getQuickActionsForRole(user.role),
-          ),
+          _ProfileGreetingCard(user: user),
+          const SizedBox(height: 20),
+          _SectionTitle(title: 'Mi día'),
+          const SizedBox(height: 10),
+          _CardGrid(items: _myDayActions(user)),
+          if (_operationsActions(user).isNotEmpty) ...[
+            const SizedBox(height: 20),
+            _SectionTitle(title: 'Operaciones'),
+            const SizedBox(height: 10),
+            _CardGrid(items: _operationsActions(user)),
+          ],
+          if (_adminActions(user, isSuper: isSuper).isNotEmpty) ...[
+            const SizedBox(height: 20),
+            _SectionTitle(title: 'Administración'),
+            const SizedBox(height: 10),
+            _CardGrid(items: _adminActions(user, isSuper: isSuper)),
+          ],
           const SizedBox(height: 24),
-          // KPIs en tiempo real según rol
           DashboardKpis(user: user),
         ],
       ),
     );
   }
 
+  // ────────── Acciones agrupadas por rol y propósito ──────────
 
-  List<Widget> _getQuickActionsForRole(String role) {
-    final List<Widget> actions = [];
+  List<_ActionTile> _myDayActions(UserModel user) {
+    final isAdmin = user.role == AppConstants.roleAdmin;
+    final isOperator = user.role == AppConstants.roleOperator;
+    final isDriver = user.role == AppConstants.roleDriver;
+    final canDrive = isDriver || (isAdmin && user.numeroVehiculo.isNotEmpty);
 
-    // El admin hereda capacidades de conductor + operadora.
-    final canDrive =
-        role == AppConstants.roleDriver || role == AppConstants.roleAdmin;
-    final canOperate =
-        role == AppConstants.roleOperator || role == AppConstants.roleAdmin;
-    final isAdmin = role == AppConstants.roleAdmin;
-
-    // ─── Conductor ───
+    final list = <_ActionTile>[];
     if (canDrive) {
-      actions.addAll([
-        _buildQuickAction(
-          'Cambiar Estado',
-          Icons.swap_horiz,
-          AppTheme.successColor,
-          () => _showStatusDialog(),
+      list.add(_ActionTile(
+        title: 'Mis pagos',
+        icon: Icons.payments_outlined,
+        color: AppTheme.secondaryColor,
+        onTap: () => context.push('/my-payments'),
+      ));
+      list.add(_ActionTile(
+        title: 'Registrar gasto',
+        icon: Icons.receipt_long_outlined,
+        color: Colors.amber.shade700,
+        onTap: () => context.push('/expenses'),
+      ));
+      list.add(_ActionTile(
+        title: 'Mi reporte',
+        icon: Icons.bar_chart,
+        color: Colors.indigo,
+        onTap: () => context.push('/driver-report'),
+      ));
+    }
+    if (isOperator || isAdmin) {
+      list.add(_ActionTile(
+        title: 'Solicitudes web',
+        icon: Icons.assignment_turned_in_outlined,
+        color: Colors.deepPurple,
+        onTap: () => context.push('/trip-requests'),
+      ));
+    }
+    return list;
+  }
+
+  List<_ActionTile> _operationsActions(UserModel user) {
+    final isAdmin = user.role == AppConstants.roleAdmin;
+    final isOperator = user.role == AppConstants.roleOperator;
+    final canOperate = isAdmin || isOperator;
+
+    if (!canOperate) return const [];
+
+    // La operadora valida pagos y administra paradas. Lo financiero
+    // (Caja y Reportes globales) es 100% del admin del grupo, así que
+    // NO debe verlo. Sí ve un reporte personal con los pagos que ELLA
+    // validó por día/semana/mes.
+    if (isOperator) {
+      return [
+        _ActionTile(
+          title: 'Validar pagos',
+          icon: Icons.fact_check_outlined,
+          color: Colors.deepOrange,
+          onTap: () => context.push('/payment-approvals'),
         ),
-        _buildQuickAction(
-          'Mis Pagos',
-          Icons.payments,
-          AppTheme.secondaryColor,
-          () => context.push('/my-payments'),
+        _ActionTile(
+          title: 'Mis validaciones',
+          icon: Icons.assignment_turned_in_outlined,
+          color: AppTheme.accentColor,
+          onTap: () => context.push('/operator-validations'),
         ),
-        _buildQuickAction(
-          'Registrar Gasto',
-          Icons.receipt_long,
-          AppTheme.warningColor,
-          () => context.push('/expenses'),
+        _ActionTile(
+          title: 'Paradas',
+          icon: Icons.flag_outlined,
+          color: Colors.orange,
+          onTap: () => context.push('/taxi-stands'),
         ),
-      ]);
+      ];
     }
 
-    // ─── Operadora ───
-    if (canOperate) {
-      actions.addAll([
-        _buildQuickAction(
-          'Asignar Viaje',
-          Icons.add_circle,
-          AppTheme.primaryColor,
-          () => context.push('/assign-trip'),
-        ),
-        _buildQuickAction(
-          'Solicitudes',
-          Icons.assignment_turned_in,
-          Colors.deepPurple,
-          () => context.push('/trip-requests'),
-        ),
-        _buildQuickAction(
-          'Paradas',
-          Icons.flag,
-          Colors.orange,
-          () => context.push('/taxi-stands'),
-        ),
-      ]);
-    }
-
-    // ─── Admin / Operadora: validar pagos ───
-    if (isAdmin || canOperate) {
-      actions.add(
-        _buildQuickAction(
-          'Validar Pagos',
-          Icons.fact_check,
-          Colors.deepOrange,
-          () => context.push('/payment-approvals'),
-        ),
-      );
-    }
-
-    // ─── Admin ───
-    if (isAdmin) {
-      actions.addAll([
-        _buildQuickAction(
-          'Socios',
-          Icons.people,
-          AppTheme.successColor,
-          () => context.push('/users'),
-        ),
-        _buildQuickAction(
-          'Caja',
-          Icons.account_balance_wallet,
-          Colors.teal,
-          () => context.push('/cashflow'),
-        ),
-        _buildQuickAction(
-          'Avisos',
-          Icons.campaign,
-          Colors.indigo,
-          () => context.push('/notifications'),
-        ),
-        _buildQuickAction(
-          'Branding',
-          Icons.palette,
-          Colors.pink,
-          () => context.push('/theme-settings'),
-        ),
-        _buildQuickAction(
-          'Config. Cobros',
-          Icons.tune,
-          AppTheme.primaryDark,
-          () => context.push('/billing-config'),
-        ),
-        _buildQuickAction(
-          'Conceptos',
-          Icons.list_alt,
-          Colors.brown,
-          () => context.push('/payment-concepts'),
-        ),
-        _buildQuickAction(
-          'Emergencias',
-          Icons.sos,
-          AppTheme.errorColor,
-          () => context.push('/emergency'),
-        ),
-      ]);
-    }
-
-    // ─── Comunes ───
-    actions.add(
-      _buildQuickAction(
-        'Reportes',
-        Icons.bar_chart,
-        AppTheme.accentColor,
-        () => context.push('/reports'),
+    return [
+      _ActionTile(
+        title: 'Validar pagos',
+        icon: Icons.fact_check_outlined,
+        color: Colors.deepOrange,
+        onTap: () => context.push('/payment-approvals'),
       ),
-    );
-
-    return actions;
-  }
-
-  Widget _buildQuickAction(
-    String title,
-    IconData icon,
-    Color color,
-    VoidCallback onTap,
-  ) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            children: [
-              Icon(icon, color: color, size: 32),
-              const SizedBox(height: 8),
-              Text(
-                title,
-                textAlign: TextAlign.center,
-                style: const TextStyle(
-                  fontWeight: FontWeight.w600,
-                  fontSize: 14,
-                ),
-              ),
-            ],
-          ),
-        ),
+      _ActionTile(
+        title: 'Caja',
+        icon: Icons.account_balance_wallet_outlined,
+        color: Colors.teal,
+        onTap: () => context.push('/cashflow'),
       ),
-    );
-  }
-
-  Color _getRoleColor(String role) {
-    switch (role) {
-      case AppConstants.roleAdmin:
-        return AppTheme.errorColor;
-      case AppConstants.roleOperator:
-        return AppTheme.accentColor;
-      default:
-        return AppTheme.secondaryColor;
-    }
-  }
-
-  String _getRoleName(String role) {
-    switch (role) {
-      case AppConstants.roleAdmin:
-        return 'Administrador';
-      case AppConstants.roleOperator:
-        return 'Operadora';
-      default:
-        return 'Conductor';
-    }
-  }
-
-  void _showStatusDialog() {
-    showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('Cambiar Estado'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            _buildStatusOption('Libre', Icons.check_circle, AppTheme.statusFree, AppConstants.statusFree),
-            _buildStatusOption('Con pasajero', Icons.person, AppTheme.statusBusy, AppConstants.statusBusy),
-            _buildStatusOption(
-              'En camino a base',
-              Icons.home,
-              AppTheme.statusReturning,
-              AppConstants.statusReturning,
-            ),
-            _buildStatusOption(
-              'Desconectado',
-              Icons.power_settings_new,
-              AppTheme.statusOffline,
-              AppConstants.statusOffline,
-            ),
-          ],
-        ),
+      _ActionTile(
+        title: 'Reportes',
+        icon: Icons.bar_chart_outlined,
+        color: AppTheme.accentColor,
+        onTap: () => context.push('/reports'),
       ),
-    );
+      _ActionTile(
+        title: 'Paradas',
+        icon: Icons.flag_outlined,
+        color: Colors.orange,
+        onTap: () => context.push('/taxi-stands'),
+      ),
+    ];
   }
 
-  Widget _buildStatusOption(String label, IconData icon, Color color, String statusValue) {
-    return ListTile(
-      leading: Icon(icon, color: color),
-      title: Text(label),
-      onTap: () async {
-        Navigator.pop(context);
-        // Usar DriverLocationService global para cambiar estado
-        // Esto maneja online/offline, GPS, y Firestore automáticamente
-        await DriverLocationService.instance.updateStatus(statusValue);
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('Estado cambiado a: $label')),
-          );
-        }
-      },
-    );
+  List<_ActionTile> _adminActions(UserModel user, {required bool isSuper}) {
+    final isAdmin = user.role == AppConstants.roleAdmin;
+    if (!isAdmin && !isSuper) return const [];
+
+    return [
+      _ActionTile(
+        title: 'Socios',
+        icon: Icons.people_outline,
+        color: AppTheme.successColor,
+        onTap: () => context.push('/members'),
+      ),
+      _ActionTile(
+        title: 'Avisos',
+        icon: Icons.campaign_outlined,
+        color: Colors.indigo,
+        onTap: () => context.push('/notifications'),
+      ),
+      _ActionTile(
+        title: 'Branding',
+        icon: Icons.palette_outlined,
+        color: Colors.pink,
+        onTap: () => context.push('/theme-settings'),
+      ),
+      _ActionTile(
+        title: 'Config. cobros',
+        icon: Icons.tune,
+        color: AppTheme.primaryDark,
+        onTap: () => context.push('/billing-config'),
+      ),
+      _ActionTile(
+        title: 'Conceptos pago',
+        icon: Icons.list_alt_outlined,
+        color: Colors.brown,
+        onTap: () => context.push('/payment-concepts'),
+      ),
+      _ActionTile(
+        title: 'Categorías caja',
+        icon: Icons.category_outlined,
+        color: Colors.cyan.shade800,
+        onTap: () => context.push('/cashflow-categories'),
+      ),
+      _ActionTile(
+        title: 'Ubicación parada',
+        icon: Icons.location_on_outlined,
+        color: Colors.amber.shade800,
+        onTap: () => context.push('/stand-location'),
+      ),
+      if (isSuper)
+        _ActionTile(
+          title: 'Panel SaaS',
+          icon: Icons.shield_outlined,
+          color: Colors.red.shade800,
+          onTap: () => context.push('/super'),
+        ),
+    ];
   }
 
   void _showEmergencyDialog(BuildContext context) {
@@ -508,9 +431,8 @@ class _HomePageState extends State<HomePage> {
         ),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('Cancelar'),
-          ),
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('Cancelar')),
           ElevatedButton(
             onPressed: () {
               Navigator.pop(ctx);
@@ -529,6 +451,250 @@ class _HomePageState extends State<HomePage> {
             child: const Text('ENVIAR ALERTA'),
           ),
         ],
+      ),
+    );
+  }
+}
+
+// ────────────────────────── Sub-widgets ──────────────────────────
+
+/// Item simple del bottom-nav custom (icono + label).
+class _NavBarItem extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _NavBarItem({
+    required this.icon,
+    required this.label,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final color = selected ? AppTheme.primaryColor : Colors.grey.shade600;
+    return InkWell(
+      onTap: onTap,
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(icon, color: color, size: 24),
+          const SizedBox(height: 2),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: selected ? FontWeight.w800 : FontWeight.w600,
+              color: color,
+            ),
+            overflow: TextOverflow.ellipsis,
+            maxLines: 1,
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _ProfileGreetingCard extends StatelessWidget {
+  final UserModel user;
+  const _ProfileGreetingCard({required this.user});
+
+  @override
+  Widget build(BuildContext context) {
+    final initials = (user.name.isNotEmpty ? user.name[0] : '').toUpperCase() +
+        (user.lastname.isNotEmpty ? user.lastname[0] : '').toUpperCase();
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: () => context.push('/profile'),
+        child: Container(
+          padding: const EdgeInsets.all(18),
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              colors: [
+                AppTheme.primaryColor,
+                AppTheme.primaryColor.withValues(alpha: 0.75),
+              ],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+          child: Row(
+            children: [
+              CircleAvatar(
+                radius: 28,
+                backgroundColor: Colors.white.withValues(alpha: 0.25),
+                child: Text(
+                  initials.isEmpty ? '?' : initials,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w800,
+                    fontSize: 22,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 14),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Hola, ${user.name}',
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.w800,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 10, vertical: 3),
+                      decoration: BoxDecoration(
+                        color: Colors.white.withValues(alpha: 0.22),
+                        borderRadius: BorderRadius.circular(20),
+                      ),
+                      child: Text(
+                        _roleLabel(user.role),
+                        style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 11,
+                            fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    if (user.numeroVehiculo.isNotEmpty) ...[
+                      const SizedBox(height: 6),
+                      Text(
+                        'Unidad #${user.numeroVehiculo}'
+                        '${user.placa.isNotEmpty ? " · ${user.placa}" : ""}',
+                        style: TextStyle(
+                          color: Colors.white.withValues(alpha: 0.85),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              const Icon(Icons.chevron_right, color: Colors.white70),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _roleLabel(String role) {
+    switch (role) {
+      case AppConstants.roleAdmin:
+        return 'ADMINISTRADOR';
+      case AppConstants.roleOperator:
+        return 'OPERADORA';
+      case AppConstants.roleDriver:
+        return 'CONDUCTOR';
+      default:
+        return role.toUpperCase();
+    }
+  }
+}
+
+class _SectionTitle extends StatelessWidget {
+  final String title;
+  const _SectionTitle({required this.title});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 4),
+      child: Text(
+        title,
+        style: const TextStyle(
+          fontSize: 13,
+          fontWeight: FontWeight.w800,
+          letterSpacing: 0.6,
+          color: Colors.black54,
+        ),
+      ),
+    );
+  }
+}
+
+class _CardGrid extends StatelessWidget {
+  final List<_ActionTile> items;
+  const _CardGrid({required this.items});
+
+  @override
+  Widget build(BuildContext context) {
+    if (items.isEmpty) return const SizedBox.shrink();
+    return GridView.count(
+      crossAxisCount: 3,
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      crossAxisSpacing: 10,
+      mainAxisSpacing: 10,
+      childAspectRatio: 0.95, // tarjetas casi cuadradas
+      children: items,
+    );
+  }
+}
+
+class _ActionTile extends StatelessWidget {
+  final String title;
+  final IconData icon;
+  final Color color;
+  final VoidCallback onTap;
+
+  const _ActionTile({
+    required this.title,
+    required this.icon,
+    required this.color,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      color: Colors.white,
+      elevation: 1.5,
+      borderRadius: BorderRadius.circular(14),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(14),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 14, horizontal: 8),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                width: 44,
+                height: 44,
+                decoration: BoxDecoration(
+                  color: color.withValues(alpha: 0.13),
+                  borderRadius: BorderRadius.circular(12),
+                ),
+                child: Icon(icon, color: color, size: 24),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                title,
+                textAlign: TextAlign.center,
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: const TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w700,
+                  height: 1.15,
+                ),
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

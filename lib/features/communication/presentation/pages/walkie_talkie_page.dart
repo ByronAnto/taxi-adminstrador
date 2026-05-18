@@ -21,6 +21,7 @@ import '../../../trips/presentation/widgets/assign_trip_modal.dart';
 import '../../../trips/presentation/widgets/quick_street_assign_modal.dart';
 import '../../data/models/channel_model.dart';
 import '../bloc/communication_bloc.dart';
+import '../widgets/channel_settings_sheet.dart';
 import '../widgets/stand_queue_bar.dart';
 
 /// Página de walkie-talkie con PTT estilo Zello.
@@ -41,6 +42,13 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   Timer? _durationTimer;
   int _recordingSeconds = 0;
 
+  /// Anti-PTT-pegado: si el transmisor mantiene el lock pero no genera
+  /// voz por [_maxSilenceSeconds] consecutivos, soltamos el PTT solo.
+  /// Evita que un dedo pegado / botón atascado bloquee el canal para todos.
+  static const int _maxSilenceSeconds = 10;
+  Timer? _silenceTimer;
+  DateTime? _lastVoiceAt;
+
   final _agoraService = AgoraService.instance;
   final _radioService = RadioForegroundService.instance;
   final _connectivity = ConnectivityService.instance;
@@ -57,6 +65,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// Último channelId al que nos unimos en Agora (para detectar cambios)
   String? _lastAgoraChannelId;
 
+
   /// Estado de la grabación local del audio del canal (historial 24h).
   String? _recordingEntryId;
   DateTime? _recordingStartedAt;
@@ -69,6 +78,30 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     final authState = context.read<AuthBloc>().state;
     if (authState is AuthAuthenticated) return authState.user;
     return null;
+  }
+
+  /// True si el rol del usuario depende del GPS (conductor o admin con
+  /// vehículo). Para operadoras y admin sin vehículo, el estado online
+  /// del DriverLocationService es irrelevante: el radio funciona aunque
+  /// no haya GPS. Sin esto, la operadora se quedaba con `_isOffline=true`
+  /// permanente y NO podía mandar audios por el radio.
+  bool _userDependsOnGps() {
+    final u = _currentUser;
+    if (u == null) return false;
+    if (u.role == AppConstants.roleDriver) return true;
+    if (u.role == AppConstants.roleAdmin && u.numeroVehiculo.isNotEmpty) {
+      return true;
+    }
+    return false;
+  }
+
+  /// Recalcula `_isOffline` y `_isDriverOffline` aplicando el gate de
+  /// rol — para que la operadora no quede bloqueada del PTT por no
+  /// enviar GPS.
+  void _refreshOfflineFlags() {
+    final dependsOnGps = _userDependsOnGps();
+    _isDriverOffline = dependsOnGps && !_locationService.isOnline;
+    _isOffline = !_connectivity.isConnected || _isDriverOffline;
   }
 
   @override
@@ -86,8 +119,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       });
     }
     // Monitorear conectividad
-    _isOffline = !_connectivity.isConnected || !_locationService.isOnline;
-    _isDriverOffline = !_locationService.isOnline;
+    _refreshOfflineFlags();
     _connectivity.addListener(_onConnectivityChanged);
     _locationService.addListener(_onDriverLocationChanged);
     _radioPower.addListener(_onRadioPowerChanged);
@@ -128,14 +160,16 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     super.didChangeAppLifecycleState(state);
     if (state == AppLifecycleState.paused ||
         state == AppLifecycleState.inactive) {
-      // Si estaba grabando, forzar stop PTT
+      // Si estaba grabando PTT, forzar stop. La app pasa a background
+      // — el engine se mantiene VIVO para que el conductor siga
+      // ESCUCHANDO la radio. Solo liberamos el mic (vía muteMic, ya
+      // ejecutado al soltar el botón).
       if (_isRecording) {
         _recordingTimer?.cancel();
         _durationTimer?.cancel();
         _isRecording = false;
         _recordingSeconds = 0;
         _recordingStartTime = null;
-        // Liberar lock PTT en Firestore
         final commState = context.read<CommunicationBloc>().state;
         if (commState is CommunicationLoaded &&
             commState.activeChannelId != null) {
@@ -150,51 +184,11 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           }
         }
       }
-      // El observer global en main.dart ya destruye el engine
-      // pero por seguridad también lo hacemos aquí
-      debugPrint('📱 WalkieTalkie: App en background → engine destruido por global observer');
+      debugPrint('📱 WalkieTalkie: App en background → engine vivo, audio sigue');
     } else if (state == AppLifecycleState.resumed) {
-      // Al volver de background, re-inicializar engine y reconectar
-      // sólo si el radio está encendido.
-      if (_radioPower.isOn) {
-        _reconnectAfterResume();
-        debugPrint('📱 WalkieTalkie: App resumed → reconectando Agora');
-      } else {
-        debugPrint('📱 WalkieTalkie: App resumed → radio OFF, no reconectar');
-      }
+      // El engine no se destruyó, así que no hace falta reconectar.
+      debugPrint('📱 WalkieTalkie: App resumed (engine ya estaba vivo)');
       if (mounted) setState(() {});
-    }
-  }
-
-  /// Reconecta Agora después de que la app vuelve de background.
-  /// El engine fue destruido al ir a background, así que debe
-  /// re-inicializarse y reconectar al canal activo.
-  /// Sólo si el radio está ON — si está OFF no reconectamos nada.
-  Future<void> _reconnectAfterResume() async {
-    if (!_radioPower.isOn) return;
-    // Capturar canal ANTES del primer await para evitar usar context tras gap
-    String? channelToRejoin;
-    if (mounted) {
-      final commState = context.read<CommunicationBloc>().state;
-      if (commState is CommunicationLoaded &&
-          commState.activeChannelId != null) {
-        channelToRejoin = commState.activeChannelId;
-      }
-    }
-    try {
-      // Re-inicializar engine (fue destruido en background)
-      await _agoraService.initialize();
-
-      // Si el bloc no tenía canal, usar el guardado antes de destroy
-      channelToRejoin ??= _agoraService.lastChannelBeforeDestroy;
-
-      if (channelToRejoin != null) {
-        _lastAgoraChannelId = channelToRejoin;
-        await _agoraService.joinChannel(channelToRejoin);
-        debugPrint('✅ Reconectado a canal: $channelToRejoin tras resume');
-      }
-    } catch (e) {
-      debugPrint('Error reconectando Agora tras resume: $e');
     }
   }
 
@@ -202,7 +196,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   void _onConnectivityChanged() {
     if (!mounted) return;
     final wasOffline = _isOffline;
-    _isOffline = !_connectivity.isConnected || !_locationService.isOnline;
+    _refreshOfflineFlags();
 
     setState(() {});
 
@@ -358,8 +352,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   void _onDriverLocationChanged() {
     if (!mounted) return;
     final wasOffline = _isOffline;
-    _isDriverOffline = !_locationService.isOnline;
-    _isOffline = !_connectivity.isConnected || _isDriverOffline;
+    _refreshOfflineFlags();
 
     setState(() {});
 
@@ -415,6 +408,20 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             ),
           );
         }
+        // === Pre-warm token Agora ===
+        // Apenas el usuario selecciona un canal (radio aún apagado),
+        // disparamos el fetch del token en background. Cuando luego
+        // pulse "Encender", el token ya estará en cache → encendido
+        // sin esperar la red.
+        if (state is CommunicationLoaded &&
+            state.activeChannelId != null &&
+            !_radioPower.isOn) {
+          _agoraService.prewarmToken(state.activeChannelId!);
+        }
+        // El auto-resume del último canal se eliminó intencionalmente:
+        // arrancamos siempre con radio OFF y, cuando el conductor toca
+        // el switch, ahí seleccionamos `lastChannelId`. Así el ON es
+        // siempre interactivo y nunca despierta solo audio en el canal.
         // === Foreground service: mantener radio en segundo plano ===
         // Sólo si el radio está ENCENDIDO. Si está OFF, NO conectamos a
         // Agora ni arrancamos el foreground service "microphone" — eso es
@@ -426,6 +433,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           // === Agora: unirse/salir del canal de audio en tiempo real ===
           if (channelId != null && channelId != _lastAgoraChannelId) {
             _lastAgoraChannelId = channelId;
+            // Persistir el canal para poder reanudar tras kill del isolate.
+            _radioPower.setLastChannel(channelId, channelName);
             _agoraService.joinChannel(channelId).catchError((e) {
               debugPrint('Error Agora joinChannel: $e');
             });
@@ -557,6 +566,14 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
               ],
             ),
           ),
+          IconButton(
+            tooltip: 'Volumen del radio',
+            icon: Icon(
+              Icons.volume_up,
+              color: isOn ? AppTheme.primaryColor : Colors.grey.shade500,
+            ),
+            onPressed: _showVolumeDialog,
+          ),
           Switch.adaptive(
             value: isOn,
             activeThumbColor: AppTheme.primaryColor,
@@ -565,7 +582,33 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                 : (v) async {
                     HapticFeedback.selectionClick();
                     if (v) {
-                      await _radioPower.turnOn();
+                      // Encendido manual: si el bloc todavía no tiene
+                      // canal activo pero recordamos el último, lo
+                      // seleccionamos para que el ON conecte al canal
+                      // por defecto. Esto es interactivo (no sucede
+                      // sin que el user toque el switch).
+                      final s = context.read<CommunicationBloc>().state;
+                      String? cid;
+                      String? cname;
+                      if (s is CommunicationLoaded) {
+                        cid = s.activeChannelId;
+                        cname = s.activeChannel?.name;
+                        if (cid == null && _radioPower.lastChannelId != null) {
+                          final exists = s.channels.any(
+                              (c) => c.uid == _radioPower.lastChannelId);
+                          if (exists) {
+                            context.read<CommunicationBloc>().add(
+                                  ChannelSelected(_radioPower.lastChannelId),
+                                );
+                            cid = _radioPower.lastChannelId;
+                            cname = _radioPower.lastChannelName;
+                          }
+                        }
+                      }
+                      await _radioPower.turnOn(
+                        channelId: cid,
+                        channelName: cname,
+                      );
                     } else {
                       await _radioPower.turnOff();
                     }
@@ -573,6 +616,121 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           ),
         ],
       ),
+    );
+  }
+
+  /// Diálogo con slider de volumen amplificable (100-400).
+  /// 100 = 1x (volumen normal), 400 = 4x (amplificado al máximo).
+  /// El cambio es inmediato sobre el engine Agora y se persiste para
+  /// cold-starts futuros.
+  Future<void> _showVolumeDialog() async {
+    int current = _agoraService.playbackVolume;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (ctx, setLocal) {
+            final pct = ((current - AgoraService.playbackVolumeMin) /
+                    (AgoraService.playbackVolumeMax -
+                        AgoraService.playbackVolumeMin) *
+                    100)
+                .round();
+            return AlertDialog(
+              title: const Row(
+                children: [
+                  Icon(Icons.volume_up, color: AppTheme.primaryColor),
+                  SizedBox(width: 8),
+                  Text('Volumen del radio'),
+                ],
+              ),
+              content: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    'Ganancia: ${(current / 100).toStringAsFixed(1)}x  ·  $pct%',
+                    style: const TextStyle(
+                      fontWeight: FontWeight.w600,
+                      fontSize: 16,
+                    ),
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    current <= 100
+                        ? 'Volumen normal'
+                        : current <= 200
+                            ? 'Amplificado moderado'
+                            : current <= 300
+                                ? 'Amplificado fuerte'
+                                : 'Amplificado al máximo',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Colors.grey.shade600,
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Slider(
+                    value: current.toDouble(),
+                    min: AgoraService.playbackVolumeMin.toDouble(),
+                    max: AgoraService.playbackVolumeMax.toDouble(),
+                    divisions: (AgoraService.playbackVolumeMax -
+                            AgoraService.playbackVolumeMin) ~/
+                        10,
+                    label: '${current ~/ 1}',
+                    activeColor: AppTheme.primaryColor,
+                    onChanged: (v) => setLocal(() => current = v.round()),
+                  ),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text('1x',
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.grey.shade600)),
+                      Text('4x',
+                          style: TextStyle(
+                              fontSize: 11, color: Colors.grey.shade600)),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Sube el volumen del altavoz del celular al máximo '
+                    'antes de amplificar acá. Valores >300 pueden saturar '
+                    'la voz en bocinas pequeñas.',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: Colors.grey.shade600,
+                      fontStyle: FontStyle.italic,
+                    ),
+                  ),
+                ],
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.of(ctx).pop(),
+                  child: const Text('Cancelar'),
+                ),
+                ElevatedButton(
+                  onPressed: () async {
+                    final messenger = ScaffoldMessenger.of(context);
+                    final navigator = Navigator.of(ctx);
+                    await _agoraService.setPlaybackVolume(current);
+                    if (!mounted) return;
+                    navigator.pop();
+                    messenger.showSnackBar(
+                      SnackBar(
+                        content: Text(
+                            'Volumen: ${(current / 100).toStringAsFixed(1)}x'),
+                        duration: const Duration(seconds: 2),
+                      ),
+                    );
+                  },
+                  child: const Text('Aplicar'),
+                ),
+              ],
+            );
+          },
+        );
+      },
     );
   }
 
@@ -618,7 +776,11 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
 
   /// Banner que muestra quién está hablando (estilo Zello)
   Widget _buildSpeakerBanner(CommunicationLoaded state) {
-    final isMe = state.pttSpeakerId == _currentUser?.uid;
+    final user = _currentUser;
+    final isMe = state.pttSpeakerId == user?.uid;
+    final isModerator = user != null &&
+        (user.role == AppConstants.roleAdmin ||
+            user.role == AppConstants.roleOperator);
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
@@ -643,19 +805,155 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
               ),
             ),
           ),
-          if (!isMe)
+          // Botón "Liberar" para admin/operadora cuando OTRO tiene el
+          // PTT. Cubre el caso "dedo pegado / botón atascado" — desbloquea
+          // el canal para todos sin esperar el timeout de 35s.
+          if (!isMe && isModerator && state.activeChannelId != null)
+            TextButton.icon(
+              onPressed: () => _confirmForceUnlock(state),
+              icon: const Icon(Icons.lock_open,
+                  color: Colors.white, size: 16),
+              label: const Text(
+                'Liberar',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w800,
+                ),
+              ),
+              style: TextButton.styleFrom(
+                padding: const EdgeInsets.symmetric(horizontal: 8),
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+            )
+          else if (!isMe)
             const Icon(Icons.lock, color: Colors.white, size: 16),
         ],
       ),
     );
   }
 
+  Future<void> _confirmForceUnlock(CommunicationLoaded state) async {
+    final user = _currentUser;
+    if (user == null || state.activeChannelId == null) return;
+    final speakerName = state.pttSpeakerName ?? 'Alguien';
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Liberar micrófono'),
+        content: Text(
+            '¿Forzar el corte de la transmisión de $speakerName? Úsalo si su PTT quedó pegado.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancelar'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Liberar'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true || !mounted) return;
+    context.read<CommunicationBloc>().add(
+          PttUnlockRequested(
+            channelId: state.activeChannelId!,
+            userId: user.uid,
+            force: true,
+          ),
+        );
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Micrófono liberado ($speakerName)'),
+        backgroundColor: AppTheme.successColor,
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
   Widget _buildChannelSelector(CommunicationLoaded state) {
-    // Solo admin/operadora pueden crear canales (lo exigen las reglas Firestore).
-    final role = _currentUser?.role;
-    final canCreateChannel =
-        role == AppConstants.roleAdmin || role == AppConstants.roleOperator;
-    final itemCount = state.channels.length + (canCreateChannel ? 1 : 0);
+    final user = _currentUser;
+    if (user == null) return const SizedBox(height: 56);
+    final role = user.role;
+    final canManage = role == AppConstants.roleAdmin ||
+        role == AppConstants.roleOperator;
+
+    // Filtro: el conductor solo ve los canales públicos + privados donde
+    // está en memberIds. Admin/operadora ven todos.
+    final visibleChannels = canManage
+        ? state.channels
+        : state.channels
+            .where((c) => c.isAccessibleBy(userId: user.uid, role: role))
+            .toList();
+
+    // Empty state crítico: el conductor no tiene NINGÚN canal visible.
+    // Sin esto, solo veía un PTT gris y no entendía por qué.
+    if (!canManage && state.channels.isNotEmpty && visibleChannels.isEmpty) {
+      return Container(
+        height: 56,
+        color: Colors.amber.shade50,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        child: Row(
+          children: [
+            Icon(Icons.info_outline,
+                color: Colors.amber.shade800, size: 20),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                'No tienes canales asignados. Pídele al admin que te '
+                'agregue al canal de la cooperativa.',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: Colors.amber.shade900,
+                  fontWeight: FontWeight.w600,
+                ),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
+    // Ordenar: default-para-mi-rol primero, luego públicos, luego privados.
+    visibleChannels.sort((a, b) {
+      final aIsDef = a.isDefaultForRole(role) ? 0 : 1;
+      final bIsDef = b.isDefaultForRole(role) ? 0 : 1;
+      if (aIsDef != bIsDef) return aIsDef.compareTo(bIsDef);
+      final aType = a.type == 'publico' ? 0 : 1;
+      final bType = b.type == 'publico' ? 0 : 1;
+      if (aType != bType) return aType.compareTo(bType);
+      return a.name.compareTo(b.name);
+    });
+
+    // Auto-select del default si todavía no hay canal activo y existe un
+    // default para el rol (o solo hay 1 canal visible).
+    if (state.activeChannelId == null && visibleChannels.isNotEmpty) {
+      ChannelModel? toSelect;
+      try {
+        toSelect = visibleChannels.firstWhere(
+          (c) => c.isDefaultForRole(role),
+        );
+      } catch (_) {
+        // Sin default: solo auto-seleccionamos si hay exactamente 1 canal,
+        // así el conductor siempre tiene uno listo sin click extra.
+        if (visibleChannels.length == 1) toSelect = visibleChannels.first;
+      }
+      if (toSelect != null) {
+        final channelToJoin = toSelect.uid;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) {
+            context.read<CommunicationBloc>().add(
+                  ChannelSelected(channelToJoin),
+                );
+          }
+        });
+      }
+    }
+
+    final itemCount = visibleChannels.length + (canManage ? 1 : 0);
+    final hasMultiple = visibleChannels.length > 1;
 
     return Container(
       height: 56,
@@ -665,7 +963,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
         itemCount: itemCount,
         itemBuilder: (context, index) {
-          if (canCreateChannel && index == state.channels.length) {
+          if (canManage && index == visibleChannels.length) {
             return Padding(
               padding: const EdgeInsets.symmetric(horizontal: 4),
               child: ActionChip(
@@ -686,10 +984,14 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             );
           }
 
-          final channel = state.channels[index];
+          final channel = visibleChannels[index];
           final isSelected = channel.uid == state.activeChannelId;
-          final canManage = role == AppConstants.roleAdmin ||
-              role == AppConstants.roleOperator;
+          final isLockedNow =
+              channel.isLocked && !channel.isLockExpired;
+          // Titilar: alguien está hablando, NO es el canal activo, y el
+          // usuario tiene >1 canal visible (si es uno solo, no aplica).
+          final shouldBlink = isLockedNow && !isSelected && hasMultiple;
+          final isDefault = channel.isDefaultForRole(role);
 
           return Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4),
@@ -697,30 +999,70 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
               onLongPress: canManage
                   ? () => _showChannelManageSheet(channel)
                   : null,
-              child: ChoiceChip(
-                label: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (channel.type == 'privado')
-                      const Padding(
-                        padding: EdgeInsets.only(right: 4),
-                        child: Icon(Icons.lock, size: 14),
-                      ),
-                    Text(channel.name, style: const TextStyle(fontSize: 12)),
-                    if (channel.isLocked && !channel.isLockExpired)
-                      const Padding(
-                        padding: EdgeInsets.only(left: 4),
-                        child: Icon(Icons.mic, size: 14, color: Colors.red),
-                      ),
-                  ],
+              child: _BlinkingChannelChip(
+                blink: shouldBlink,
+                child: ChoiceChip(
+                  label: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      if (channel.type == 'privado')
+                        const Padding(
+                          padding: EdgeInsets.only(right: 4),
+                          child: Icon(Icons.lock, size: 14),
+                        ),
+                      Text(channel.name,
+                          style: const TextStyle(fontSize: 12)),
+                      if (isDefault)
+                        const Padding(
+                          padding: EdgeInsets.only(left: 4),
+                          child: Icon(Icons.star,
+                              size: 12, color: Colors.amber),
+                        ),
+                      if (isLockedNow)
+                        const Padding(
+                          padding: EdgeInsets.only(left: 4),
+                          child: Icon(Icons.mic,
+                              size: 14, color: Colors.red),
+                        ),
+                      // ⚙️ visible solo para admin/op: abre directo el
+                      // sheet completo de configuración (miembros +
+                      // default por rol). Antes solo se llegaba con
+                      // long-press, lo cual no era descubrible.
+                      if (canManage) ...[
+                        const SizedBox(width: 4),
+                        InkWell(
+                          onTap: () {
+                            final user = _currentUser;
+                            if (user == null) return;
+                            showChannelSettingsSheet(
+                              context,
+                              channel: channel,
+                              aid: user.associationId,
+                            );
+                          },
+                          borderRadius: BorderRadius.circular(20),
+                          child: Padding(
+                            padding: const EdgeInsets.all(2),
+                            child: Icon(
+                              Icons.settings,
+                              size: 14,
+                              color: isSelected
+                                  ? Colors.white
+                                  : AppTheme.primaryColor,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                  selected: isSelected,
+                  selectedColor: AppTheme.primaryColor,
+                  onSelected: (selected) {
+                    context.read<CommunicationBloc>().add(
+                          ChannelSelected(selected ? channel.uid : null),
+                        );
+                  },
                 ),
-                selected: isSelected,
-                selectedColor: AppTheme.primaryColor,
-                onSelected: (selected) {
-                  context.read<CommunicationBloc>().add(
-                        ChannelSelected(selected ? channel.uid : null),
-                      );
-                },
               ),
             ),
           );
@@ -780,7 +1122,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             onPointerDown: canPtt
                 ? (_) => _startPtt(state)
                 : !isOn
-                    ? (_) => _showRadioOffWarning()
+                    ? (_) => _turnOnFromBigButton()
                     : _isOffline
                         ? (_) => _showOfflineWarning()
                         : null,
@@ -845,8 +1187,13 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                   const SizedBox(height: 4),
                   if (!isOn)
                     const Text(
-                      'Apagado',
-                      style: TextStyle(color: Colors.white70, fontSize: 11, fontWeight: FontWeight.w500),
+                      'Tocar para encender',
+                      textAlign: TextAlign.center,
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                      ),
                     )
                   else if (_overlayService.isActive)
                     const Text(
@@ -1075,20 +1422,47 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     }
   }
 
-  /// Muestra aviso cuando se intenta PTT con el radio apagado.
-  void _showRadioOffWarning() {
+  /// Tap en el botón circular grande cuando el radio está apagado.
+  /// Lo enciende directamente — es lo mismo que la acción "Encender" del
+  /// banner naranja, pero sin tener que tocar dos veces.
+  Future<void> _turnOnFromBigButton() async {
+    HapticFeedback.mediumImpact();
+    final s = context.read<CommunicationBloc>().state;
+    String? cid;
+    String? cname;
+    if (s is CommunicationLoaded) {
+      cid = s.activeChannelId;
+      cname = s.activeChannel?.name;
+      // Si no hay canal activo pero recordamos el último, lo
+      // seleccionamos para que ON conecte al canal por defecto.
+      if (cid == null && _radioPower.lastChannelId != null) {
+        final exists =
+            s.channels.any((c) => c.uid == _radioPower.lastChannelId);
+        if (exists) {
+          context
+              .read<CommunicationBloc>()
+              .add(ChannelSelected(_radioPower.lastChannelId));
+          cid = _radioPower.lastChannelId;
+          cname = _radioPower.lastChannelName;
+        }
+      }
+    }
+    await _radioPower.turnOn(channelId: cid, channelName: cname);
     if (!mounted) return;
-    HapticFeedback.lightImpact();
+    final hasChannel =
+        (context.read<CommunicationBloc>().state is CommunicationLoaded) &&
+            (context.read<CommunicationBloc>().state as CommunicationLoaded)
+                    .activeChannelId !=
+                null;
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
-        content: const Text('Enciende el radio con el interruptor de arriba'),
-        backgroundColor: Colors.orange.shade700,
-        duration: const Duration(seconds: 2),
-        action: SnackBarAction(
-          label: 'Encender',
-          textColor: Colors.white,
-          onPressed: () => _radioPower.turnOn(),
+        content: Text(
+          hasChannel
+              ? 'Radio encendido. Mantén presionado para hablar.'
+              : 'Radio encendido. Selecciona un canal arriba.',
         ),
+        backgroundColor: AppTheme.successColor,
+        duration: const Duration(seconds: 2),
       ),
     );
   }
@@ -1158,6 +1532,32 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       }
     });
 
+    // Anti-pegado: registrar detector de voz y arrancar timer de silencio.
+    // Si el VAD reporta actividad, refresca `_lastVoiceAt`. El timer
+    // periódico checa cada segundo y, si pasaron más de
+    // `_maxSilenceSeconds` sin voz, fuerza stopPtt para liberar el lock.
+    _lastVoiceAt = DateTime.now();
+    _agoraService.onLocalVoiceActivity = (active) {
+      if (active) _lastVoiceAt = DateTime.now();
+    };
+    _silenceTimer?.cancel();
+    _silenceTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!_isRecording || !mounted) {
+        t.cancel();
+        return;
+      }
+      final lastVoice = _lastVoiceAt;
+      if (lastVoice == null) return;
+      final silenceSec = DateTime.now().difference(lastVoice).inSeconds;
+      if (silenceSec >= _maxSilenceSeconds) {
+        debugPrint(
+            '⏱️ PTT auto-release: $silenceSec s sin voz → soltando mic');
+        t.cancel();
+        final cs = context.read<CommunicationBloc>().state;
+        if (cs is CommunicationLoaded) _stopPtt(cs);
+      }
+    });
+
     _recordingStartTime = DateTime.now();
 
     // 🔔 Feedback háptico + beep tipo Motorola/Zello al iniciar PTT
@@ -1202,6 +1602,10 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     // Inmediatamente marcamos como no transmitiendo
     _recordingTimer?.cancel();
     _durationTimer?.cancel();
+    _silenceTimer?.cancel();
+    _silenceTimer = null;
+    _lastVoiceAt = null;
+    _agoraService.onLocalVoiceActivity = null;
     final durationSeconds = _recordingStartTime != null
         ? DateTime.now().difference(_recordingStartTime!).inSeconds
         : 0;
@@ -1259,6 +1663,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// Bottom sheet con opciones de manejo del canal (long-press en el chip).
   /// Solo visible para admin/operadora.
   void _showChannelManageSheet(ChannelModel channel) {
+    final user = _currentUser;
+    if (user == null) return;
     showModalBottomSheet(
       context: context,
       builder: (ctx) => SafeArea(
@@ -1266,8 +1672,22 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
+              leading: Icon(Icons.settings, color: AppTheme.primaryColor),
+              title: const Text('Configurar miembros y default'),
+              subtitle: const Text(
+                  'Quién entra al canal y para qué roles es por defecto'),
+              onTap: () {
+                Navigator.pop(ctx);
+                showChannelSettingsSheet(
+                  context,
+                  channel: channel,
+                  aid: user.associationId,
+                );
+              },
+            ),
+            ListTile(
               leading: const Icon(Icons.edit),
-              title: Text('Editar "${channel.name}"'),
+              title: Text('Editar nombre'),
               onTap: () {
                 Navigator.pop(ctx);
                 _showEditChannelDialog(channel);
@@ -1424,9 +1844,11 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           title: const Text('Nuevo Canal'),
           content: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               TextField(
                 controller: nameController,
+                autofocus: true,
                 decoration: const InputDecoration(
                   labelText: 'Nombre del canal',
                   prefixIcon: Icon(Icons.tag),
@@ -1442,14 +1864,42 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                   children: [
                     Expanded(
                       child: RadioListTile<String>(
-                        title: const Text('Público', style: TextStyle(fontSize: 14)),
+                        title: const Text('Público',
+                            style: TextStyle(fontSize: 14)),
                         value: 'publico',
                       ),
                     ),
                     Expanded(
                       child: RadioListTile<String>(
-                        title: const Text('Privado', style: TextStyle(fontSize: 14)),
+                        title: const Text('Privado',
+                            style: TextStyle(fontSize: 14)),
                         value: 'privado',
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: Colors.blue.shade100),
+                ),
+                child: Row(
+                  children: [
+                    Icon(Icons.info_outline,
+                        size: 16, color: Colors.blue.shade800),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        'Después de crearlo se abre la configuración para '
+                        'elegir miembros y si es el canal por defecto.',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.blue.shade900,
+                        ),
                       ),
                     ),
                   ],
@@ -1464,24 +1914,35 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             ),
             ElevatedButton(
               onPressed: () {
-                if (nameController.text.isNotEmpty) {
-                  context.read<CommunicationBloc>().add(
-                        ChannelCreateRequested(
-                          ChannelModel(
-                            uid: const Uuid().v4(),
-                            associationId: user.associationId,
-                            name: nameController.text.trim(),
-                            type: channelType,
-                            createdBy: user.uid,
-                            memberIds: [user.uid],
-                            createdAt: DateTime.now(),
-                          ),
-                        ),
-                      );
-                  Navigator.pop(ctx);
-                }
+                final name = nameController.text.trim();
+                if (name.isEmpty) return;
+                final newChannel = ChannelModel(
+                  uid: const Uuid().v4(),
+                  associationId: user.associationId,
+                  name: name,
+                  type: channelType,
+                  createdBy: user.uid,
+                  memberIds: [user.uid],
+                  createdAt: DateTime.now(),
+                );
+                context
+                    .read<CommunicationBloc>()
+                    .add(ChannelCreateRequested(newChannel));
+                Navigator.pop(ctx);
+                // Auto-abrir el sheet de configuración para que el admin
+                // termine de armarlo (miembros + default por rol) en un
+                // solo flujo. Sin esto, los canales privados quedan sin
+                // miembros y nadie los ve.
+                Future.delayed(const Duration(milliseconds: 350), () {
+                  if (!mounted) return;
+                  showChannelSettingsSheet(
+                    context,
+                    channel: newChannel,
+                    aid: user.associationId,
+                  );
+                });
               },
-              child: const Text('Crear'),
+              child: const Text('Crear y configurar'),
             ),
           ],
         ),
@@ -1489,4 +1950,82 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     );
   }
 
+}
+
+/// Wrapper que titila (escala + cambia opacidad) cuando [blink] = true.
+/// Se usa en los chips de canal para alertar al usuario que hay actividad
+/// (alguien hablando) en un canal que NO está seleccionado, cuando hay
+/// más de un canal visible.
+class _BlinkingChannelChip extends StatefulWidget {
+  final bool blink;
+  final Widget child;
+  const _BlinkingChannelChip({required this.blink, required this.child});
+
+  @override
+  State<_BlinkingChannelChip> createState() => _BlinkingChannelChipState();
+}
+
+class _BlinkingChannelChipState extends State<_BlinkingChannelChip>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _ctrl;
+  late Animation<double> _scale;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    );
+    _scale = Tween<double>(begin: 1.0, end: 1.06).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+    _syncAnimation();
+  }
+
+  @override
+  void didUpdateWidget(covariant _BlinkingChannelChip oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.blink != widget.blink) _syncAnimation();
+  }
+
+  void _syncAnimation() {
+    if (widget.blink) {
+      if (!_ctrl.isAnimating) _ctrl.repeat(reverse: true);
+    } else {
+      _ctrl.stop();
+      _ctrl.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (!widget.blink) return widget.child;
+    return AnimatedBuilder(
+      animation: _ctrl,
+      builder: (_, child) => Transform.scale(
+        scale: _scale.value,
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.red.withValues(alpha: 0.5 * _ctrl.value),
+                blurRadius: 12 * _ctrl.value,
+                spreadRadius: 2 * _ctrl.value,
+              ),
+            ],
+          ),
+          child: child,
+        ),
+      ),
+      child: widget.child,
+    );
+  }
 }

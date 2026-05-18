@@ -10,6 +10,16 @@ class DriverModel {
   final String status;
   final double? currentLatitude;
   final double? currentLongitude;
+  /// Precisión del último fix GPS (radio en metros). Útil para
+  /// dibujar círculo de incertidumbre en el mapa de la operadora.
+  final double? locationAccuracy;
+  /// Velocidad y dirección instantáneas (m/s, grados 0-360).
+  final double? locationSpeed;
+  final double? locationHeading;
+  /// True si el conductor está en modo "parado" (state-machine GPS de
+  /// ahorro): no se ha movido >100m en 5+ min. Útil para que la
+  /// operadora distinga visualmente quién está estacionado vs en ruta.
+  final bool stationaryMode;
   final double rating;
   final int totalTrips;
   final int totalPoints;
@@ -33,6 +43,10 @@ class DriverModel {
     this.status = 'desconectado',
     this.currentLatitude,
     this.currentLongitude,
+    this.locationAccuracy,
+    this.locationSpeed,
+    this.locationHeading,
+    this.stationaryMode = false,
     this.rating = 5.0,
     this.totalTrips = 0,
     this.totalPoints = 0,
@@ -58,6 +72,10 @@ class DriverModel {
       status: data['status'] ?? 'desconectado',
       currentLatitude: data['currentLatitude']?.toDouble(),
       currentLongitude: data['currentLongitude']?.toDouble(),
+      locationAccuracy: (data['locationAccuracy'] as num?)?.toDouble(),
+      locationSpeed: (data['locationSpeed'] as num?)?.toDouble(),
+      locationHeading: (data['locationHeading'] as num?)?.toDouble(),
+      stationaryMode: data['stationaryMode'] as bool? ?? false,
       rating: (data['rating'] ?? 5.0).toDouble(),
       totalTrips: data['totalTrips'] ?? 0,
       totalPoints: data['totalPoints'] ?? 0,

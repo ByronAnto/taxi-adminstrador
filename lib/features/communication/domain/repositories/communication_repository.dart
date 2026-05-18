@@ -27,10 +27,12 @@ abstract class CommunicationRepository {
     required String userName,
   });
 
-  /// PTT Lock: Liberar el canal
+  /// PTT Lock: Liberar el canal. Si [force]=true, libera incondicionalmente
+  /// (admin/op desbloqueando un PTT pegado).
   Future<void> unlockChannel({
     required String channelId,
     required String userId,
+    bool force,
   });
 
   /// Observar mensajes de un canal en tiempo real

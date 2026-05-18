@@ -137,8 +137,10 @@ class _ThemeSettingsPageState extends State<ThemeSettingsPage> {
     if (picked == null) return;
     setState(() => _uploadingLogo = true);
     try {
-      final ref =
-          FirebaseStorage.instance.ref('association_logos/$aid.jpg');
+      // Path tiene que matchear `match /associations/{aid}/{allPaths=**}`
+      // en storage.rules. (Antes usábamos `association_logos/` que no
+      // existía como regla y caía en el default deny → unauthorized.)
+      final ref = FirebaseStorage.instance.ref('associations/$aid/logo.jpg');
       await ref.putFile(
         await _xFileToFile(picked),
         SettableMetadata(contentType: 'image/jpeg'),

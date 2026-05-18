@@ -1,6 +1,6 @@
 "use client";
 
-import { sendPasswordResetEmail } from "firebase/auth";
+import { httpsCallable } from "firebase/functions";
 import Link from "next/link";
 import { FormEvent, useState } from "react";
 import { getFirebase } from "@/lib/firebase";
@@ -16,13 +16,21 @@ export default function RecoverPage() {
     setError(null);
     setLoading(true);
     try {
-      const { auth } = getFirebase();
-      await sendPasswordResetEmail(auth, email.trim());
+      const { functions } = getFirebase();
+      // Llamamos a la Cloud Function que envía el correo desde Gmail
+      // SMTP propio (mejor entrega que el remitente por defecto de
+      // Firebase, que termina en spam).
+      const fn = httpsCallable<{ email: string }, { ok: boolean }>(
+        functions,
+        "sendPasswordResetEmail",
+      );
+      await fn({ email: email.trim().toLowerCase() });
       setSent(true);
     } catch (e: any) {
-      setError(e?.code === "auth/user-not-found"
-        ? "No encontramos una cuenta con ese correo."
-        : "Error al enviar el correo. Intenta de nuevo.");
+      setError(
+        e?.message ||
+          "Error al enviar el correo. Intenta de nuevo.",
+      );
     } finally {
       setLoading(false);
     }

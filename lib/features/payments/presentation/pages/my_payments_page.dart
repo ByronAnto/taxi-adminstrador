@@ -46,12 +46,18 @@ class MyPaymentsPage extends StatelessWidget {
             ),
           ),
           body: StreamBuilder<QuerySnapshot>(
+            // Sin orderBy en la query: muchos docs legacy no tienen
+            // `reportedAt` y Firestore con orderBy los excluye. Además
+            // evita exigir un índice compuesto. Ordenamos en cliente —
+            // un conductor tiene pocas filas, es despreciable.
             stream: FirebaseFirestore.instance
                 .collection('payments')
                 .where('driverId', isEqualTo: uid)
-                .orderBy('reportedAt', descending: true)
                 .snapshots(),
             builder: (_, snap) {
+              if (snap.hasError) {
+                return _errorState(context, snap.error);
+              }
               if (snap.connectionState == ConnectionState.waiting) {
                 return const Center(child: CircularProgressIndicator());
               }
@@ -59,12 +65,28 @@ class MyPaymentsPage extends StatelessWidget {
               if (docs.isEmpty) {
                 return _emptyState(context);
               }
+              final payments =
+                  docs.map(PaymentModel.fromFirestore).toList();
+              // Subimos los cobros pendientes "Por pagar" al tope para que
+              // el conductor los vea primero.
+              payments.sort((a, b) {
+                final aUnpaid = a.isUnpaidCharge;
+                final bUnpaid = b.isUnpaidCharge;
+                if (aUnpaid != bUnpaid) return aUnpaid ? -1 : 1;
+                return b.reportedAt.compareTo(a.reportedAt);
+              });
               return ListView.separated(
                 padding: const EdgeInsets.all(16),
-                itemCount: docs.length,
+                itemCount: payments.length,
                 separatorBuilder: (_, _) => const SizedBox(height: 8),
-                itemBuilder: (_, i) =>
-                    _PaymentTile(payment: PaymentModel.fromFirestore(docs[i])),
+                itemBuilder: (_, i) => _PaymentTile(
+                  payment: payments[i],
+                  onPayCharge: () => _openReportDialog(
+                    context,
+                    aid,
+                    chargeToPay: payments[i],
+                  ),
+                ),
               );
             },
           ),
@@ -75,6 +97,36 @@ class MyPaymentsPage extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+
+  Widget _errorState(BuildContext context, Object? error) {
+    final msg = error?.toString() ?? '';
+    final isIndex = msg.contains('failed-precondition') ||
+        msg.contains('requires an index');
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.error_outline,
+                size: 64, color: AppTheme.errorColor),
+            const SizedBox(height: 16),
+            const Text('No pudimos cargar tus pagos',
+                style: TextStyle(
+                    fontSize: 16, fontWeight: FontWeight.w800)),
+            const SizedBox(height: 8),
+            Text(
+              isIndex
+                  ? 'El administrador necesita desplegar el índice nuevo de Firestore. Avísale para que ejecute "firebase deploy --only firestore:indexes".'
+                  : 'Error: $msg',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -103,7 +155,11 @@ class MyPaymentsPage extends StatelessWidget {
     );
   }
 
-  Future<void> _openReportDialog(BuildContext context, String aid) async {
+  Future<void> _openReportDialog(
+    BuildContext context,
+    String aid, {
+    PaymentModel? chargeToPay,
+  }) async {
     // Cargar billingConfig para defaults
     final aidSnap = await FirebaseFirestore.instance
         .collection('associations')
@@ -115,17 +171,26 @@ class MyPaymentsPage extends StatelessWidget {
     if (!context.mounted) return;
     await showDialog<void>(
       context: context,
-      builder: (_) => _ReportPaymentDialog(billingConfig: cfg),
+      builder: (_) => _ReportPaymentDialog(
+        billingConfig: cfg,
+        prefillCharge: chargeToPay,
+      ),
     );
   }
 }
 
 class _PaymentTile extends StatelessWidget {
   final PaymentModel payment;
-  const _PaymentTile({required this.payment});
+  final VoidCallback? onPayCharge;
+
+  const _PaymentTile({required this.payment, this.onPayCharge});
 
   @override
   Widget build(BuildContext context) {
+    if (payment.isUnpaidCharge) {
+      return _UnpaidChargeTile(payment: payment, onPay: onPayCharge);
+    }
+
     final statusColor = switch (payment.status) {
       PaymentStatus.pending => Colors.orange,
       PaymentStatus.validated => Colors.green,
@@ -194,11 +259,135 @@ class _PaymentTile extends StatelessWidget {
   }
 }
 
+// ─────────────── Tile especial: cobro emitido por admin ────────────
+
+/// Card destacado para un payment con `isOneOff=true` y todavía sin
+/// proof. El conductor lo ve naranja con CTA "Pagar este cobro" → abre
+/// el dialog de reporte con monto y concepto pre-fijados (no editables)
+/// y al guardar UPDATEa el doc en vez de crear uno nuevo.
+class _UnpaidChargeTile extends StatelessWidget {
+  final PaymentModel payment;
+  final VoidCallback? onPay;
+  const _UnpaidChargeTile({required this.payment, this.onPay});
+
+  @override
+  Widget build(BuildContext context) {
+    final df = DateFormat('dd/MM/yyyy');
+    final overdue = payment.dueDate != null &&
+        payment.dueDate!.isBefore(DateTime.now());
+    final orange = overdue ? Colors.red.shade700 : Colors.orange.shade700;
+
+    return Card(
+      elevation: 3,
+      shape: RoundedRectangleBorder(
+        side: BorderSide(color: orange, width: 1.5),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: 8, vertical: 3),
+                  decoration: BoxDecoration(
+                    color: orange,
+                    borderRadius: BorderRadius.circular(6),
+                  ),
+                  child: Text(
+                    overdue ? 'VENCIDO' : 'POR PAGAR',
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 10,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.6,
+                    ),
+                  ),
+                ),
+                const Spacer(),
+                Text(
+                  '\$${payment.amount.toStringAsFixed(2)}',
+                  style: TextStyle(
+                    fontSize: 22,
+                    fontWeight: FontWeight.w900,
+                    color: orange,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              PaymentConcepts.label(payment.concept),
+              style: const TextStyle(
+                  fontSize: 15, fontWeight: FontWeight.w700),
+            ),
+            if (payment.notes != null && payment.notes!.isNotEmpty) ...[
+              const SizedBox(height: 4),
+              Text(
+                payment.notes!,
+                style: TextStyle(
+                    fontSize: 12,
+                    color: Colors.grey.shade800,
+                    fontStyle: FontStyle.italic),
+              ),
+            ],
+            const SizedBox(height: 6),
+            Row(
+              children: [
+                if (payment.dueDate != null) ...[
+                  Icon(Icons.event,
+                      size: 14, color: Colors.grey.shade700),
+                  const SizedBox(width: 4),
+                  Text(
+                    'Vence ${df.format(payment.dueDate!)}',
+                    style: TextStyle(
+                        fontSize: 11, color: Colors.grey.shade800),
+                  ),
+                  const SizedBox(width: 10),
+                ],
+                if (payment.emittedByName != null)
+                  Expanded(
+                    child: Text(
+                      'Emitido por ${payment.emittedByName}',
+                      style: TextStyle(
+                          fontSize: 11, color: Colors.grey.shade600),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: onPay,
+                icon: const Icon(Icons.payments),
+                label: const Text('Pagar este cobro'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: orange,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
 // ─────────────────── Dialog: Reportar pago ───────────────────
 
 class _ReportPaymentDialog extends StatefulWidget {
   final BillingConfig billingConfig;
-  const _ReportPaymentDialog({required this.billingConfig});
+  final PaymentModel? prefillCharge;
+  const _ReportPaymentDialog({
+    required this.billingConfig,
+    this.prefillCharge,
+  });
 
   @override
   State<_ReportPaymentDialog> createState() => _ReportPaymentDialogState();
@@ -224,10 +413,16 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
   @override
   void initState() {
     super.initState();
-    _concept = widget.billingConfig.defaultConcept;
-    _amount.text = widget.billingConfig.amount > 0
-        ? widget.billingConfig.amount.toStringAsFixed(2)
-        : '';
+    final prefill = widget.prefillCharge;
+    if (prefill != null) {
+      _concept = prefill.concept;
+      _amount.text = prefill.amount.toStringAsFixed(2);
+    } else {
+      _concept = widget.billingConfig.defaultConcept;
+      _amount.text = widget.billingConfig.amount > 0
+          ? widget.billingConfig.amount.toStringAsFixed(2)
+          : '';
+    }
   }
 
   @override
@@ -539,6 +734,8 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
         'concept': _concept,
         'paymentDate': _paymentDate.toIso8601String(),
         'proof': proof,
+        if (widget.prefillCharge != null)
+          'chargeId': widget.prefillCharge!.uid,
       });
 
       if (!mounted) return;

@@ -1,5 +1,6 @@
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import '../models/user_model.dart';
 
 /// Fuente de datos remota para autenticación
@@ -58,7 +59,29 @@ class AuthRemoteDatasource {
     String? fotoLicenciaFrontal,
     String? fotoLicenciaTrasera,
   }) async {
-    // Primero crear cuenta en Firebase Auth (necesario para estar autenticado)
+    // Pre-check de cédula ANTES de crear la cuenta Auth.
+    //
+    // Antes hacíamos `users where cedula == X` directo desde Flutter
+    // pero las reglas de Firestore lo niegan: el usuario recién creado
+    // NO es owner ni active ni same-tenant → PERMISSION_DENIED. Por eso
+    // movemos la validación a una Cloud Function (Admin SDK ignora
+    // reglas) que además considera "disponibles" las cédulas que solo
+    // pertenecen a usuarios soft-deleted.
+    try {
+      final functions =
+          FirebaseFunctions.instanceFor(region: 'us-central1');
+      final res = await functions
+          .httpsCallable('checkCedulaAvailable')
+          .call({'cedula': cedula});
+      final available = (res.data as Map?)?['available'] as bool? ?? false;
+      if (!available) {
+        throw Exception('Ya existe un usuario con esta cédula');
+      }
+    } on FirebaseFunctionsException catch (e) {
+      throw Exception(e.message ?? 'No pudimos validar la cédula.');
+    }
+
+    // Crear cuenta en Firebase Auth.
     final credential = await _auth.createUserWithEmailAndPassword(
       email: email,
       password: password,
@@ -69,17 +92,6 @@ class AuthRemoteDatasource {
     }
 
     try {
-      // Verificar que la cédula no esté registrada (requiere autenticación)
-      final existingUser = await _firestore
-          .collection('users')
-          .where('cedula', isEqualTo: cedula)
-          .get();
-
-      if (existingUser.docs.isNotEmpty) {
-        // Si la cédula ya existe, eliminar la cuenta recién creada
-        await credential.user!.delete();
-        throw Exception('Ya existe un usuario con esta cédula');
-      }
 
       final userModel = UserModel(
         uid: credential.user!.uid,
@@ -134,9 +146,43 @@ class AuthRemoteDatasource {
     await _auth.signOut();
   }
 
-  /// Recuperar contraseña
+  /// Recuperar contraseña.
+  ///
+  /// Llama a la Cloud Function `sendPasswordResetEmail` (no al SDK web)
+  /// para que el correo se envíe vía Gmail SMTP propio. Mejor entrega
+  /// que `noreply@taxis-f0f51.firebaseapp.com` que terminaba en spam.
   Future<void> resetPassword(String email) async {
-    await _auth.sendPasswordResetEmail(email: email);
+    final functions =
+        FirebaseFunctions.instanceFor(region: 'us-central1');
+    try {
+      await functions
+          .httpsCallable('sendPasswordResetEmail')
+          .call({'email': email});
+    } on FirebaseFunctionsException catch (e) {
+      throw Exception(e.message ?? 'No pudimos enviar el correo.');
+    }
+  }
+
+  /// Cambiar contraseña del usuario actual.
+  ///
+  /// Re-autentica con la contraseña actual antes de actualizar (Firebase
+  /// lo exige por seguridad: si el usuario lleva mucho tiempo logueado,
+  /// `updatePassword` falla con `requires-recent-login` si no se hace
+  /// reauth primero).
+  Future<void> changePassword({
+    required String currentPassword,
+    required String newPassword,
+  }) async {
+    final user = _auth.currentUser;
+    if (user == null || user.email == null) {
+      throw Exception('No hay sesión activa.');
+    }
+    final cred = EmailAuthProvider.credential(
+      email: user.email!,
+      password: currentPassword,
+    );
+    await user.reauthenticateWithCredential(cred);
+    await user.updatePassword(newPassword);
   }
 
   /// Actualizar perfil de usuario

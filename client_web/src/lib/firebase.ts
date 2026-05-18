@@ -1,6 +1,7 @@
 import { initializeApp, getApps, FirebaseApp } from "firebase/app";
 import { getAuth, Auth } from "firebase/auth";
 import { getFirestore, Firestore } from "firebase/firestore";
+import { getFunctions, Functions } from "firebase/functions";
 
 const firebaseConfig = {
   apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY,
@@ -14,6 +15,7 @@ const firebaseConfig = {
 let app: FirebaseApp;
 let _auth: Auth | undefined;
 let _db: Firestore | undefined;
+let _functions: Functions | undefined;
 
 export function getFirebase() {
   if (!getApps().length) {
@@ -23,5 +25,6 @@ export function getFirebase() {
   }
   if (!_auth) _auth = getAuth(app);
   if (!_db) _db = getFirestore(app);
-  return { app, auth: _auth, db: _db };
+  if (!_functions) _functions = getFunctions(app, "us-central1");
+  return { app, auth: _auth, db: _db, functions: _functions };
 }

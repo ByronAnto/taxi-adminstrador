@@ -23,6 +23,10 @@ enum UserStatus {
   paymentPending,
   paymentBlocked,
   disabledByAdmin,
+  /// Soft-delete: el admin lo eliminó. Sus pagos / viajes históricos
+  /// siguen vivos (apuntan a este uid) para auditoría, pero el usuario
+  /// no aparece en listas activas. Email y cédula quedan liberados.
+  deleted,
 }
 
 /// Modelo de usuario para Firestore.
@@ -219,6 +223,8 @@ class UserModel {
         return UserStatus.paymentBlocked;
       case 'disabledByAdmin':
         return UserStatus.disabledByAdmin;
+      case 'deleted':
+        return UserStatus.deleted;
       case 'active':
       default:
         return UserStatus.active;

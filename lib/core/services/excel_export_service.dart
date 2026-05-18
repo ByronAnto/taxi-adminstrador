@@ -8,6 +8,7 @@ import 'package:share_plus/share_plus.dart';
 import 'package:syncfusion_flutter_xlsio/xlsio.dart' as xlsio;
 
 import '../../features/admin/data/models/cashflow_model.dart';
+import '../../features/reports/data/weekly_closing_service.dart';
 
 /// Servicio para generar archivos Excel (.xlsx) reales con `syncfusion_flutter_xlsio`.
 ///
@@ -245,6 +246,168 @@ class ExcelExportService {
     for (var i = 1; i <= 4; i++) {
       sheet.autoFitColumn(i);
     }
+  }
+
+  /// Genera el cierre semanal estilo Excel manual del admin.
+  ///
+  /// Una sola hoja con secciones:
+  ///   - Tabla unidades (N° / unidad / VALOR) con NO PAGO/PERMISO en
+  ///     colores.
+  ///   - Tabla pagos a operadoras (Mié/Dom/Extras/Total).
+  ///   - Tabla gastos varios.
+  ///   - Tabla sobrante semana (ingresos vs egresos).
+  ///   - Caja novedades.
+  Uint8List buildWeeklyClosingReport(WeeklyClosingReport r) {
+    final workbook = xlsio.Workbook();
+    try {
+      final sheet = workbook.worksheets[0];
+      sheet.name = 'Cierre semanal';
+
+      final df = DateFormat('dd MMM yyyy', 'es');
+
+      // Encabezado banda gris.
+      sheet.getRangeByIndex(1, 1, 1, 8).merge();
+      sheet.getRangeByIndex(1, 1).setText(
+          'SEMANA DEL ${df.format(r.weekStart).toUpperCase()} AL ${df.format(r.weekEnd).toUpperCase()}');
+      final headerStyle = workbook.styles.add('header_band');
+      headerStyle.bold = true;
+      headerStyle.hAlign = xlsio.HAlignType.center;
+      headerStyle.backColor = '#D9D9D9';
+      sheet.getRangeByIndex(1, 1).cellStyle = headerStyle;
+
+      // ─── Tabla de unidades (col A-C) ───
+      int row = 3;
+      sheet.getRangeByIndex(row, 1).setText('N°');
+      sheet.getRangeByIndex(row, 2).setText('Número de Unidad');
+      sheet.getRangeByIndex(row, 3).setText('VALOR');
+      _styleHeader(workbook, sheet.getRangeByIndex(row, 1, row, 3));
+      sheet.getRangeByIndex(row, 3).cellStyle.backColor = '#FFF59D';
+      row++;
+      for (var i = 0; i < r.units.length; i++) {
+        final u = r.units[i];
+        sheet.getRangeByIndex(row, 1).setNumber((i + 1).toDouble());
+        sheet
+            .getRangeByIndex(row, 2)
+            .setText('unidad ${u.unitNumber.padLeft(2, '0')}');
+        switch (u.status) {
+          case WeeklyUnitPaymentStatus.paid:
+            sheet.getRangeByIndex(row, 3).setNumber(u.amount);
+            sheet.getRangeByIndex(row, 3).cellStyle.backColor = '#FFF59D';
+            break;
+          case WeeklyUnitPaymentStatus.unpaid:
+            sheet.getRangeByIndex(row, 3).cellStyle.backColor = '#E57373';
+            break;
+          case WeeklyUnitPaymentStatus.permission:
+            sheet.getRangeByIndex(row, 3).setText('PERMISO');
+            sheet.getRangeByIndex(row, 3).cellStyle.backColor = '#64B5F6';
+            break;
+        }
+        row++;
+      }
+      sheet.getRangeByIndex(row, 2).setText('total');
+      sheet.getRangeByIndex(row, 3).setNumber(r.totalUnits);
+      sheet.getRangeByIndex(row, 3).cellStyle.backColor = '#BBDEFB';
+      sheet.getRangeByIndex(row, 2, row, 3).cellStyle.bold = true;
+
+      // ─── Tabla de operadoras (col E-I), arranca en row 3 ───
+      int opRow = 3;
+      sheet.getRangeByIndex(opRow, 5).setText('PAGOS DE OPERADORA');
+      sheet.getRangeByIndex(opRow, 6).setText('MIÉRCOLES');
+      sheet.getRangeByIndex(opRow, 7).setText('DOMINGOS');
+      sheet.getRangeByIndex(opRow, 8).setText('EXTRAS');
+      sheet.getRangeByIndex(opRow, 9).setText('Total');
+      _styleHeader(workbook, sheet.getRangeByIndex(opRow, 5, opRow, 9));
+      opRow++;
+      for (final op in r.operatorPayments) {
+        sheet.getRangeByIndex(opRow, 5).setText(op.operatorName);
+        sheet.getRangeByIndex(opRow, 6).setNumber(op.miercoles);
+        sheet.getRangeByIndex(opRow, 7).setNumber(op.domingos);
+        sheet.getRangeByIndex(opRow, 8).setNumber(op.extras);
+        sheet.getRangeByIndex(opRow, 9).setNumber(op.total);
+        sheet.getRangeByIndex(opRow, 9).cellStyle.backColor = '#C8E6C9';
+        opRow++;
+      }
+      sheet.getRangeByIndex(opRow, 5).setText('total');
+      sheet.getRangeByIndex(opRow, 6).setNumber(r.operatorPayments
+          .fold<double>(0.0, (a, b) => a + b.miercoles));
+      sheet.getRangeByIndex(opRow, 7).setNumber(r.operatorPayments
+          .fold<double>(0.0, (a, b) => a + b.domingos));
+      sheet.getRangeByIndex(opRow, 8).setNumber(r.operatorPayments
+          .fold<double>(0.0, (a, b) => a + b.extras));
+      sheet.getRangeByIndex(opRow, 9).setNumber(r.totalOperators);
+      sheet.getRangeByIndex(opRow, 9).cellStyle.backColor = '#BBDEFB';
+      sheet.getRangeByIndex(opRow, 5, opRow, 9).cellStyle.bold = true;
+
+      // ─── Tabla gastos varios ───
+      int miscRow = opRow + 3;
+      sheet.getRangeByIndex(miscRow, 5).setText('GASTOS VARIOS');
+      sheet.getRangeByIndex(miscRow, 6).setText('Valor');
+      _styleHeader(workbook, sheet.getRangeByIndex(miscRow, 5, miscRow, 6));
+      miscRow++;
+      for (final e in r.miscExpenses) {
+        sheet.getRangeByIndex(miscRow, 5).setText(e.description);
+        sheet.getRangeByIndex(miscRow, 6).setNumber(e.value);
+        miscRow++;
+      }
+      sheet.getRangeByIndex(miscRow, 5).setText('TOTAL');
+      sheet.getRangeByIndex(miscRow, 6).setNumber(r.totalMisc);
+      sheet.getRangeByIndex(miscRow, 6).cellStyle.backColor = '#BBDEFB';
+      sheet.getRangeByIndex(miscRow, 5, miscRow, 6).cellStyle.bold = true;
+
+      // ─── Tabla sobrante ───
+      int balRow = miscRow + 3;
+      sheet.getRangeByIndex(balRow, 5).setText('SOBRANTE SEMANA');
+      sheet.getRangeByIndex(balRow, 6).setText('INGRESOS');
+      sheet.getRangeByIndex(balRow, 7).setText('EGRESOS');
+      _styleHeader(workbook, sheet.getRangeByIndex(balRow, 5, balRow, 7));
+      balRow++;
+      sheet.getRangeByIndex(balRow, 5).setText('INGRESO DE UNIDADES');
+      sheet.getRangeByIndex(balRow, 6).setNumber(r.totalUnits);
+      balRow++;
+      sheet.getRangeByIndex(balRow, 5).setText('PAGO DE OPERADORAS');
+      sheet.getRangeByIndex(balRow, 7).setNumber(r.totalOperators);
+      balRow++;
+      sheet.getRangeByIndex(balRow, 5).setText('GASTOS VARIOS');
+      sheet.getRangeByIndex(balRow, 7).setNumber(r.totalMisc);
+      balRow++;
+      sheet.getRangeByIndex(balRow, 5).setText('TOTAL SOBRANTE SEMANA');
+      sheet.getRangeByIndex(balRow, 6).setNumber(r.balance);
+      sheet.getRangeByIndex(balRow, 6).cellStyle.backColor = '#BBDEFB';
+      sheet.getRangeByIndex(balRow, 5, balRow, 7).cellStyle.bold = true;
+
+      // ─── Novedades ───
+      if (r.novedades != null && r.novedades!.isNotEmpty) {
+        int novRow = balRow + 3;
+        sheet.getRangeByIndex(novRow, 5).setText('NOVEDADES');
+        sheet.getRangeByIndex(novRow, 5, novRow, 9).merge();
+        _styleHeader(
+            workbook, sheet.getRangeByIndex(novRow, 5, novRow, 9));
+        novRow++;
+        sheet.getRangeByIndex(novRow, 5).setText(r.novedades!);
+        sheet.getRangeByIndex(novRow, 5, novRow, 9).merge();
+      }
+
+      // Anchos sensatos.
+      sheet.getRangeByIndex(1, 1).columnWidth = 4;
+      sheet.getRangeByIndex(1, 2).columnWidth = 18;
+      sheet.getRangeByIndex(1, 3).columnWidth = 9;
+      sheet.getRangeByIndex(1, 4).columnWidth = 2;
+      for (var c = 5; c <= 9; c++) {
+        sheet.getRangeByIndex(1, c).columnWidth = 14;
+      }
+
+      final bytes = workbook.saveAsStream();
+      return Uint8List.fromList(bytes);
+    } finally {
+      workbook.dispose();
+    }
+  }
+
+  void _styleHeader(xlsio.Workbook workbook, xlsio.Range range) {
+    range.cellStyle.bold = true;
+    range.cellStyle.hAlign = xlsio.HAlignType.center;
+    range.cellStyle.backColor = '#D9D9D9';
+    range.cellStyle.borders.all.lineStyle = xlsio.LineStyle.thin;
   }
 
   /// Guarda los bytes en un archivo temporal y dispara el share nativo.
