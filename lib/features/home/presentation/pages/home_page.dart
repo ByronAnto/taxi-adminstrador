@@ -12,6 +12,7 @@ import '../../../../core/widgets/payment_pending_banner.dart';
 import '../../../map/presentation/pages/map_page.dart';
 import '../../../communication/presentation/pages/walkie_talkie_page.dart';
 import '../../../chat/presentation/pages/chat_list_page.dart';
+import '../../../payments/presentation/widgets/due_date_banner.dart';
 import '../widgets/dashboard_kpis.dart';
 import '../widgets/notifications_bell_button.dart';
 import '../widgets/radio_wave_button.dart';
@@ -231,6 +232,7 @@ class _HomePageState extends State<HomePage> {
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           _ProfileGreetingCard(user: user),
+          const DueDateBanner(),
           const SizedBox(height: 20),
           _SectionTitle(title: 'Mi día'),
           const SizedBox(height: 10),
