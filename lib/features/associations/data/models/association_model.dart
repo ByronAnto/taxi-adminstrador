@@ -267,6 +267,8 @@ class AssociationModel {
 
   final DateTime? trialEndsAt;
   final DateTime? paidUntil;
+  final DateTime? suspendedAt;
+  final String? suspendedReason; // 'expired_paid_until' | 'expired_trial' | 'manual'
   final int maxDrivers;        // límite del plan
   final int maxOperators;
   final int maxChannels;
@@ -290,6 +292,8 @@ class AssociationModel {
     required this.pricingTierId,
     this.trialEndsAt,
     this.paidUntil,
+    this.suspendedAt,
+    this.suspendedReason,
     required this.maxDrivers,
     required this.maxOperators,
     required this.maxChannels,
@@ -319,6 +323,8 @@ class AssociationModel {
       pricingTierId: data['pricingTierId'] ?? 'basic',
       trialEndsAt: (data['trialEndsAt'] as Timestamp?)?.toDate(),
       paidUntil: (data['paidUntil'] as Timestamp?)?.toDate(),
+      suspendedAt: (data['suspendedAt'] as Timestamp?)?.toDate(),
+      suspendedReason: data['suspendedReason'] as String?,
       maxDrivers: data['maxDrivers'] ?? 30,
       maxOperators: data['maxOperators'] ?? 1,
       maxChannels: data['maxChannels'] ?? 3,
@@ -348,6 +354,8 @@ class AssociationModel {
           trialEndsAt != null ? Timestamp.fromDate(trialEndsAt!) : null,
       'paidUntil':
           paidUntil != null ? Timestamp.fromDate(paidUntil!) : null,
+      if (suspendedAt != null) 'suspendedAt': Timestamp.fromDate(suspendedAt!),
+      if (suspendedReason != null) 'suspendedReason': suspendedReason,
       'maxDrivers': maxDrivers,
       'maxOperators': maxOperators,
       'maxChannels': maxChannels,
