@@ -5,30 +5,50 @@ const DAY_INDEX = {
   thursday: 4, friday: 5, saturday: 6,
 };
 
+const MAX_DUE_DAY = 28; // febrero es el mes más corto
+
+const VALID_UNITS = new Set(['day', 'week', 'month', 'year']);
+
 /**
- * Alinea una fecha al próximo dueDay según la unidad del período.
- * - week: dueDay es 'monday'|'tuesday'|... → próximo día de semana ≥ base
- * - month: dueDay es 1..28 → día N del mismo mes si base.day <= N, sino mes siguiente
- * - day: dueDay no aplica, retorna base + 1 día
- * - year: dueDay es 1..28, alinea al día N de enero (simplificado)
+ * Alinea una fecha al dueDay según la unidad del período.
+ *
+ * @param {Date} base          - Fecha de partida.
+ * @param {string|number} dueDay
+ * @param {string} unit        - 'day'|'week'|'month'|'year'
+ * @param {boolean} [inclusive=false]
+ *   - false (default): para 'week', si base ya cae en el día correcto, salta a la
+ *     próxima ocurrencia (útil para primera cuota: approvedAt = hoy, no vence hoy).
+ *   - true: si base ya cae en el día correcto, se acepta (útil para cuota recurrente
+ *     donde base+período puede aterrizar exactamente en el dueDay correcto).
+ * @throws {Error} si unit no pertenece a VALID_UNITS
  */
-function alignToDueDay(base, dueDay, unit) {
+function alignToDueDay(base, dueDay, unit, inclusive) {
+  if (!VALID_UNITS.has(unit)) {
+    throw new Error(`Invalid period unit: ${unit}`);
+  }
   const d = new Date(base);
   if (unit === 'week') {
     const targetDow = typeof dueDay === 'string' ? DAY_INDEX[dueDay.toLowerCase()] : Number(dueDay);
     if (Number.isNaN(targetDow)) return d;
     const diff = (targetDow - d.getUTCDay() + 7) % 7;
-    const offset = diff === 0 ? 7 : diff; // si es el mismo día, salta a la próxima semana
+    // inclusive=true: si diff===0 el día ya es correcto, no saltar semana.
+    // inclusive=false (default): si diff===0 saltar 7 días a la próxima ocurrencia.
+    const offset = (diff === 0 && !inclusive) ? 7 : diff;
+    if (offset === 0) {
+      d.setUTCHours(0, 0, 0, 0);
+      return d;
+    }
     d.setUTCDate(d.getUTCDate() + offset);
     d.setUTCHours(0, 0, 0, 0);
     return d;
   }
   if (unit === 'month') {
-    const targetDay = Math.min(Math.max(1, Number(dueDay) || 1), 28);
+    const targetDay = Math.min(Math.max(1, Number(dueDay) || 1), MAX_DUE_DAY);
     const currentDay = d.getUTCDate();
     if (currentDay < targetDay) {
       d.setUTCDate(targetDay);
     } else {
+      d.setUTCDate(1); // pin a día 1 para evitar overflow al cambiar de mes
       d.setUTCMonth(d.getUTCMonth() + 1);
       d.setUTCDate(targetDay);
     }
@@ -36,15 +56,16 @@ function alignToDueDay(base, dueDay, unit) {
     return d;
   }
   if (unit === 'year') {
-    const targetDay = Math.min(Math.max(1, Number(dueDay) || 1), 28);
-    d.setUTCMonth(0); // enero
-    d.setUTCDate(targetDay);
-    d.setUTCFullYear(d.getUTCFullYear() + 1);
-    d.setUTCHours(0, 0, 0, 0);
-    return d;
+    const targetDay = Math.min(Math.max(1, Number(dueDay) || 1), MAX_DUE_DAY);
+    // Construir candidato del año actual: enero día N
+    const candidate = new Date(Date.UTC(d.getUTCFullYear(), 0, targetDay));
+    if (candidate.getTime() > d.getTime()) {
+      return candidate;
+    }
+    // Si el candidato del año actual ya pasó, ir al próximo enero
+    return new Date(Date.UTC(d.getUTCFullYear() + 1, 0, targetDay));
   }
-  // day: simplemente sumar 1 día
-  d.setUTCDate(d.getUTCDate() + 1);
+  // day: retornar d sin modificar (el caller ya sumó el período)
   d.setUTCHours(0, 0, 0, 0);
   return d;
 }
@@ -55,27 +76,41 @@ function alignToDueDay(base, dueDay, unit) {
  * @param {{period: {every: number, unit: string}, dueDay: any}} cfg
  * @param {{validatedAt: Date|Timestamp}|null} lastPayment - último pago no voided
  * @returns {Date}
+ * @throws {Error} si cfg.period.unit no pertenece a VALID_UNITS
  */
 function computeNextDueDate(user, cfg, lastPayment) {
+  const unit = cfg.period.unit || 'month';
+  if (!VALID_UNITS.has(unit)) {
+    throw new Error(`Invalid period unit: ${unit}`);
+  }
+
   const baseRaw = lastPayment
     ? lastPayment.validatedAt
     : user.approvedAt;
   const base = baseRaw && baseRaw.toDate ? baseRaw.toDate() : new Date(baseRaw);
-  const unit = cfg.period.unit || 'month';
   const every = Math.max(1, Number(cfg.period.every) || 1);
 
-  // base + (every × unit) sin alinear
-  const advanced = new Date(base);
-  if (unit === 'day') advanced.setUTCDate(advanced.getUTCDate() + every);
-  else if (unit === 'week') advanced.setUTCDate(advanced.getUTCDate() + every * 7);
-  else if (unit === 'month') advanced.setUTCMonth(advanced.getUTCMonth() + every);
-  else if (unit === 'year') advanced.setUTCFullYear(advanced.getUTCFullYear() + every);
-
-  // Si NO hay pago previo (primera cuota), alineamos al dueDay siguiente
   if (!lastPayment) {
-    return alignToDueDay(base, cfg.dueDay, unit);
+    // Primera cuota: alinear desde approvedAt al próximo dueDay (exclusivo: no vence hoy).
+    return alignToDueDay(base, cfg.dueDay, unit, false);
   }
-  return advanced;
+
+  // Cuota recurrente: avanzar el período y alinear al dueDay correcto.
+  // Si el resultado de base+período aterriza exactamente en dueDay, es válido (inclusive=true).
+  let advanced = new Date(base);
+  if (unit === 'day') {
+    advanced.setUTCDate(advanced.getUTCDate() + every);
+  } else if (unit === 'week') {
+    advanced.setUTCDate(advanced.getUTCDate() + every * 7);
+  } else if (unit === 'month') {
+    advanced.setUTCDate(1); // pin a día 1 para evitar overflow (C2)
+    advanced.setUTCMonth(advanced.getUTCMonth() + every);
+  } else if (unit === 'year') {
+    advanced.setUTCDate(1);
+    advanced.setUTCMonth(0);
+    advanced.setUTCFullYear(advanced.getUTCFullYear() + every);
+  }
+  return alignToDueDay(advanced, cfg.dueDay, unit, true);
 }
 
 module.exports = { computeNextDueDate, alignToDueDay };
