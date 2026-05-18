@@ -1122,6 +1122,60 @@ exports.validatePayment = onCall({}, async (request) => {
   return { ok: true };
 });
 
+// ──────────────────────────────────────────────────────────────────
+//  voidPayment — admin anula un pago previamente validado.
+//  Bloquea al conductor inmediatamente + FCM con motivo.
+// ──────────────────────────────────────────────────────────────────
+
+exports.voidPayment = onCall({}, async (request) => {
+  const auth = requireAuth(request);
+  const { paymentId, reason } = request.data || {};
+
+  if (!paymentId || typeof paymentId !== "string") {
+    throw new HttpsError("invalid-argument", "paymentId requerido.");
+  }
+  if (!reason || typeof reason !== "string" || reason.length < 10) {
+    throw new HttpsError("invalid-argument", "Motivo obligatorio (mín 10 caracteres).");
+  }
+
+  const paymentRef = db.collection("payments").doc(paymentId);
+  const paymentSnap = await paymentRef.get();
+  if (!paymentSnap.exists) {
+    throw new HttpsError("not-found", "Pago no existe.");
+  }
+  const p = paymentSnap.data();
+
+  if (p.status !== "validated" || p.voidedAt) {
+    throw new HttpsError("failed-precondition", "Solo se anulan pagos validados (no anulados).");
+  }
+
+  await _assertCanValidate(auth, p.associationId);
+
+  const now = FieldValue.serverTimestamp();
+  await paymentRef.update({
+    voidedAt: now,
+    voidedBy: auth.uid,
+    voidReason: reason,
+    updatedAt: now,
+  });
+
+  // Bloquear conductor
+  if (p.driverId) {
+    await db.collection("users").doc(p.driverId).update({
+      status: "paymentBlocked",
+      blockedAt: now,
+      blockReason: "pago_anulado",
+      updatedAt: now,
+    });
+    await _sendFcmToUid(p.driverId, {
+      title: "Pago anulado",
+      body: `Un pago tuyo fue anulado. Motivo: ${reason}. Tu cuenta está bloqueada.`,
+    }).catch(() => {});
+  }
+
+  return { ok: true };
+});
+
 /**
  * Admin/operadora rechaza un pago. Cambia status a `rejected` con motivo.
  */
