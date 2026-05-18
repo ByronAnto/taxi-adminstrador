@@ -55,6 +55,10 @@ class UserModel {
   final String? approvedBy;
   final DateTime? approvedAt;
 
+  /// Trazabilidad de bloqueo automático / manual
+  final DateTime? blockedAt;
+  final String? blockReason; // 'cuota_vencida' | 'pago_anulado' | 'admin_manual'
+
   // Campos de conductor / vehículo
   final String placa;
   final String cooperativa;
@@ -80,6 +84,8 @@ class UserModel {
     required this.updatedAt,
     this.approvedBy,
     this.approvedAt,
+    this.blockedAt,
+    this.blockReason,
     this.placa = '',
     this.cooperativa = '',
     this.codigoCooperativa = '',
@@ -125,6 +131,8 @@ class UserModel {
       updatedAt: (data['updatedAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       approvedBy: data['approvedBy'],
       approvedAt: (data['approvedAt'] as Timestamp?)?.toDate(),
+      blockedAt: (data['blockedAt'] as Timestamp?)?.toDate(),
+      blockReason: data['blockReason'] as String?,
       placa: data['placa'] ?? '',
       cooperativa: data['cooperativa'] ?? '',
       codigoCooperativa: data['codigoCooperativa'] ?? '',
@@ -152,6 +160,8 @@ class UserModel {
       'approvedBy': approvedBy,
       'approvedAt':
           approvedAt != null ? Timestamp.fromDate(approvedAt!) : null,
+      if (blockedAt != null) 'blockedAt': Timestamp.fromDate(blockedAt!),
+      if (blockReason != null) 'blockReason': blockReason,
       'placa': placa,
       'cooperativa': cooperativa,
       'codigoCooperativa': codigoCooperativa,
@@ -175,6 +185,8 @@ class UserModel {
     bool? isActive,
     String? approvedBy,
     DateTime? approvedAt,
+    DateTime? blockedAt,
+    String? blockReason,
     String? placa,
     String? cooperativa,
     String? codigoCooperativa,
@@ -199,6 +211,8 @@ class UserModel {
       updatedAt: DateTime.now(),
       approvedBy: approvedBy ?? this.approvedBy,
       approvedAt: approvedAt ?? this.approvedAt,
+      blockedAt: blockedAt ?? this.blockedAt,
+      blockReason: blockReason ?? this.blockReason,
       placa: placa ?? this.placa,
       cooperativa: cooperativa ?? this.cooperativa,
       codigoCooperativa: codigoCooperativa ?? this.codigoCooperativa,
