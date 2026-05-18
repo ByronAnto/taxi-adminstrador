@@ -191,6 +191,7 @@ service cloud.firestore {
       allow update: if sameTenant(resource.data) && (
         (canSubmitPayment() && isOwner(resource.data.driverId))
         || isOperatorOrAdmin()
+        || (isAdmin() && _isVoidUpdate())
       );
 
       allow delete: if isAdmin() && sameTenant(resource.data);
@@ -300,6 +301,14 @@ service cloud.firestore {
             && !(request.auth.uid in request.resource.data.memberIds)
           )
         );
+    }
+
+    function _isVoidUpdate() {
+      return resource.data.status == 'validated'
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['voidedAt', 'voidedBy', 'voidReason'])
+        && request.resource.data.voidReason is string
+        && request.resource.data.voidReason.size() >= 10;
     }
 
     // ===== MENSAJES DE CANAL (top-level, walkie-talkie) =====
