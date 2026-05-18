@@ -318,25 +318,17 @@ class PaymentModel {
 class PaymentConcepts {
   PaymentConcepts._();
 
-  // Constantes de concepto para uso tipado en el código.
-  static const String cuotaMensual = 'cuota_mensual';
-  static const String cuotaSemanal = 'cuota_semanal';
-  static const String multa = 'multa';
-  static const String deuda = 'deuda';
-  static const String incentivo = 'incentivo';
-  static const String ayuda = 'ayuda';
-
   /// Membresía que el admin de una asociación paga al super-admin.
   static const String membresiaAsociacion = 'membresia_asociacion';
 
   static const Map<String, String> labels = {
-    cuotaMensual: 'Cuota mensual',
-    cuotaSemanal: 'Cuota semanal',
-    multa: 'Multa',
-    deuda: 'Deuda',
-    incentivo: 'Incentivo',
-    ayuda: 'Ayuda',
-    membresiaAsociacion: 'Membresía asociación',
+    'cuota_mensual': 'Cuota mensual',
+    'cuota_semanal': 'Cuota semanal',
+    'multa': 'Multa',
+    'deuda': 'Deuda',
+    'incentivo': 'Incentivo',
+    'ayuda': 'Ayuda',
+    'membresia_asociacion': 'Membresía asociación',
   };
   static String label(String concept) => labels[concept] ?? concept;
 }
