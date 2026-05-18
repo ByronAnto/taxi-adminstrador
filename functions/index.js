@@ -1100,6 +1100,25 @@ exports.validatePayment = onCall({}, async (request) => {
     rejectionReason: null,
   });
 
+  // Si el conductor estaba paymentBlocked por cuota_vencida, reactivar inmediato
+  const driverSnap = await db.collection("users").doc(payment.driverId).get();
+  if (driverSnap.exists) {
+    const d = driverSnap.data();
+    if (d.status === "paymentBlocked" && d.blockReason === "cuota_vencida") {
+      await driverSnap.ref.update({
+        status: "active",
+        blockedAt: FieldValue.delete(),
+        blockReason: FieldValue.delete(),
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+      console.log(`[validatePayment] auto-reactivated ${payment.driverId}`);
+      await _sendFcmToUid(payment.driverId, {
+        title: "Cuenta reactivada",
+        body: "Tu pago fue aprobado. Ya puedes operar normalmente.",
+      }).catch(() => {});
+    }
+  }
+
   return { ok: true };
 });
 
