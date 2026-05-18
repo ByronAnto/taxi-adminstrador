@@ -111,6 +111,16 @@
       "collectionGroup": "payments",
       "queryScope": "COLLECTION",
       "fields": [
+        { "fieldPath": "associationId", "order": "ASCENDING" },
+        { "fieldPath": "driverId", "order": "ASCENDING" },
+        { "fieldPath": "status", "order": "ASCENDING" },
+        { "fieldPath": "validatedAt", "order": "DESCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "payments",
+      "queryScope": "COLLECTION",
+      "fields": [
         { "fieldPath": "status", "order": "ASCENDING" },
         { "fieldPath": "driverId", "order": "ASCENDING" },
         { "fieldPath": "dueDate", "order": "DESCENDING" }
