@@ -1845,7 +1845,46 @@ exports.enforcePayments = onSchedule(
     }
 
     console.log(`[enforcePayments] B=${blockedCount}`);
-    return { suspended: suspendedCount, blocked: blockedCount };
+
+    // ─── Pase C: re-activar conductores con pago al día ───
+    const blockedSnap = await db.collection("users")
+      .where("status", "==", "paymentBlocked")
+      .where("blockReason", "==", "cuota_vencida")
+      .get();
+
+    let reactivatedCount = 0;
+    for (const uDoc of blockedSnap.docs) {
+      const u = uDoc.data();
+      const aDoc = await db.collection("associations").doc(u.associationId).get();
+      if (!aDoc.exists) continue;
+      const cfg = aDoc.data().billingConfig;
+      if (!cfg) continue;
+
+      const last = await _lastValidatedPayment(uDoc.id, u.associationId);
+      if (!last) continue;
+      const nextDue = computeNextDueDate(
+        { approvedAt: u.approvedAt.toDate() },
+        cfg, last,
+      );
+      if (nextDue.getTime() <= now.toMillis()) continue;
+
+      await uDoc.ref.update({
+        status: "active",
+        blockedAt: FieldValue.delete(),
+        blockReason: FieldValue.delete(),
+        updatedAt: now,
+      });
+      reactivatedCount++;
+      console.log(`[enforcePayments] reactivated user ${uDoc.id}`);
+
+      await _sendFcmToUid(uDoc.id, {
+        title: "Cuenta reactivada",
+        body: "Tu cuenta fue reactivada. Bienvenido de vuelta.",
+      }).catch(() => {});
+    }
+
+    console.log(`[enforcePayments] C=${reactivatedCount}`);
+    return { suspended: suspendedCount, blocked: blockedCount, reactivated: reactivatedCount };
   }
 );
 
