@@ -1,0 +1,99 @@
+import 'dart:async';
+
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:go_router/go_router.dart';
+
+/// Maneja la entrega de mensajes FCM en runtime.
+///
+/// Android (igual que iOS) NO muestra la notificación del sistema cuando
+/// la app está en foreground — entrega el RemoteMessage al onMessage y
+/// la app decide qué hacer. Acá usamos `flutter_local_notifications` para
+/// mostrar siempre el push, esté la app activa o no.
+class FcmMessageHandler {
+  FcmMessageHandler._();
+  static final FcmMessageHandler instance = FcmMessageHandler._();
+
+  final _flnp = FlutterLocalNotificationsPlugin();
+  StreamSubscription<RemoteMessage>? _onMessageSub;
+  StreamSubscription<RemoteMessage>? _onOpenedSub;
+  GoRouter? _router;
+  bool _initialized = false;
+
+  /// Llamar UNA VEZ en main(), antes de runApp.
+  Future<void> initialize() async {
+    if (_initialized) return;
+    _initialized = true;
+    try {
+      // Canal Android obligatorio para Android 8+ (TargetSdk 33+).
+      const channel = AndroidNotificationChannel(
+        'taxi_default',
+        'Avisos generales',
+        description:
+            'Notificaciones de la cooperativa (avisos, pagos, asignaciones)',
+        importance: Importance.high,
+      );
+      await _flnp
+          .resolvePlatformSpecificImplementation<
+              AndroidFlutterLocalNotificationsPlugin>()
+          ?.createNotificationChannel(channel);
+      await _flnp.initialize(
+        const InitializationSettings(
+          android: AndroidInitializationSettings('@mipmap/ic_launcher'),
+        ),
+        onDidReceiveNotificationResponse: (resp) {
+          _handleTap(resp.payload);
+        },
+      );
+    } catch (e) {
+      debugPrint('FcmMessageHandler.initialize error: $e');
+    }
+  }
+
+  /// Llamar tras login para arrancar los listeners. `router` se usa para
+  /// navegar a /notifications cuando el user toca un push.
+  void attachRouter(GoRouter router) {
+    _router = router;
+    _onMessageSub ??= FirebaseMessaging.onMessage.listen(_handleForeground);
+    _onOpenedSub ??=
+        FirebaseMessaging.onMessageOpenedApp.listen(_handleOpened);
+    // Si la app se abrió desde un push cuando estaba terminada (cold-start),
+    // el mensaje queda en getInitialMessage. Lo procesamos también.
+    FirebaseMessaging.instance.getInitialMessage().then((msg) {
+      if (msg != null) _handleOpened(msg);
+    });
+  }
+
+  void _handleForeground(RemoteMessage msg) {
+    final notif = msg.notification;
+    if (notif == null) return; // data-only, no mostrar
+    _flnp.show(
+      notif.hashCode,
+      notif.title ?? 'Aviso',
+      notif.body ?? '',
+      const NotificationDetails(
+        android: AndroidNotificationDetails(
+          'taxi_default',
+          'Avisos generales',
+          importance: Importance.high,
+          priority: Priority.high,
+        ),
+      ),
+      payload: msg.data['type'] ?? '',
+    );
+  }
+
+  void _handleOpened(RemoteMessage msg) {
+    _handleTap(msg.data['type'] as String?);
+  }
+
+  void _handleTap(String? type) {
+    final router = _router;
+    if (router == null) return;
+    // Por ahora todos los push administrativos van a /notifications.
+    // Si querés ramificar por type ('payment_validated' → /my-payments,
+    // 'queue_alert' → /home, etc.) este es el lugar.
+    router.push('/notifications');
+  }
+}

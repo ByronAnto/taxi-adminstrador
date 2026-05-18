@@ -47,8 +47,13 @@ class NotificationsPage extends StatelessWidget {
             .snapshots(),
         builder: (context, snap) {
           final docs = snap.data?.docs ?? [];
-          // Filtrar por audiencia para no-admins
+          final now = DateTime.now();
+          // Filtrar por audiencia y TTL (expiresAt > now, client-side)
           final visible = docs.where((d) {
+            // Excluir expiradas (si expiresAt existe y ya pasó)
+            final exp =
+                (d.data()['expiresAt'] as Timestamp?)?.toDate();
+            if (exp != null && !exp.isAfter(now)) return false;
             if (isAdmin) return true;
             final aud = (d.data()['audience'] as String?) ?? 'all';
             if (aud == 'all') return true;
@@ -191,6 +196,8 @@ class _CreateNotificationFormState extends State<_CreateNotificationForm> {
         'body': _body.text.trim(),
         'audience': _audience,
         'scheduledAt': Timestamp.fromDate(scheduleAt),
+        'expiresAt': Timestamp.fromDate(
+            scheduleAt.add(const Duration(hours: 72))),
         'status': 'scheduled',
         'createdBy': widget.adminUid,
         'createdAt': Timestamp.fromDate(now),

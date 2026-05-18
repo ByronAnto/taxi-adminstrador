@@ -43,9 +43,13 @@ class NotificationsBellButton extends StatelessWidget {
       final lastViewedAt =
           (u.data() ?? const {})['lastNotificationsViewedAt'] as Timestamp?;
       return notifs.snapshots().map((q) {
+        final now = DateTime.now();
         int unread = 0;
         for (final d in q.docs) {
           final data = d.data();
+          // Ignorar notificaciones expiradas (TTL 72h, client-side)
+          final exp = (data['expiresAt'] as Timestamp?)?.toDate();
+          if (exp != null && !exp.isAfter(now)) continue;
           final aud = (data['audience'] as String?) ?? 'all';
           if (!_matchesAudience(aud)) continue;
           final createdAt = data['createdAt'] as Timestamp?;

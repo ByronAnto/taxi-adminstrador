@@ -15,6 +15,7 @@ import 'core/services/agora_service.dart';
 import 'core/services/association_theme_service.dart';
 import 'core/services/current_user_context.dart';
 import 'core/services/driver_location_service.dart';
+import 'core/services/fcm_message_handler.dart';
 import 'core/services/fcm_token_service.dart';
 import 'core/services/local_audio_history_service.dart';
 import 'core/services/ptt_beep_service.dart';
@@ -53,6 +54,9 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  // Inicializar handler de mensajes FCM (canal Android + listeners foreground)
+  await FcmMessageHandler.instance.initialize();
 
   // Inicializar locale 'es' para DateFormat (fechas en español).
   // Sin esto, abrir páginas que usan DateFormat con locale 'es'
@@ -190,6 +194,7 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
         builder: (context) {
           final authBloc = context.read<AuthBloc>();
           final router = AppRouter.router(authBloc);
+          FcmMessageHandler.instance.attachRouter(router);
 
           return BlocListener<AuthBloc, AuthState>(
             listener: (context, state) {
