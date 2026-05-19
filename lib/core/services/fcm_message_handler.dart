@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui';
 
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:flutter/foundation.dart';
@@ -27,12 +28,18 @@ class FcmMessageHandler {
     _initialized = true;
     try {
       // Canal Android obligatorio para Android 8+ (TargetSdk 33+).
+      // Sonido + vibración + luz LED habilitados para que el conductor
+      // se entere aunque la app esté en foreground o en bolsillo.
       const channel = AndroidNotificationChannel(
         'taxi_default',
         'Avisos generales',
         description:
             'Notificaciones de la cooperativa (avisos, pagos, asignaciones)',
         importance: Importance.high,
+        playSound: true,
+        enableVibration: true,
+        enableLights: true,
+        ledColor: Color(0xFFFFA000), // ámbar
       );
       await _flnp
           .resolvePlatformSpecificImplementation<
@@ -78,6 +85,21 @@ class FcmMessageHandler {
           'Avisos generales',
           importance: Importance.high,
           priority: Priority.high,
+          // Sonido + vibración explícitos para foreground (algunos
+          // Android no respetan el default del canal cuando la app
+          // está activa — hay que pedirlo en cada show).
+          playSound: true,
+          enableVibration: true,
+          // Heads-up notification: aparece como banner flotante arriba
+          // de la app mientras el user está usando la app.
+          channelShowBadge: true,
+          fullScreenIntent: false,
+          category: AndroidNotificationCategory.message,
+        ),
+        iOS: DarwinNotificationDetails(
+          presentAlert: true,
+          presentBadge: true,
+          presentSound: true,
         ),
       ),
       payload: msg.data['type'] ?? '',

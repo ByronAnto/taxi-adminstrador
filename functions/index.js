@@ -2513,6 +2513,24 @@ async function _sendFcmToUid(uid, payload) {
   await getMessaging().send({
     token,
     notification: { title: payload.title, body: payload.body },
+    // android.priority=high + android.notification.sound=default fuerza
+    // que el push suene y vibre en el shade aún si el shade está
+    // silenciado a nivel "low priority". Combinado con el canal
+    // 'taxi_default' (creado client-side con playSound: true) el aviso
+    // suena tanto en background como cuando el FcmMessageHandler lo
+    // re-muestra en foreground.
+    android: {
+      priority: "high",
+      notification: {
+        sound: "default",
+        channelId: "taxi_default",
+        defaultSound: true,
+        defaultVibrateTimings: true,
+      },
+    },
+    apns: {
+      payload: { aps: { sound: "default" } },
+    },
   });
 }
 
@@ -3059,6 +3077,18 @@ async function _runDispatchScheduledNotifications() {
           tokens,
           notification: { title: n.title || "Aviso", body: n.body || "" },
           data: { type: "admin_notification", notifId: d.id },
+          android: {
+            priority: "high",
+            notification: {
+              sound: "default",
+              channelId: "taxi_default",
+              defaultSound: true,
+              defaultVibrateTimings: true,
+            },
+          },
+          apns: {
+            payload: { aps: { sound: "default" } },
+          },
         });
       }
       // TTL 72h: si el creador no seteó expiresAt, lo derivamos aquí
