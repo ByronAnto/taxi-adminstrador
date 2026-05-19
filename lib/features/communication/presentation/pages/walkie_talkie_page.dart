@@ -186,8 +186,17 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       }
       debugPrint('📱 WalkieTalkie: App en background → engine vivo, audio sigue');
     } else if (state == AppLifecycleState.resumed) {
-      // El engine no se destruyó, así que no hace falta reconectar.
-      debugPrint('📱 WalkieTalkie: App resumed (engine ya estaba vivo)');
+      // El engine no se destruyó, pero Android suele sacar el audio
+      // focus mientras estamos en background. Al volver hay que pedirle
+      // a Agora explícito que: (a) deje de mutear el remoto, (b) fuerce
+      // speaker (no earpiece), (c) re-aplique el volumen amplificado.
+      // Sin esto el conductor escucha mudo hasta togglear OFF/ON.
+      debugPrint('📱 WalkieTalkie: App resumed → resumeAudioReceive');
+      if (_radioPower.isOn) {
+        _agoraService.resumeAudioReceive().catchError((e) {
+          debugPrint('Error resumeAudioReceive: $e');
+        });
+      }
       if (mounted) setState(() {});
     }
   }

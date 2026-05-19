@@ -606,12 +606,19 @@ class AgoraService {
 
   /// Re-habilita la recepción de audio remoto (al volver de background).
   /// NO habilita el mic local — eso solo ocurre con PTT.
+  ///
+  /// Forza speakerphone + mute off + volumen guardado para resolver
+  /// el bug "al volver del background no se escucha". Android frecuentemente
+  /// le saca el audio focus a la app cuando pasa a background y al volver
+  /// no lo reclama solo — hay que pedirlo explícito.
   Future<void> resumeAudioReceive() async {
     if (_engine == null || !_isInChannel) return;
     try {
-      // Solo asegurar que recibimos audio remoto; mic permanece apagado
       await _engine!.muteAllRemoteAudioStreams(false);
-      _log('🔊 Audio remoto restaurado (app en foreground)');
+      await _engine!.setEnableSpeakerphone(true);
+      await _engine!.adjustPlaybackSignalVolume(_playbackVolume);
+      _log('🔊 Audio remoto restaurado (foreground) — '
+          'speaker=on, volumen=$_playbackVolume');
     } catch (e) {
       _log('Error resumeAudioReceive: $e');
     }
