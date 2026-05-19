@@ -87,6 +87,11 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// pierde los primeros ~2 s de audio.
   static const int _listenerCatchupMs = 1200;
 
+  /// Guard para que el denial chirp NO se re-dispare en cada rebuild
+  /// del bloc. `pttLockDenied` queda sticky=true hasta el siguiente
+  /// update del stream; sin este flag tocaríamos el beep varias veces.
+  bool _lastDeniedSeen = false;
+
 
   /// Estado de la grabación local del audio del canal (historial 24h).
   String? _recordingEntryId;
@@ -490,15 +495,29 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           );
         }
         if (state is CommunicationLoaded && state.pttLockDenied) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                '${state.pttSpeakerName ?? "Alguien"} está hablando. Espera tu turno.',
+          // Sólo disparar feedback en la transición false→true.
+          // pttLockDenied queda sticky hasta el próximo update del stream.
+          if (!_lastDeniedSeen) {
+            _lastDeniedSeen = true;
+            // Denial chirp Motorola — dos pips graves en 500 Hz.
+            // Vibración fuerte como feedback paralelo (importante en
+            // ambientes ruidosos donde no se oye el audio).
+            HapticFeedback.heavyImpact();
+            PttBeepService.instance.playDenied();
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text(
+                  '${state.pttSpeakerName ?? "Alguien"} está hablando. Espera tu turno.',
+                ),
+                backgroundColor: Colors.orange,
+                duration: const Duration(seconds: 2),
               ),
-              backgroundColor: Colors.orange,
-              duration: const Duration(seconds: 2),
-            ),
-          );
+            );
+          }
+        } else {
+          // Reset el guard cuando ya no estamos en denied — la próxima
+          // denegación volverá a tocar el beep.
+          _lastDeniedSeen = false;
         }
         // === Pre-warm token Agora ===
         // Apenas el usuario selecciona un canal (radio aún apagado),

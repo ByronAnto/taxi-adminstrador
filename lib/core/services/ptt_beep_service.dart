@@ -27,6 +27,7 @@ class PttBeepService {
   final AudioPlayer _player = AudioPlayer(playerId: 'ptt_beep');
   Uint8List? _startBytes;
   Uint8List? _endBytes;
+  Uint8List? _deniedBytes;
   bool _ready = false;
 
   // ── Path en disco de los WAV (para Agora playEffect) ──
@@ -34,11 +35,13 @@ class PttBeepService {
   // Se escriben al `initialize()` y se reusan en cada beep.
   String? _startPath;
   String? _endPath;
+  String? _deniedPath;
 
   /// Soundeffect IDs para Agora playEffect — uno por tipo de beep
   /// para que el SDK pueda cachear cada uno en memoria.
   static const int _soundIdStart = 9001;
   static const int _soundIdEnd = 9002;
+  static const int _soundIdDenied = 9003;
 
   /// Pre-genera los WAV en memoria. Llamar al iniciar la app o lazy.
   Future<void> initialize() async {
@@ -56,6 +59,14 @@ class PttBeepService {
         _Tone(freqHz: 0, ms: 20, amplitude: 0), // silencio breve
         _Tone(freqHz: 1000, ms: 110, amplitude: 0.95),
       ]);
+      // Denial chirp Motorola: dos pips bajos en 500 Hz, sonoramente
+      // distintos del talk-permit (1750 Hz alto) y del roger (mixto).
+      // Patrón clásico de radio para "canal ocupado, no podés hablar".
+      _deniedBytes = _buildWav([
+        _Tone(freqHz: 500, ms: 100, amplitude: 0.95),
+        _Tone(freqHz: 0, ms: 70, amplitude: 0),
+        _Tone(freqHz: 500, ms: 100, amplitude: 0.95),
+      ]);
 
       // Escribir WAV a disco — requerido por Agora playEffect (acepta
       // path absoluto, no Bytes). Se hace una sola vez en la vida de
@@ -63,10 +74,13 @@ class PttBeepService {
       final dir = await getApplicationSupportDirectory();
       final startFile = File('${dir.path}/ptt_start.wav');
       final endFile = File('${dir.path}/ptt_end.wav');
+      final deniedFile = File('${dir.path}/ptt_denied.wav');
       await startFile.writeAsBytes(_startBytes!, flush: true);
       await endFile.writeAsBytes(_endBytes!, flush: true);
+      await deniedFile.writeAsBytes(_deniedBytes!, flush: true);
       _startPath = startFile.path;
       _endPath = endFile.path;
+      _deniedPath = deniedFile.path;
 
       // Audio context para el AudioPlayer (fallback cuando Agora no está
       // disponible — radio OFF, antes del primer joinChannel, etc.).
@@ -81,6 +95,15 @@ class PttBeepService {
       _play(bytes: _startBytes, filePath: _startPath, soundId: _soundIdStart);
   Future<void> playEnd() =>
       _play(bytes: _endBytes, filePath: _endPath, soundId: _soundIdEnd);
+
+  /// Beep de "canal ocupado / lock denegado". Sonoramente distinto del
+  /// talk-permit y el roger: dos pips graves en 500 Hz que el oyente
+  /// asocia con "no podés transmitir" — mismo patrón Motorola.
+  Future<void> playDenied() => _play(
+        bytes: _deniedBytes,
+        filePath: _deniedPath,
+        soundId: _soundIdDenied,
+      );
 
   Future<void> _applyContext() async {
     await _player.setAudioContext(AudioContext(
