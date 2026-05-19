@@ -49,6 +49,11 @@ class BillingConfig {
   /// Si false, solo formulario sin foto.
   final bool allowProofPhoto;
 
+  /// Monto de multa por cada día calendario de atraso en el pago.
+  /// Si el conductor no paga el día de su `dueDay`, cada día siguiente
+  /// se acumula esta cantidad como multa. Default 0 = sin multa.
+  final double multaPorDiaAtraso;
+
   const BillingConfig({
     this.amount = 0.0,
     this.defaultConcept = 'cuota_mensual',
@@ -58,6 +63,7 @@ class BillingConfig {
     this.allowDebtCarryOver = false,
     this.proofRetentionDays = 90,
     this.allowProofPhoto = true,
+    this.multaPorDiaAtraso = 0,
   });
 
   factory BillingConfig.fromMap(Map<String, dynamic>? data) {
@@ -73,6 +79,7 @@ class BillingConfig {
       proofRetentionDays:
           (data['proofRetentionDays'] as num?)?.toInt() ?? 90,
       allowProofPhoto: data['allowProofPhoto'] as bool? ?? true,
+      multaPorDiaAtraso: (data['multaPorDiaAtraso'] ?? 0).toDouble(),
     );
   }
 
@@ -87,6 +94,7 @@ class BillingConfig {
         'allowDebtCarryOver': allowDebtCarryOver,
         'proofRetentionDays': proofRetentionDays,
         'allowProofPhoto': allowProofPhoto,
+        'multaPorDiaAtraso': multaPorDiaAtraso,
       };
 
   BillingConfig copyWith({
@@ -98,6 +106,7 @@ class BillingConfig {
     bool? allowDebtCarryOver,
     int? proofRetentionDays,
     bool? allowProofPhoto,
+    double? multaPorDiaAtraso,
   }) {
     return BillingConfig(
       amount: amount ?? this.amount,
@@ -108,6 +117,7 @@ class BillingConfig {
       allowDebtCarryOver: allowDebtCarryOver ?? this.allowDebtCarryOver,
       proofRetentionDays: proofRetentionDays ?? this.proofRetentionDays,
       allowProofPhoto: allowProofPhoto ?? this.allowProofPhoto,
+      multaPorDiaAtraso: multaPorDiaAtraso ?? this.multaPorDiaAtraso,
     );
   }
 

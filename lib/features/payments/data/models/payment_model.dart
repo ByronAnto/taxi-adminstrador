@@ -140,6 +140,14 @@ class PaymentModel {
 
   final double amount;
 
+  /// Desglose opcional: cuánto del `amount` corresponde a la cuota base.
+  /// Si es null, todo el amount se considera cuota (no hay multa).
+  final double? cuotaIncluida;
+
+  /// Desglose opcional: cuánto del `amount` corresponde a multa por atraso.
+  /// Si es null o 0, no hay multa.
+  final double? multaIncluida;
+
   /// cuota_mensual | cuota_semanal | multa | deuda | incentivo | ayuda
   final String concept;
 
@@ -197,6 +205,8 @@ class PaymentModel {
     this.driverName,
     this.driverVehicleNumber,
     required this.amount,
+    this.cuotaIncluida,
+    this.multaIncluida,
     required this.concept,
     this.status = PaymentStatus.pending,
     required this.paymentDate,
@@ -244,6 +254,8 @@ class PaymentModel {
       driverName: data['driverName'] as String?,
       driverVehicleNumber: data['driverVehicleNumber'] as String?,
       amount: (data['amount'] as num?)?.toDouble() ?? 0.0,
+      cuotaIncluida: (data['cuotaIncluida'] as num?)?.toDouble(),
+      multaIncluida: (data['multaIncluida'] as num?)?.toDouble(),
       concept: data['concept'] as String? ?? 'cuota_mensual',
       status: _statusFromString(data['status']),
       paymentDate:
@@ -276,6 +288,8 @@ class PaymentModel {
       'driverName': driverName,
       'driverVehicleNumber': driverVehicleNumber,
       'amount': amount,
+      if (cuotaIncluida != null) 'cuotaIncluida': cuotaIncluida,
+      if (multaIncluida != null) 'multaIncluida': multaIncluida,
       'concept': concept,
       'status': status.name,
       'paymentDate': Timestamp.fromDate(paymentDate),
@@ -297,6 +311,40 @@ class PaymentModel {
       if (voidReason != null) 'voidReason': voidReason,
       'targetSuperAdmin': targetSuperAdmin,
     };
+  }
+
+  PaymentModel copyWith({
+    double? cuotaIncluida,
+    double? multaIncluida,
+  }) {
+    return PaymentModel(
+      uid: uid,
+      associationId: associationId,
+      driverId: driverId,
+      driverName: driverName,
+      driverVehicleNumber: driverVehicleNumber,
+      amount: amount,
+      cuotaIncluida: cuotaIncluida ?? this.cuotaIncluida,
+      multaIncluida: multaIncluida ?? this.multaIncluida,
+      concept: concept,
+      status: status,
+      paymentDate: paymentDate,
+      dueDate: dueDate,
+      notes: notes,
+      proof: proof,
+      reportedAt: reportedAt,
+      validatedBy: validatedBy,
+      validatedAt: validatedAt,
+      rejectionReason: rejectionReason,
+      isOneOff: isOneOff,
+      emittedBy: emittedBy,
+      emittedByName: emittedByName,
+      emittedAt: emittedAt,
+      voidedAt: voidedAt,
+      voidedBy: voidedBy,
+      voidReason: voidReason,
+      targetSuperAdmin: targetSuperAdmin,
+    );
   }
 
   static PaymentStatus _statusFromString(dynamic value) {

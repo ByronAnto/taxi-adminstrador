@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'dart:math';
 
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
@@ -11,7 +12,9 @@ import 'package:intl/intl.dart';
 
 import '../../../../core/theme/app_theme.dart';
 import '../../../associations/data/models/association_model.dart';
+import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
+import '../../data/due_date_calculator.dart';
 import '../../data/models/payment_model.dart';
 
 /// Pantalla "Mis pagos" del conductor.
@@ -168,12 +171,40 @@ class MyPaymentsPage extends StatelessWidget {
     if (!aidSnap.exists || !context.mounted) return;
     final cfg = AssociationModel.fromFirestore(aidSnap).billingConfig;
 
+    // Leer el último pago validado del conductor para calcular nextDueDate
+    final authState = context.read<AuthBloc>().state;
+    if (authState is! AuthAuthenticated || !context.mounted) return;
+    final currentUser = authState.user;
+
+    PaymentModel? lastValidated;
+    if (chargeToPay == null) {
+      final paymentsSnap = await FirebaseFirestore.instance
+          .collection('payments')
+          .where('driverId', isEqualTo: currentUser.uid)
+          .where('status', isEqualTo: 'validated')
+          .get();
+      if (paymentsSnap.docs.isNotEmpty) {
+        final validated = paymentsSnap.docs
+            .map(PaymentModel.fromFirestore)
+            .where((p) => !p.isVoided)
+            .toList();
+        if (validated.isNotEmpty) {
+          validated.sort(
+              (a, b) => (b.validatedAt ?? b.reportedAt)
+                  .compareTo(a.validatedAt ?? a.reportedAt));
+          lastValidated = validated.first;
+        }
+      }
+    }
+
     if (!context.mounted) return;
     await showDialog<void>(
       context: context,
       builder: (_) => _ReportPaymentDialog(
         billingConfig: cfg,
         prefillCharge: chargeToPay,
+        currentUser: currentUser,
+        lastValidatedPayment: lastValidated,
       ),
     );
   }
@@ -384,9 +415,13 @@ class _UnpaidChargeTile extends StatelessWidget {
 class _ReportPaymentDialog extends StatefulWidget {
   final BillingConfig billingConfig;
   final PaymentModel? prefillCharge;
+  final UserModel? currentUser;
+  final PaymentModel? lastValidatedPayment;
   const _ReportPaymentDialog({
     required this.billingConfig,
     this.prefillCharge,
+    this.currentUser,
+    this.lastValidatedPayment,
   });
 
   @override
@@ -396,6 +431,7 @@ class _ReportPaymentDialog extends StatefulWidget {
 class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
   final _formKey = GlobalKey<FormState>();
   final _amount = TextEditingController();
+  final _multaCtrl = TextEditingController();
   final _ref = TextEditingController();
   final _deliveredTo = TextEditingController();
   final _bankOther = TextEditingController();
@@ -410,6 +446,9 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
   bool _saving = false;
   bool _uploadingPhoto = false;
 
+  double _cuotaParte = 0;
+  double _multaParte = 0;
+
   @override
   void initState() {
     super.initState();
@@ -422,12 +461,48 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
       _amount.text = widget.billingConfig.amount > 0
           ? widget.billingConfig.amount.toStringAsFixed(2)
           : '';
+      _computeMultaSugerida();
     }
+  }
+
+  void _computeMultaSugerida() {
+    final cfg = widget.billingConfig;
+    if (cfg.multaPorDiaAtraso <= 0) return;
+    final user = widget.currentUser;
+    if (user == null) return;
+
+    final nextDue = DueDateCalculator.computeNextDueDate(
+      user: user,
+      cfg: cfg,
+      lastPayment: widget.lastValidatedPayment,
+    );
+    if (nextDue == null) return;
+
+    final today = DateTime.now();
+    final daysOverdue =
+        max(0, today.difference(nextDue).inDays);
+    if (daysOverdue <= 0) return;
+
+    _cuotaParte = cfg.amount;
+    _multaParte = daysOverdue * cfg.multaPorDiaAtraso;
+    final total = _cuotaParte + _multaParte;
+    _amount.text = total.toStringAsFixed(2);
+    _multaCtrl.text = _multaParte.toStringAsFixed(2);
+  }
+
+  void _onMultaChanged(String value) {
+    final parsed = double.tryParse(value) ?? 0;
+    setState(() {
+      _multaParte = parsed < 0 ? 0 : parsed;
+    });
+    final total = _cuotaParte + _multaParte;
+    _amount.text = total.toStringAsFixed(2);
   }
 
   @override
   void dispose() {
     _amount.dispose();
+    _multaCtrl.dispose();
     _ref.dispose();
     _deliveredTo.dispose();
     _bankOther.dispose();
@@ -456,6 +531,64 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
                       decimal: true),
                   validator: _validatePositive,
                 ),
+                // Multa por atraso — solo cuando hay atraso y no es prefillCharge
+                if (widget.prefillCharge == null && _multaParte > 0) ...[
+                  const SizedBox(height: 10),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      border: Border.all(color: Colors.orange, width: 1.5),
+                      borderRadius: BorderRadius.circular(8),
+                      color: Colors.orange.shade50,
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.warning_amber_rounded,
+                                size: 16, color: Colors.orange),
+                            SizedBox(width: 6),
+                            Text(
+                              'Atraso detectado',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                                color: Colors.orange,
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          'Cuota base: \$${_cuotaParte.toStringAsFixed(2)}',
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                        Text(
+                          'Multa: \$${_multaParte.toStringAsFixed(2)}',
+                          style: const TextStyle(fontSize: 13),
+                        ),
+                        Text(
+                          'Total a pagar: \$${(_cuotaParte + _multaParte).toStringAsFixed(2)} (editable arriba)',
+                          style: const TextStyle(
+                              fontSize: 13, fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 8),
+                        TextFormField(
+                          controller: _multaCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Ajustar multa (USD)',
+                            prefixText: '\$ ',
+                            isDense: true,
+                          ),
+                          keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true),
+                          onChanged: _onMultaChanged,
+                        ),
+                      ],
+                    ),
+                  ),
+                ],
                 DropdownButtonFormField<String>(
                   initialValue: _concept,
                   decoration: const InputDecoration(labelText: 'Concepto'),
@@ -734,6 +867,8 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
         'concept': _concept,
         'paymentDate': _paymentDate.toIso8601String(),
         'proof': proof,
+        if (_cuotaParte > 0) 'cuotaIncluida': _cuotaParte,
+        if (_multaParte > 0) 'multaIncluida': _multaParte,
         if (widget.prefillCharge != null)
           'chargeId': widget.prefillCharge!.uid,
       });

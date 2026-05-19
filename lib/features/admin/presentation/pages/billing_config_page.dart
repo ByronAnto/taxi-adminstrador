@@ -26,6 +26,7 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
   final _firestore = FirebaseFirestore.instance;
 
   final _amount = TextEditingController();
+  final _multaPorDia = TextEditingController(text: '0');
   final _periodEvery = TextEditingController(text: '1');
   final _dueDay = TextEditingController(text: '1');
   final _retention = TextEditingController(text: '90');
@@ -47,6 +48,7 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
   @override
   void dispose() {
     _amount.dispose();
+    _multaPorDia.dispose();
     _periodEvery.dispose();
     _dueDay.dispose();
     _retention.dispose();
@@ -69,6 +71,7 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
     if (snap.exists) {
       final cfg = AssociationModel.fromFirestore(snap).billingConfig;
       _amount.text = cfg.amount.toStringAsFixed(2);
+      _multaPorDia.text = cfg.multaPorDiaAtraso.toStringAsFixed(2);
       _concept = cfg.defaultConcept;
       _periodEvery.text = cfg.periodEvery.toString();
       _unit = cfg.periodUnit;
@@ -133,6 +136,22 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
               keyboardType:
                   const TextInputType.numberWithOptions(decimal: true),
               validator: _validatePositive,
+            ),
+            const SizedBox(height: 8),
+            TextFormField(
+              controller: _multaPorDia,
+              decoration: const InputDecoration(
+                labelText: 'Multa por día de atraso (\$)',
+                prefixText: '\$ ',
+                helperText:
+                    'Si el conductor no paga el día de su vencimiento, '
+                    'cada día siguiente acumula esta cantidad como multa. '
+                    'Dejar en 0 si tu cooperativa no cobra multa.',
+                helperMaxLines: 3,
+              ),
+              keyboardType:
+                  const TextInputType.numberWithOptions(decimal: true),
+              validator: _validateNonNegative,
             ),
             DropdownButtonFormField<String>(
               initialValue: _concept,
@@ -291,6 +310,14 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
     return null;
   }
 
+  String? _validateNonNegative(String? v) {
+    if (v == null || v.trim().isEmpty) return 'Requerido';
+    final n = double.tryParse(v);
+    if (n == null) return 'Número inválido';
+    if (n < 0) return 'Debe ser ≥ 0';
+    return null;
+  }
+
   String? _validatePositiveInt(String? v) {
     if (v == null || v.trim().isEmpty) return 'Requerido';
     final n = int.tryParse(v);
@@ -308,6 +335,7 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
         'associationId': _aid,
         'billingConfig': {
           'amount': double.parse(_amount.text.trim()),
+          'multaPorDiaAtraso': double.parse(_multaPorDia.text.trim()),
           'defaultConcept': _concept,
           'period': {
             'every': int.parse(_periodEvery.text.trim()),
