@@ -45,6 +45,12 @@ class TripSource {
 
   /// Solicitud creada desde el portal web del cliente.
   static const webCliente = 'webCliente';
+
+  /// La operadora asignó la carrera desde la cola de la parada (despacho).
+  /// El conductor estaba en queue y le tocó por turno + cliente vino a
+  /// la parada. Diferente de `street` (cliente abordó en la vía) y de
+  /// `apkOperadora` (operadora con dirección de recogida específica).
+  static const standQueue = 'standQueue';
 }
 
 /// Modelo de viaje para Firestore. Multi-tenant por [associationId].

@@ -753,7 +753,7 @@ class _StandQueueBarState extends State<StandQueueBar> {
       pickupLongitude: 0,
       pickupAddress: 'Parada (cola)',
       status: TripStatus.finalizado,
-      source: TripSource.street,
+      source: TripSource.standQueue,
       startTime: now,
       endTime: now,
       createdAt: now,
