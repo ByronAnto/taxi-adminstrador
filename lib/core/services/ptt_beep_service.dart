@@ -42,23 +42,23 @@ class PttBeepService {
         _Tone(freqHz: 1000, ms: 110, amplitude: 0.95),
       ]);
 
-      // Asegurar enrutamiento por altavoz (no earpiece). Sin esto, en
-      // medio de PTT el SO podría mandar el beep por el auricular de
-      // llamada y el conductor no lo escucharía mientras habla.
-      await _player.setAudioContext(AudioContext(
-        android: const AudioContextAndroid(
-          isSpeakerphoneOn: true,
-          stayAwake: false,
-          contentType: AndroidContentType.sonification,
-          usageType: AndroidUsageType.assistanceSonification,
-          audioFocus: AndroidAudioFocus.gainTransientMayDuck,
-        ),
-        iOS: AudioContextIOS(
-          category: AVAudioSessionCategory.playback,
-          options: const {AVAudioSessionOptions.mixWithOthers},
-        ),
-      ));
-      await _player.setReleaseMode(ReleaseMode.stop);
+      // **Audio focus FUERTE** para piercear el audio de Agora.
+      //
+      // Antes usábamos assistanceSonification + gainTransientMayDuck. Ese
+      // combo "amistoso" funcionaba cuando el engine se destruía al
+      // cambiar de tab (Agora soltaba la sesión y el beep ganaba). Tras
+      // commit cf54f64 (engine vivo permanentemente) Agora mantiene
+      // MODE_IN_COMMUNICATION y el beep quedaba mudo / iba al earpiece.
+      //
+      // Combo nuevo:
+      // - usageType: notificationEvent → categoría notificación, no llamada
+      // - contentType: sonification → tono corto, no música
+      // - audioFocus: gainTransient → toma foco exclusivo por ~100 ms
+      // - isSpeakerphoneOn: true → fuerza speaker, no earpiece
+      //
+      // Los Motorola reales también pisan el audio remoto durante el
+      // talk-permit; el efecto deseado es el mismo (~90 ms de "click").
+      await _applyContext();
       _ready = true;
     } catch (e) {
       debugPrint('PttBeepService.initialize error: $e');
@@ -68,6 +68,25 @@ class PttBeepService {
   Future<void> playStart() => _play(_startBytes);
   Future<void> playEnd() => _play(_endBytes);
 
+  Future<void> _applyContext() async {
+    await _player.setAudioContext(AudioContext(
+      android: const AudioContextAndroid(
+        isSpeakerphoneOn: true,
+        stayAwake: false,
+        contentType: AndroidContentType.sonification,
+        usageType: AndroidUsageType.notificationEvent,
+        audioFocus: AndroidAudioFocus.gainTransient,
+      ),
+      iOS: AudioContextIOS(
+        category: AVAudioSessionCategory.playback,
+        // duckOthers: el beep baja momentáneamente el audio de Agora
+        // en vez de mezclarse silenciado.
+        options: const {AVAudioSessionOptions.duckOthers},
+      ),
+    ));
+    await _player.setReleaseMode(ReleaseMode.stop);
+  }
+
   Future<void> _play(Uint8List? bytes) async {
     if (bytes == null) {
       await initialize();
@@ -75,6 +94,11 @@ class PttBeepService {
       if (bytes == null) return;
     }
     try {
+      // Re-aplicar contexto antes de cada play: en algunos devices
+      // Android resetea el AudioFocus de un AudioPlayer cuando otro
+      // (Agora) toma MODE_IN_COMMUNICATION. Sin esto, el primer beep
+      // podía sonar pero los siguientes no.
+      await _applyContext();
       await _player.stop();
       await _player.play(BytesSource(bytes), mode: PlayerMode.lowLatency);
     } catch (e) {
