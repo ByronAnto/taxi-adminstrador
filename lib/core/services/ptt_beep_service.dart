@@ -4,14 +4,18 @@ import 'dart:typed_data';
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
 
-/// Sonidos tipo radio Motorola / Zello al iniciar y terminar PTT.
+/// Sonidos tipo radio Motorola al iniciar y terminar PTT.
 ///
-/// Genera dos beeps cortos sintéticos (sin assets externos):
-/// - **start**: doble tono ascendente (440 Hz → 880 Hz, 80 ms cada uno).
-/// - **end**: doble tono descendente (880 Hz → 440 Hz, 80 ms cada uno).
+/// Genera 2 beeps WAV en memoria con perfil "talk permit" / "roger beep"
+/// clásicos de radios análogas:
+/// - **start (talk permit)**: pip único 1750 Hz · 90 ms — el típico
+///   "boop" que indica que ya podés hablar.
+/// - **end (roger beep)**: 2-tono "kerchunk" 1750 Hz · 80 ms → 1000 Hz · 100 ms
+///   con leve overlap — el cierre característico de Motorola al soltar PTT.
 ///
-/// La generación es WAV mono 16 kHz int16. Se cachea en memoria para que
-/// el play sea instantáneo (0 ms de latencia, importante en PTT).
+/// Amplitude 0.95 (casi clipping) para que se oiga aún con Agora
+/// acaparando la sesión de audio. Audio context `assistanceSonification`
+/// para que se enrute al altavoz, no al earpiece de la llamada.
 class PttBeepService {
   PttBeepService._();
   static final PttBeepService instance = PttBeepService._();
@@ -25,15 +29,35 @@ class PttBeepService {
   Future<void> initialize() async {
     if (_ready) return;
     try {
+      // Talk-permit Motorola: pip único agudo de 90 ms a 1750 Hz.
       _startBytes = _buildWav([
-        _Tone(freqHz: 1200, ms: 70),
-        _Tone(freqHz: 1800, ms: 90),
+        _Tone(freqHz: 1750, ms: 90, amplitude: 0.95),
       ]);
+      // Roger beep Motorola: 2-tono clásico al soltar el PTT.
+      // 1750 Hz alto (80 ms) → 1000 Hz medio-grave (110 ms), con un
+      // pequeño silencio entre tonos para marcar el "kerchunk".
       _endBytes = _buildWav([
-        _Tone(freqHz: 1800, ms: 70),
-        _Tone(freqHz: 900, ms: 90),
+        _Tone(freqHz: 1750, ms: 80, amplitude: 0.95),
+        _Tone(freqHz: 0, ms: 20, amplitude: 0), // silencio breve
+        _Tone(freqHz: 1000, ms: 110, amplitude: 0.95),
       ]);
-      // Modo low latency, no interrumpir música si la hay
+
+      // Asegurar enrutamiento por altavoz (no earpiece). Sin esto, en
+      // medio de PTT el SO podría mandar el beep por el auricular de
+      // llamada y el conductor no lo escucharía mientras habla.
+      await _player.setAudioContext(AudioContext(
+        android: const AudioContextAndroid(
+          isSpeakerphoneOn: true,
+          stayAwake: false,
+          contentType: AndroidContentType.sonification,
+          usageType: AndroidUsageType.assistanceSonification,
+          audioFocus: AndroidAudioFocus.gainTransientMayDuck,
+        ),
+        iOS: AudioContextIOS(
+          category: AVAudioSessionCategory.playback,
+          options: const {AVAudioSessionOptions.mixWithOthers},
+        ),
+      ));
       await _player.setReleaseMode(ReleaseMode.stop);
       _ready = true;
     } catch (e) {
@@ -83,8 +107,10 @@ class PttBeepService {
         if (i > samples - fadeSamples) {
           env = (samples - i) / fadeSamples;
         }
-        // Onda senoidal con amplitud 0.6 para no saturar.
-        final v = sin(twoPiF * ts) * 0.6 * env;
+        // Si el tono es silencio (freq=0 o amplitude=0), escribimos 0.
+        final double v = t.amplitude == 0 || t.freqHz == 0
+            ? 0
+            : sin(twoPiF * ts) * t.amplitude * env;
         pcm[offset + i] = (v * 32767).round().clamp(-32768, 32767);
       }
       offset += samples;
@@ -126,5 +152,10 @@ class PttBeepService {
 class _Tone {
   final int freqHz;
   final int ms;
-  const _Tone({required this.freqHz, required this.ms});
+  final double amplitude;
+  const _Tone({
+    required this.freqHz,
+    required this.ms,
+    this.amplitude = 0.6,
+  });
 }
