@@ -162,14 +162,22 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         state == AppLifecycleState.inactive) {
       // Si estaba grabando PTT, forzar stop. La app pasa a background
       // — el engine se mantiene VIVO para que el conductor siga
-      // ESCUCHANDO la radio. Solo liberamos el mic (vía muteMic, ya
-      // ejecutado al soltar el botón).
+      // ESCUCHANDO la radio. CRÍTICO: tenemos que liberar el mic AHORA
+      // si quedó tomado (caso edge: el conductor mete la app al
+      // background con el dedo todavía sobre el botón PTT → el
+      // GestureDetector no recibe el release y el mic queda activo en
+      // background bloqueando a Zello/WhatsApp/etc).
       if (_isRecording) {
         _recordingTimer?.cancel();
         _durationTimer?.cancel();
         _isRecording = false;
         _recordingSeconds = 0;
         _recordingStartTime = null;
+        // Mute Agora inmediato (no esperar al bloc). Esto llama
+        // enableLocalAudio(false) que libera el mic hardware a nivel del SO.
+        _agoraService.muteMic().catchError((e) {
+          debugPrint('Error muteMic al pasar a background: $e');
+        });
         final commState = context.read<CommunicationBloc>().state;
         if (commState is CommunicationLoaded &&
             commState.activeChannelId != null) {
@@ -184,7 +192,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           }
         }
       }
-      debugPrint('📱 WalkieTalkie: App en background → engine vivo, audio sigue');
+      debugPrint('📱 WalkieTalkie: App en background → engine vivo, MIC LIBRE');
     } else if (state == AppLifecycleState.resumed) {
       // El engine no se destruyó, pero Android suele sacar el audio
       // focus mientras estamos en background. Al volver hay que pedirle
