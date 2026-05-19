@@ -79,6 +79,14 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// pausa breve en una conversación viva.
   static const int _idleParkAfterSeconds = 30;
 
+  /// Pausa adicional tras `resumeFromPark()` antes de soltar el beep +
+  /// unmuteMic. Los listeners también están parked: ven el lock de
+  /// Firestore en su snapshot stream y arrancan su propio
+  /// `resumeFromPark()` en paralelo. Necesitan ~800-1500 ms para estar
+  /// listos. Sin este grace el hablante transmite a un canal vacío y
+  /// pierde los primeros ~2 s de audio.
+  static const int _listenerCatchupMs = 1200;
+
 
   /// Estado de la grabación local del audio del canal (historial 24h).
   String? _recordingEntryId;
@@ -1612,21 +1620,45 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       return;
     }
 
+    final wasParked = _agoraService.isParked;
+
     // ── Auto-resume desde park ──
-    // Si el canal está parked por inactividad, hay que volver a Agora
-    // antes de poder transmitir. ~300 ms en buena red. Mostramos
-    // feedback al usuario para que entienda el delay.
-    if (_agoraService.isParked) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Conectando...'),
-            duration: Duration(milliseconds: 1500),
-          ),
-        );
-      }
+    // Si el canal está parked por inactividad, hay que volver a Agora.
+    // Estrategia: disparamos el lock Firestore PRIMERO (no esperamos a
+    // estar reconectados nosotros) — los listeners ven el lock en su
+    // snapshot stream y arrancan su `resumeFromPark()` EN PARALELO con
+    // el nuestro. Después agregamos un grace de ~1.2 s para garantizar
+    // que cuando soltemos el unmuteMic los oyentes ya estén en canal.
+    if (wasParked) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Conectando...'),
+          duration: Duration(milliseconds: 2000),
+        ),
+      );
+
+      // 1️⃣ Disparar lock Firestore en paralelo — es la señal para que
+      //    los listeners arranquen su propio resumeFromPark().
+      context.read<CommunicationBloc>().add(
+            PttLockRequested(
+              channelId: state.activeChannelId!,
+              userId: user.uid,
+              userName: '${user.name} ${user.lastname}',
+            ),
+          );
+
+      // 2️⃣ Reconectar nosotros mismos.
       final ok = await _agoraService.resumeFromPark();
       if (!ok && mounted) {
+        // Liberar el lock que ya escribimos: si fallamos la reconexión,
+        // que otro pueda hablar.
+        context.read<CommunicationBloc>().add(
+              PttUnlockRequested(
+                channelId: state.activeChannelId!,
+                userId: user.uid,
+              ),
+            );
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('No se pudo reconectar al canal. Intentá de nuevo.'),
@@ -1635,6 +1667,11 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         );
         return;
       }
+
+      // 3️⃣ Grace: esperar a que los listeners terminen su reconexión.
+      await Future.delayed(
+          const Duration(milliseconds: _listenerCatchupMs));
+      if (!mounted) return;
     }
 
     setState(() {
@@ -1693,15 +1730,19 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     HapticFeedback.mediumImpact();
     PttBeepService.instance.playStart();
 
-    // Intentar adquirir el lock PTT en Firestore
+    // Intentar adquirir el lock PTT en Firestore — sólo si no veníamos
+    // de parked. En el path parked ya escribimos el lock antes para
+    // dispararle a los listeners el resumeFromPark() en paralelo.
     if (!mounted) return;
-    context.read<CommunicationBloc>().add(
-          PttLockRequested(
-            channelId: state.activeChannelId!,
-            userId: user.uid,
-            userName: '${user.name} ${user.lastname}',
-          ),
-        );
+    if (!wasParked) {
+      context.read<CommunicationBloc>().add(
+            PttLockRequested(
+              channelId: state.activeChannelId!,
+              userId: user.uid,
+              userName: '${user.name} ${user.lastname}',
+            ),
+          );
+    }
 
     // ── AGORA: Desmutear mic → audio en tiempo real a todos ──
     try {

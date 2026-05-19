@@ -59,6 +59,16 @@ abstract class VoiceProvider {
   /// Verifica el permiso `RECORD_AUDIO` (Android) / mic (iOS).
   Future<bool> hasMicPermission();
 
+  /// Reproduce un efecto de sonido local (beep PTT, kerchunk, etc.)
+  /// mezclándolo dentro del pipeline del provider — bypassa el
+  /// AudioFocus de Android y los filtros OEM (MIUI, EMUI).
+  ///
+  /// El archivo `filePath` debe estar en disco local (no asset). El
+  /// efecto es **local-only**: los demás participantes del canal no
+  /// lo escuchan (comportamiento Motorola). Devuelve `false` si el
+  /// engine no está listo y la UI debe usar un fallback (AudioPlayer).
+  Future<bool> playLocalEffect(String filePath, {int soundId = 1});
+
   // ─── Estado ───
   bool get isInitialized;
   bool get isInChannel;

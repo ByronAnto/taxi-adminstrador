@@ -1,8 +1,12 @@
+import 'dart:io';
 import 'dart:math';
 import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
+
+import 'voice/voice_provider_factory.dart';
 
 /// Sonidos tipo radio Motorola al iniciar y terminar PTT.
 ///
@@ -25,6 +29,17 @@ class PttBeepService {
   Uint8List? _endBytes;
   bool _ready = false;
 
+  // ── Path en disco de los WAV (para Agora playEffect) ──
+  // Agora SDK necesita un path absoluto; no acepta BytesSource ni assets.
+  // Se escriben al `initialize()` y se reusan en cada beep.
+  String? _startPath;
+  String? _endPath;
+
+  /// Soundeffect IDs para Agora playEffect — uno por tipo de beep
+  /// para que el SDK pueda cachear cada uno en memoria.
+  static const int _soundIdStart = 9001;
+  static const int _soundIdEnd = 9002;
+
   /// Pre-genera los WAV en memoria. Llamar al iniciar la app o lazy.
   Future<void> initialize() async {
     if (_ready) return;
@@ -42,22 +57,19 @@ class PttBeepService {
         _Tone(freqHz: 1000, ms: 110, amplitude: 0.95),
       ]);
 
-      // **Audio focus FUERTE** para piercear el audio de Agora.
-      //
-      // Antes usábamos assistanceSonification + gainTransientMayDuck. Ese
-      // combo "amistoso" funcionaba cuando el engine se destruía al
-      // cambiar de tab (Agora soltaba la sesión y el beep ganaba). Tras
-      // commit cf54f64 (engine vivo permanentemente) Agora mantiene
-      // MODE_IN_COMMUNICATION y el beep quedaba mudo / iba al earpiece.
-      //
-      // Combo nuevo:
-      // - usageType: notificationEvent → categoría notificación, no llamada
-      // - contentType: sonification → tono corto, no música
-      // - audioFocus: gainTransient → toma foco exclusivo por ~100 ms
-      // - isSpeakerphoneOn: true → fuerza speaker, no earpiece
-      //
-      // Los Motorola reales también pisan el audio remoto durante el
-      // talk-permit; el efecto deseado es el mismo (~90 ms de "click").
+      // Escribir WAV a disco — requerido por Agora playEffect (acepta
+      // path absoluto, no Bytes). Se hace una sola vez en la vida de
+      // la app, sobrescribiendo si ya existían (por si cambia el WAV).
+      final dir = await getApplicationSupportDirectory();
+      final startFile = File('${dir.path}/ptt_start.wav');
+      final endFile = File('${dir.path}/ptt_end.wav');
+      await startFile.writeAsBytes(_startBytes!, flush: true);
+      await endFile.writeAsBytes(_endBytes!, flush: true);
+      _startPath = startFile.path;
+      _endPath = endFile.path;
+
+      // Audio context para el AudioPlayer (fallback cuando Agora no está
+      // disponible — radio OFF, antes del primer joinChannel, etc.).
       await _applyContext();
       _ready = true;
     } catch (e) {
@@ -65,8 +77,10 @@ class PttBeepService {
     }
   }
 
-  Future<void> playStart() => _play(_startBytes);
-  Future<void> playEnd() => _play(_endBytes);
+  Future<void> playStart() =>
+      _play(bytes: _startBytes, filePath: _startPath, soundId: _soundIdStart);
+  Future<void> playEnd() =>
+      _play(bytes: _endBytes, filePath: _endPath, soundId: _soundIdEnd);
 
   Future<void> _applyContext() async {
     await _player.setAudioContext(AudioContext(
@@ -97,21 +111,42 @@ class PttBeepService {
     await _player.setReleaseMode(ReleaseMode.stop);
   }
 
-  Future<void> _play(Uint8List? bytes) async {
-    if (bytes == null) {
-      await initialize();
-      bytes = bytes ?? _startBytes;
-      if (bytes == null) return;
+  Future<void> _play({
+    Uint8List? bytes,
+    String? filePath,
+    required int soundId,
+  }) async {
+    if (!_ready) await initialize();
+
+    // ─── Path preferido: Agora playEffect ───────────────────────────
+    // Mezcla el WAV dentro del propio pipeline del provider de audio
+    // (Agora hoy, LiveKit en Fase 3). Bypassa el AudioFocus del SO y
+    // los filtros MIUI/EMUI/etc. porque Android sólo ve UN AudioTrack
+    // (el de Agora con el efecto sumado), no dos streams en paralelo.
+    //
+    // Truco usado por Zello y otras PTT apps nativas — explicación
+    // completa en feedback_mic_release_invariant.md.
+    final path = filePath ?? _startPath;
+    if (path != null) {
+      final ok = await VoiceProviderFactory.current
+          .playLocalEffect(path, soundId: soundId);
+      if (ok) {
+        debugPrint('🔔 PttBeepService: beep via VoiceProvider (mixed)');
+        return;
+      }
     }
+
+    // ─── Fallback: AudioPlayer con STREAM_RING ──────────────────────
+    // Sólo se usa cuando el engine Agora NO está vivo (ej: radio OFF,
+    // arranque temprano de la app). En esos escenarios no hay MIUI
+    // bloqueando porque tampoco hay MODE_IN_COMMUNICATION activo.
+    final b = bytes ?? _startBytes;
+    if (b == null) return;
     try {
-      // Re-aplicar contexto antes de cada play: en algunos devices
-      // Android resetea el AudioFocus de un AudioPlayer cuando otro
-      // (Agora) toma MODE_IN_COMMUNICATION. Sin esto, el primer beep
-      // podía sonar pero los siguientes no.
       await _applyContext();
       await _player.stop();
-      await _player.play(BytesSource(bytes), mode: PlayerMode.lowLatency);
-      debugPrint('🔔 PttBeepService: beep enviado al player');
+      await _player.play(BytesSource(b), mode: PlayerMode.lowLatency);
+      debugPrint('🔔 PttBeepService: beep via AudioPlayer fallback');
     } catch (e) {
       debugPrint('PttBeepService._play error: $e');
     }

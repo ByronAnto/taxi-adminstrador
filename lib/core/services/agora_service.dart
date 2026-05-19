@@ -925,6 +925,31 @@ class AgoraService implements VoiceProvider {
 
   // ─────────────────── Permisos ───────────────────
 
+  /// Reproduce un WAV/MP3 local mezclándolo dentro del pipeline de Agora.
+  /// Bypassa AudioFocus + filtros MIUI: Android ve UN solo AudioTrack
+  /// (el de Agora) con el efecto sumado. Patrón Zello clásico.
+  ///
+  /// `publish: false` → sólo el local escucha el beep, los demás peers no.
+  @override
+  Future<bool> playLocalEffect(String filePath, {int soundId = 1}) async {
+    if (_engine == null) return false;
+    try {
+      await _engine!.playEffect(
+        soundId: soundId,
+        filePath: filePath,
+        loopCount: 0, // 0 = play una sola vez (no loop)
+        pitch: 1.0,
+        pan: 0.0,
+        gain: 100, // 0-100, máximo
+        publish: false, // local-only — los demás conductores NO oyen
+      );
+      return true;
+    } catch (e) {
+      _log('Error playLocalEffect: $e');
+      return false;
+    }
+  }
+
   @override
   Future<bool> hasMicPermission() async {
     return await Permission.microphone.isGranted;
