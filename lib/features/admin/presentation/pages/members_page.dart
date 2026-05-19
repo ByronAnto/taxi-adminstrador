@@ -470,9 +470,14 @@ class _MembersPageState extends State<MembersPage> {
       ));
     }
 
-    if (u.status == UserStatus.active &&
-        u.role != AppConstants.roleAdmin &&
-        !isMe) {
+    // Promover a admin: cualquier miembro activo del tenant, INCLUYENDO
+    // los que están en mora (paymentPending/paymentBlocked) o en período
+    // de gracia. Solo se excluyen pendingApproval/rejected/disabled/
+    // deleted (los que no son miembros operativos).
+    final canBePromoted = u.status == UserStatus.active ||
+        u.status == UserStatus.paymentPending ||
+        u.status == UserStatus.paymentBlocked;
+    if (canBePromoted && u.role != AppConstants.roleAdmin && !isMe) {
       items.add(const PopupMenuItem(
         value: 'make_admin',
         child: Row(children: [
