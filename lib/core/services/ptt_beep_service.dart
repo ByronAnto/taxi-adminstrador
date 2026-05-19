@@ -73,17 +73,27 @@ class PttBeepService {
       android: const AudioContextAndroid(
         isSpeakerphoneOn: true,
         stayAwake: false,
+        // **Xiaomi/MIUI fix:** notificationEvent + gainTransient se
+        // silencia en MIUI durante MODE_IN_COMMUNICATION. El único stream
+        // que MIUI respeta durante llamadas activas es STREAM_RING, que
+        // se obtiene con usageType: notificationRingtone. Trick conocido
+        // para apps de comunicación que necesitan beeps audibles.
         contentType: AndroidContentType.sonification,
-        usageType: AndroidUsageType.notificationEvent,
-        audioFocus: AndroidAudioFocus.gainTransient,
+        usageType: AndroidUsageType.notificationRingtone,
+        // gain (no transient): el sistema no nos revoca el foco a los
+        // pocos ms. Como el AudioPlayer hace stop() automático tras
+        // reproducir, el foco se libera al terminar el beep igual.
+        audioFocus: AndroidAudioFocus.gain,
       ),
       iOS: AudioContextIOS(
         category: AVAudioSessionCategory.playback,
-        // duckOthers: el beep baja momentáneamente el audio de Agora
-        // en vez de mezclarse silenciado.
         options: const {AVAudioSessionOptions.duckOthers},
       ),
     ));
+    // Volumen explícito al máximo del player. El SO sigue respetando
+    // el volumen del stream del usuario; esto sólo asegura que no haya
+    // un cap interno del AudioPlayer en 0.5 / 0.8.
+    await _player.setVolume(1.0);
     await _player.setReleaseMode(ReleaseMode.stop);
   }
 
@@ -101,6 +111,7 @@ class PttBeepService {
       await _applyContext();
       await _player.stop();
       await _player.play(BytesSource(bytes), mode: PlayerMode.lowLatency);
+      debugPrint('🔔 PttBeepService: beep enviado al player');
     } catch (e) {
       debugPrint('PttBeepService._play error: $e');
     }
