@@ -472,6 +472,24 @@ service cloud.firestore {
       allow delete: if isOwner(uid) || isSuperAdmin();
     }
 
+    // ===== CAMBIOS DE UNIDAD =====
+    // - Lectura: el dueño del request O admin/operadora del mismo tenant.
+    // - Creación: solo el conductor crea su propio request.
+    // - Update y delete: solo vía Cloud Functions (Admin SDK bypasea reglas).
+    match /vehicleChangeRequests/{reqId} {
+      allow read: if isAuthenticated() && (
+        (resource.data.driverId == request.auth.uid)
+        || (isOperatorOrAdmin() && sameTenant(resource.data))
+      );
+
+      allow create: if isActive()
+        && request.resource.data.driverId == request.auth.uid
+        && sameTenantOnCreate();
+
+      allow update: if false;
+      allow delete: if isAdmin() && sameTenant(resource.data);
+    }
+
     // ===== ANALYTICS (precomputado por cron, solo admin del tenant lo lee) =====
     match /analytics/{analyticsId} {
       allow read: if (isAdmin() || isSuperAdmin()) && sameTenant(resource.data);

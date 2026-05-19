@@ -33,6 +33,7 @@ import '../../features/admin/presentation/pages/notifications_page.dart';
 import '../../features/admin/presentation/pages/trip_requests_page.dart';
 import '../../features/payments/presentation/pages/my_payments_page.dart';
 import '../../features/payments/presentation/pages/payment_approvals_page.dart';
+import '../../features/admin/presentation/pages/vehicle_change_requests_page.dart';
 
 /// Configuración de rutas de la aplicación
 class AppRouter {
@@ -241,6 +242,11 @@ class AppRouter {
             final aid = state.uri.queryParameters['aid'];
             return PaymentApprovalsPage(associationId: aid);
           },
+        ),
+        GoRoute(
+          path: '/vehicle-change-requests',
+          name: 'vehicle-change-requests',
+          builder: (context, state) => const VehicleChangeRequestsPage(),
         ),
       ],
       errorBuilder: (context, state) => Scaffold(

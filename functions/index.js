@@ -1386,6 +1386,194 @@ exports.voidPayment = onCall({}, async (request) => {
 });
 
 // ──────────────────────────────────────────────────────────────────
+//  requestVehicleChange — conductor pide cambio de unidad.
+//  Valida: no tiene otro request pending + no excede 2 aprobados/30d.
+// ──────────────────────────────────────────────────────────────────
+
+exports.requestVehicleChange = onCall({}, async (request) => {
+  const auth = requireAuth(request);
+  const { newPlate, newVehicleNumber, newFotoVehiculo, reason } = request.data || {};
+
+  if (!newPlate || !newVehicleNumber || !reason || reason.length < 10) {
+    throw new HttpsError("invalid-argument",
+      "Campos requeridos: newPlate, newVehicleNumber, reason (mín 10 chars).");
+  }
+
+  const userSnap = await db.collection("users").doc(auth.uid).get();
+  if (!userSnap.exists) {
+    throw new HttpsError("not-found", "Usuario no encontrado.");
+  }
+  const user = userSnap.data();
+
+  if (!["conductor", "admin"].includes(user.role)) {
+    throw new HttpsError("permission-denied",
+      "Solo conductores pueden solicitar cambio de unidad.");
+  }
+
+  // Validación: no más de 1 pending simultáneo
+  const pendingSnap = await db.collection("vehicleChangeRequests")
+    .where("driverId", "==", auth.uid)
+    .where("status", "==", "pending")
+    .limit(1)
+    .get();
+  if (!pendingSnap.empty) {
+    throw new HttpsError("failed-precondition",
+      "Ya tienes una solicitud pendiente. Espera la respuesta antes de crear otra.");
+  }
+
+  // Validación: máximo 2 aprobados en los últimos 30 días
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const recentApprovedSnap = await db.collection("vehicleChangeRequests")
+    .where("driverId", "==", auth.uid)
+    .where("status", "==", "approved")
+    .where("approvedAt", ">=", Timestamp.fromDate(thirtyDaysAgo))
+    .get();
+  if (recentApprovedSnap.size >= 2) {
+    throw new HttpsError("failed-precondition",
+      "Has alcanzado el máximo de 2 cambios aprobados en los últimos 30 días.");
+  }
+
+  const now = FieldValue.serverTimestamp();
+  const docRef = db.collection("vehicleChangeRequests").doc();
+  await docRef.set({
+    driverId: auth.uid,
+    driverName: `${user.name || ""} ${user.lastname || ""}`.trim(),
+    associationId: user.associationId,
+    status: "pending",
+    oldPlate: user.placa || "",
+    oldVehicleNumber: user.numeroVehiculo || "",
+    oldFotoVehiculo: user.fotoVehiculo || null,
+    newPlate,
+    newVehicleNumber,
+    newFotoVehiculo: newFotoVehiculo || null,
+    reason,
+    createdAt: now,
+    updatedAt: now,
+  });
+
+  return { ok: true, requestId: docRef.id };
+});
+
+// ──────────────────────────────────────────────────────────────────
+//  approveVehicleChange — admin u operadora aprueba un cambio.
+// ──────────────────────────────────────────────────────────────────
+
+exports.approveVehicleChange = onCall({}, async (request) => {
+  const auth = requireAuth(request);
+  const { requestId } = request.data || {};
+  if (!requestId) throw new HttpsError("invalid-argument", "requestId requerido.");
+
+  const reqRef = db.collection("vehicleChangeRequests").doc(requestId);
+  const reqSnap = await reqRef.get();
+  if (!reqSnap.exists) throw new HttpsError("not-found", "Solicitud no existe.");
+  const r = reqSnap.data();
+  if (r.status !== "pending") {
+    throw new HttpsError("failed-precondition",
+      `Solo solicitudes pending; este está en ${r.status}.`);
+  }
+
+  // Permisos: admin u operadora del mismo tenant, O super-admin
+  const callerEmail = auth.token.email || "";
+  const isSuper = SUPER_ADMIN_EMAILS.includes(callerEmail);
+  if (!isSuper) {
+    const callerSnap = await db.collection("users").doc(auth.uid).get();
+    const caller = callerSnap.exists ? callerSnap.data() : null;
+    if (!caller || !["admin", "operadora"].includes(caller.role) ||
+        caller.associationId !== r.associationId) {
+      throw new HttpsError("permission-denied",
+        "Solo admin u operadora de la asociación pueden aprobar.");
+    }
+  }
+
+  const callerInfoSnap = await db.collection("users").doc(auth.uid).get();
+  const callerInfo = callerInfoSnap.data() || {};
+  const callerName = `${callerInfo.name || ""} ${callerInfo.lastname || ""}`.trim();
+
+  const now = FieldValue.serverTimestamp();
+
+  // Update request + driver doc en batch
+  const batch = db.batch();
+  batch.update(reqRef, {
+    status: "approved",
+    approvedBy: auth.uid,
+    approvedByName: callerName || auth.uid,
+    approvedAt: now,
+    updatedAt: now,
+  });
+  batch.update(db.collection("users").doc(r.driverId), {
+    placa: r.newPlate,
+    numeroVehiculo: r.newVehicleNumber,
+    fotoVehiculo: r.newFotoVehiculo || null,
+    updatedAt: now,
+  });
+  await batch.commit();
+
+  // FCM al conductor
+  await _sendFcmToUid(r.driverId, {
+    title: "Cambio de unidad aprobado",
+    body: `Tu unidad ahora es #${r.newVehicleNumber} placa ${r.newPlate}.`,
+  }).catch(() => {});
+
+  return { ok: true };
+});
+
+// ──────────────────────────────────────────────────────────────────
+//  rejectVehicleChange — admin u operadora rechaza.
+// ──────────────────────────────────────────────────────────────────
+
+exports.rejectVehicleChange = onCall({}, async (request) => {
+  const auth = requireAuth(request);
+  const { requestId, rejectReason } = request.data || {};
+  if (!requestId) throw new HttpsError("invalid-argument", "requestId requerido.");
+  if (!rejectReason || rejectReason.length < 5) {
+    throw new HttpsError("invalid-argument", "rejectReason requerido (mín 5 chars).");
+  }
+
+  const reqRef = db.collection("vehicleChangeRequests").doc(requestId);
+  const reqSnap = await reqRef.get();
+  if (!reqSnap.exists) throw new HttpsError("not-found", "Solicitud no existe.");
+  const r = reqSnap.data();
+  if (r.status !== "pending") {
+    throw new HttpsError("failed-precondition", "Solo solicitudes pending.");
+  }
+
+  // Permisos: admin u operadora del mismo tenant
+  const callerEmail = auth.token.email || "";
+  const isSuper = SUPER_ADMIN_EMAILS.includes(callerEmail);
+  if (!isSuper) {
+    const callerSnap = await db.collection("users").doc(auth.uid).get();
+    const caller = callerSnap.exists ? callerSnap.data() : null;
+    if (!caller || !["admin", "operadora"].includes(caller.role) ||
+        caller.associationId !== r.associationId) {
+      throw new HttpsError("permission-denied",
+        "Solo admin u operadora de la asociación pueden rechazar.");
+    }
+  }
+
+  const callerInfoSnap = await db.collection("users").doc(auth.uid).get();
+  const callerInfo = callerInfoSnap.data() || {};
+  const callerName = `${callerInfo.name || ""} ${callerInfo.lastname || ""}`.trim();
+
+  const now = FieldValue.serverTimestamp();
+  await reqRef.update({
+    status: "rejected",
+    rejectedBy: auth.uid,
+    rejectedByName: callerName || auth.uid,
+    rejectedAt: now,
+    rejectReason,
+    updatedAt: now,
+  });
+
+  await _sendFcmToUid(r.driverId, {
+    title: "Cambio de unidad rechazado",
+    body: `Motivo: ${rejectReason}`,
+  }).catch(() => {});
+
+  return { ok: true };
+});
+
+// ──────────────────────────────────────────────────────────────────
 //  reportAssociationPayment — admin sube comprobante de membresía al
 //  super-admin. Crea doc en `payments` con concept='membresia_asociacion'.
 // ──────────────────────────────────────────────────────────────────

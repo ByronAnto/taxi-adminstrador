@@ -316,6 +316,12 @@ class _HomePageState extends State<HomePage> {
           onTap: () => context.push('/payment-approvals'),
         ),
         _ActionTile(
+          title: 'Cambios de unidad',
+          icon: Icons.directions_car_filled,
+          color: Colors.deepPurple,
+          onTap: () => context.push('/vehicle-change-requests'),
+        ),
+        _ActionTile(
           title: 'Mis validaciones',
           icon: Icons.assignment_turned_in_outlined,
           color: AppTheme.accentColor,
@@ -336,6 +342,12 @@ class _HomePageState extends State<HomePage> {
         icon: Icons.fact_check_outlined,
         color: Colors.deepOrange,
         onTap: () => context.push('/payment-approvals'),
+      ),
+      _ActionTile(
+        title: 'Cambios de unidad',
+        icon: Icons.directions_car_filled,
+        color: Colors.deepPurple,
+        onTap: () => context.push('/vehicle-change-requests'),
       ),
       _ActionTile(
         title: 'Caja',

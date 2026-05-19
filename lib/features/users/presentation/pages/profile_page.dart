@@ -10,6 +10,7 @@ import '../../../../core/theme/app_theme.dart';
 import '../../../../core/services/image_upload_service.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../auth/data/models/user_model.dart';
+import 'request_vehicle_change_page.dart';
 
 /// Página de perfil de usuario con edición de datos
 class ProfilePage extends StatefulWidget {
@@ -396,6 +397,26 @@ class _ProfilePageState extends State<ProfilePage> {
                 ),
 
                 const SizedBox(height: 24),
+
+                // Solicitar cambio de unidad (solo conductores/admin con vehículo)
+                if ((user.role == 'conductor') ||
+                    (user.role == 'admin' &&
+                        user.numeroVehiculo.isNotEmpty)) ...[
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.directions_car,
+                        color: Colors.orange),
+                    title: const Text('Solicitar cambio de unidad'),
+                    subtitle: const Text('Por accidente, avería, etc.'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => Navigator.of(context).push(
+                      MaterialPageRoute(
+                        builder: (_) => const RequestVehicleChangePage(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
 
                 // Cambiar contraseña
                 SizedBox(
