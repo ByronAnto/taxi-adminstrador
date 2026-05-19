@@ -931,10 +931,24 @@ exports.reportPayment = onCall({}, async (request) => {
     );
   }
 
-  if (user.status && user.status !== "active") {
+  // Estados que SÍ pueden reportar pago:
+  //   - active: operación normal
+  //   - paymentBlocked: necesita pagar para desbloquearse (CRÍTICO —
+  //     sin esto el conductor bloqueado por mora queda atrapado sin
+  //     poder subir comprobante)
+  //   - paymentPending: período de gracia
+  // Estados que NO pueden:
+  //   - pendingApproval, rejected, disabledByAdmin, suspended, deleted
+  const allowedToPay = [
+    "active",
+    "paymentBlocked",
+    "paymentPending",
+  ];
+  const userStatus = user.status || "active";
+  if (!allowedToPay.includes(userStatus)) {
     throw new HttpsError(
       "failed-precondition",
-      "Tu cuenta no está activa. No puedes reportar pagos."
+      "Tu cuenta no puede reportar pagos en este estado."
     );
   }
 
