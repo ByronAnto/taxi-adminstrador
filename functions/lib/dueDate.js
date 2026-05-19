@@ -91,8 +91,13 @@ function computeNextDueDate(user, cfg, lastPayment) {
   const every = Math.max(1, Number(cfg.period.every) || 1);
 
   if (!lastPayment) {
-    // Primera cuota: alinear desde approvedAt al próximo dueDay (exclusivo: no vence hoy).
-    return alignToDueDay(base, cfg.dueDay, unit, false);
+    // Primera cuota: alinear desde approvedAt al dueDay (INCLUSIVO).
+    // Si el conductor se inscribe exactamente en dueDay (ej. Lunes con
+    // cuota semanal lunes), debe pagar HOY MISMO, no la próxima semana.
+    // Sin inclusive=true, los conductores aprobados en dueDay tendrían
+    // 7 días de "gracia gratis" antes de pagar — eso NO es lo definido
+    // en el spec (que pide pago prorrateado/inmediato según día de ingreso).
+    return alignToDueDay(base, cfg.dueDay, unit, true);
   }
 
   // Cuota recurrente: avanzar el período y alinear al dueDay correcto.

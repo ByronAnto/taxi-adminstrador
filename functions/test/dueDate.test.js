@@ -87,4 +87,14 @@ describe('computeNextDueDate edge cases (C1)', () => {
     // Mon May 11 + 14 días = Mon May 25 → ya alineado
     expect(result.toISOString().substring(0, 10)).toBe('2026-05-25');
   });
+
+  test('approval on Monday with monday dueDay → same Monday (inclusive first cuota)', () => {
+    // Si el conductor se inscribe exactamente en dueDay, debe pagar
+    // HOY MISMO. Sin inclusive:true tendría 7 días gratis hasta el
+    // próximo lunes — eso contradice el spec ("paga el día de ingreso").
+    const user = { approvedAt: new Date('2026-05-18T17:04:00Z') }; // Mon
+    const cfg = { period: { every: 1, unit: 'week' }, dueDay: 'monday' };
+    const result = computeNextDueDate(user, cfg, null);
+    expect(result.toISOString().substring(0, 10)).toBe('2026-05-18'); // same Mon
+  });
 });

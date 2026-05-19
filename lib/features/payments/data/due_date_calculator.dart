@@ -75,10 +75,14 @@ class DueDateCalculator {
     final every = cfg.periodEvery < 1 ? 1 : cfg.periodEvery;
 
     if (lastPayment == null) {
-      // Primera cuota: base = approvedAt, inclusive = false.
+      // Primera cuota: base = approvedAt, inclusive = true.
+      // Si el conductor se inscribe exactamente en dueDay (ej. Lunes con
+      // cuota semanal lunes), debe pagar HOY MISMO. Sin inclusive=true
+      // los aprobados en dueDay tendrían 7 días gratis antes del primer
+      // pago — espejo del fix aplicado a functions/lib/dueDate.js.
       final base = user.approvedAt;
       if (base == null) return null;
-      return alignToDueDay(base, cfg.dueDay, cfg.periodUnit, inclusive: false);
+      return alignToDueDay(base, cfg.dueDay, cfg.periodUnit, inclusive: true);
     }
 
     // Cuotas recurrentes: base = validatedAt del último pago.

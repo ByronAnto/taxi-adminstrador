@@ -7,6 +7,8 @@ import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../associations/data/models/association_model.dart';
 import '../../../auth/data/models/user_model.dart';
+import '../../../payments/data/due_date_calculator.dart';
+import '../../../payments/data/models/payment_model.dart';
 
 /// Panel de KPIs del Resumen del Día.
 ///
@@ -69,7 +71,7 @@ class DashboardKpis extends StatelessWidget {
     }
 
     if (_hasDriverKpis) {
-      cards.add(_NextDueCard(aid: aid, uid: user.uid));
+      cards.add(_NextDueCard(aid: aid, user: user));
     }
 
     if (cards.isEmpty) {
@@ -322,8 +324,8 @@ class _RevenueMonthCard extends StatelessWidget {
 
 class _NextDueCard extends StatelessWidget {
   final String aid;
-  final String uid;
-  const _NextDueCard({required this.aid, required this.uid});
+  final UserModel user;
+  const _NextDueCard({required this.aid, required this.user});
 
   @override
   Widget build(BuildContext context) {
@@ -346,27 +348,42 @@ class _NextDueCard extends StatelessWidget {
         final assoc = AssociationModel.fromFirestore(aidSnap.data!);
         final cfg = assoc.billingConfig;
 
-        // Stream del último pago validado del conductor para inferir
-        // la "siguiente" fecha de vencimiento.
-        return StreamBuilder<QuerySnapshot>(
+        // Stream del último pago validado del conductor (filtrado luego
+        // por voidedAt en cliente para reusar índices existentes).
+        return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
           stream: FirebaseFirestore.instance
               .collection('payments')
-              .where('driverId', isEqualTo: uid)
+              .where('driverId', isEqualTo: user.uid)
               .where('status', isEqualTo: 'validated')
               .snapshots(),
           builder: (_, paySnap) {
             final loading =
                 paySnap.connectionState == ConnectionState.waiting;
-            DateTime? lastPaid;
-            for (final d in paySnap.data?.docs ?? []) {
-              final data = d.data() as Map<String, dynamic>;
-              final pd = (data['paymentDate'] as Timestamp?)?.toDate();
-              if (pd != null && (lastPaid == null || pd.isAfter(lastPaid))) {
-                lastPaid = pd;
+
+            // Buscar el último pago validado NO anulado.
+            PaymentModel? lastValid;
+            final docs = paySnap.data?.docs ?? [];
+            for (final d in docs) {
+              final p = PaymentModel.fromFirestore(d);
+              if (p.isVoided) continue;
+              if (lastValid == null ||
+                  (p.validatedAt != null &&
+                      lastValid.validatedAt != null &&
+                      p.validatedAt!.isAfter(lastValid.validatedAt!))) {
+                lastValid = p;
               }
             }
 
-            final nextDue = _computeNextDueDate(cfg, lastPaid);
+            // Usar el calculador espejo del cron (DueDateCalculator).
+            // Mismo helper que `enforcePayments` para que dashboard
+            // y backend coincidan en la fecha mostrada al conductor.
+            final nextDue = cfg.amount > 0
+                ? DueDateCalculator.computeNextDueDate(
+                    user: user,
+                    cfg: cfg,
+                    lastPayment: lastValid,
+                  )
+                : null;
             final fmt = DateFormat('dd MMM');
             final amount =
                 NumberFormat.currency(symbol: '\$', decimalDigits: 2)
@@ -399,33 +416,5 @@ class _NextDueCard extends StatelessWidget {
         );
       },
     );
-  }
-
-  /// Calcula la próxima fecha de vencimiento basada en `billingConfig`.
-  /// Si no hay último pago, usa "hoy" como referencia y proyecta el
-  /// siguiente vencimiento.
-  DateTime? _computeNextDueDate(BillingConfig cfg, DateTime? lastPaid) {
-    if (cfg.amount <= 0) return null;
-    final now = DateTime.now();
-    final reference = lastPaid ?? now;
-
-    switch (cfg.periodUnit) {
-      case BillingPeriodUnit.day:
-        return reference.add(Duration(days: cfg.periodEvery));
-      case BillingPeriodUnit.week:
-        return reference.add(Duration(days: 7 * cfg.periodEvery));
-      case BillingPeriodUnit.month:
-        // Próximo mes con day = dueDay (1-28 para evitar overflow).
-        final dueDay = cfg.dueDay.clamp(1, 28);
-        DateTime candidate = DateTime(now.year, now.month, dueDay);
-        if (candidate.isBefore(now) ||
-            (lastPaid != null && !candidate.isAfter(lastPaid))) {
-          candidate = DateTime(now.year, now.month + cfg.periodEvery, dueDay);
-        }
-        return candidate;
-      case BillingPeriodUnit.year:
-        return DateTime(reference.year + cfg.periodEvery, reference.month,
-            reference.day);
-    }
   }
 }
