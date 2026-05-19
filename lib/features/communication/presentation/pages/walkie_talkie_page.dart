@@ -144,11 +144,16 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     _durationTimer?.cancel();
     // Si quedó una grabación abierta, cerrarla para no perder metadata.
     _stopLocalRecordingIfAny();
-    // Destruir engine completamente al salir de la página del radio
-    // para liberar la sesión de audio del SO
-    _agoraService.destroyEngine();
-    // Detener servicio de segundo plano al salir del radio
-    _radioService.stopService();
+    // ⚠️ IMPORTANTE: NO destruimos el engine Agora ni el foreground
+    // service acá. El walkie page se desmonta al cambiar de tab (Mapa,
+    // Chat, etc.) pero el conductor sigue queriendo escuchar la radio
+    // mientras maneja. El engine sobrevive a cambios de tab y solo se
+    // destruye en:
+    //   - Toggle OFF del radio (RadioPowerService.turnOff →
+    //     _onRadioPowerChanged → destroyEngine + stopService)
+    //   - Logout (SessionTeardownService.disposeAll)
+    //   - Usuario suspendido / paymentBlocked (router redirect → logout)
+    //   - App killed (App-level dispose en main.dart)
     super.dispose();
   }
 
