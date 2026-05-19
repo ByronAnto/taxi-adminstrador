@@ -38,6 +38,14 @@ class DriverPeriodReport {
   /// Top destinos (resumido).
   final Map<String, int> topDestinations;
 
+  /// Carreras de TODA la asociación agrupadas por hora del día (0-23).
+  /// Para que el conductor compare su actividad vs la global.
+  final Map<int, int> associationTripsByHour;
+
+  /// Cantidad de carreras por origen: 'standQueue', 'street', 'manual',
+  /// 'apkOperadora', 'walkieTalkie', 'webCliente'.
+  final Map<String, int> tripsBySource;
+
   const DriverPeriodReport({
     required this.driverId,
     required this.driverName,
@@ -52,6 +60,8 @@ class DriverPeriodReport {
     required this.dailyTrips,
     required this.tripsByPaymentMethod,
     required this.topDestinations,
+    required this.associationTripsByHour,
+    required this.tripsBySource,
   });
 }
 
@@ -70,15 +80,28 @@ class DriverReportService {
     required DateTime toDate,
     required String periodLabel,
   }) async {
-    final tripsSnap = await _firestore
-        .collection('trips')
-        .where('driverId', isEqualTo: driverId)
-        .where('createdAt',
-            isGreaterThanOrEqualTo: Timestamp.fromDate(fromDate))
-        .where('createdAt',
-            isLessThanOrEqualTo: Timestamp.fromDate(toDate))
-        .get();
-    final docs = tripsSnap.docs.map((d) => d.data()).toList();
+    // Ejecutar ambas queries en paralelo
+    final results = await Future.wait([
+      _firestore
+          .collection('trips')
+          .where('driverId', isEqualTo: driverId)
+          .where('createdAt',
+              isGreaterThanOrEqualTo: Timestamp.fromDate(fromDate))
+          .where('createdAt',
+              isLessThanOrEqualTo: Timestamp.fromDate(toDate))
+          .get(),
+      _firestore
+          .collection('trips')
+          .where('associationId', isEqualTo: associationId)
+          .where('createdAt',
+              isGreaterThanOrEqualTo: Timestamp.fromDate(fromDate))
+          .where('createdAt',
+              isLessThanOrEqualTo: Timestamp.fromDate(toDate))
+          .get(),
+    ]);
+
+    final docs = results[0].docs.map((d) => d.data()).toList();
+    final assocDocs = results[1].docs.map((d) => d.data()).toList();
 
     int totalTrips = docs.length;
     double totalIncome = 0;
@@ -87,6 +110,7 @@ class DriverReportService {
     final dailyTrips = <String, int>{};
     final byMethod = <String, int>{};
     final byDest = <String, int>{};
+    final bySource = <String, int>{};
 
     for (final t in docs) {
       final ts = (t['createdAt'] as Timestamp?)?.toDate();
@@ -106,6 +130,17 @@ class DriverReportService {
         final shortDest = dest.split(',').first.trim();
         byDest[shortDest] = (byDest[shortDest] ?? 0) + 1;
       }
+      final src = (t['source'] as String?) ?? 'manual';
+      bySource[src] = (bySource[src] ?? 0) + 1;
+    }
+
+    // Calcular carreras de la asociación por hora
+    final assocByHour = <int, int>{};
+    for (final d in assocDocs) {
+      final ts = (d['createdAt'] as Timestamp?)?.toDate();
+      if (ts != null) {
+        assocByHour[ts.hour] = (assocByHour[ts.hour] ?? 0) + 1;
+      }
     }
 
     return DriverPeriodReport(
@@ -122,6 +157,8 @@ class DriverReportService {
       dailyTrips: dailyTrips,
       tripsByPaymentMethod: byMethod,
       topDestinations: byDest,
+      associationTripsByHour: assocByHour,
+      tripsBySource: bySource,
     );
   }
 }

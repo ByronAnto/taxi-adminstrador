@@ -233,12 +233,19 @@ class _DriverReportPageState extends State<DriverReportPage> {
         ),
         const SizedBox(height: 24),
 
-        // Carreras por hora
+        // Carreras por origen
+        const Text('Carreras por origen',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
+        const SizedBox(height: 8),
+        _buildSourceBreakdown(r.tripsBySource),
+        const SizedBox(height: 24),
+
+        // Carreras por hora (mías + asociación)
         const Text('Carreras por hora del día',
             style:
                 TextStyle(fontSize: 14, fontWeight: FontWeight.w800)),
         const SizedBox(height: 8),
-        _buildHourBars(r.tripsByHour),
+        _buildHourBars(r.tripsByHour, r.associationTripsByHour),
         const SizedBox(height: 24),
 
         // Carreras por día
@@ -398,8 +405,11 @@ class _DriverReportPageState extends State<DriverReportPage> {
     );
   }
 
-  Widget _buildHourBars(Map<int, int> data) {
-    if (data.isEmpty) {
+  Widget _buildHourBars(
+    Map<int, int> myData,
+    Map<int, int> assocData,
+  ) {
+    if (myData.isEmpty && assocData.isEmpty) {
       return const Padding(
         padding: EdgeInsets.symmetric(vertical: 12),
         child: Text(
@@ -408,41 +418,165 @@ class _DriverReportPageState extends State<DriverReportPage> {
         ),
       );
     }
-    final maxCount = data.values.reduce((a, b) => a > b ? a : b);
-    return SizedBox(
-      height: 140,
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: List.generate(24, (h) {
-          final count = data[h] ?? 0;
-          final ratio = maxCount > 0 ? count / maxCount : 0.0;
-          return Expanded(
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 1),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.end,
-                children: [
-                  if (count > 0)
-                    Text('$count',
+
+    // Calcular máximo global para escalar ambas series juntas
+    final allValues = [
+      ...myData.values,
+      ...assocData.values,
+    ];
+    final maxCount =
+        allValues.isEmpty ? 1 : allValues.reduce((a, b) => a > b ? a : b);
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // Leyenda
+        Row(
+          children: [
+            Container(width: 12, height: 12,
+                decoration: BoxDecoration(
+                    color: Colors.amber.shade700,
+                    borderRadius: BorderRadius.circular(2))),
+            const SizedBox(width: 4),
+            const Text('Mis carreras', style: TextStyle(fontSize: 10)),
+            const SizedBox(width: 12),
+            Container(width: 12, height: 12,
+                decoration: BoxDecoration(
+                    color: Colors.blue.withValues(alpha: 0.45),
+                    borderRadius: BorderRadius.circular(2))),
+            const SizedBox(width: 4),
+            const Text('Total de la base', style: TextStyle(fontSize: 10)),
+          ],
+        ),
+        const SizedBox(height: 6),
+        SizedBox(
+          height: 130,
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: List.generate(24, (h) {
+              final mine = myData[h] ?? 0;
+              final assoc = assocData[h] ?? 0;
+              final myRatio = maxCount > 0 ? mine / maxCount : 0.0;
+              final assocRatio = maxCount > 0 ? assoc / maxCount : 0.0;
+              // Show label every 3 hours
+              final showLabel = h % 3 == 0;
+              return Expanded(
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 1),
+                  child: Column(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      // Stacked: assoc bar behind (wider, semi-transparent)
+                      // then my bar on top
+                      Stack(
+                        alignment: Alignment.bottomCenter,
+                        children: [
+                          // Association bar (blue, behind)
+                          Container(
+                            height: (100 * assocRatio).clamp(1, 100).toDouble(),
+                            decoration: BoxDecoration(
+                              color: Colors.blue.withValues(
+                                  alpha: assoc == 0 ? 0.05 : 0.35),
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                          // My bar (amber, front)
+                          Container(
+                            height: (100 * myRatio).clamp(
+                                mine == 0 ? 0 : 2, 100).toDouble(),
+                            decoration: BoxDecoration(
+                              color: Colors.amber.shade700.withValues(
+                                  alpha: mine == 0 ? 0 : 0.9),
+                              borderRadius: BorderRadius.circular(2),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        showLabel ? '$h' : '',
                         style: const TextStyle(
-                            fontSize: 8, fontWeight: FontWeight.w700)),
-                  Container(
-                    height: (100 * ratio).clamp(2, 100).toDouble(),
-                    decoration: BoxDecoration(
-                      color: AppTheme.primaryColor.withValues(
-                          alpha: count == 0 ? 0.1 : 0.85),
-                      borderRadius: BorderRadius.circular(2),
-                    ),
+                            fontSize: 7, color: Colors.grey),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 2),
-                  Text('$h',
-                      style: const TextStyle(fontSize: 7, color: Colors.grey)),
-                ],
-              ),
-            ),
-          );
-        }),
-      ),
+                ),
+              );
+            }),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSourceBreakdown(Map<String, int> bySource) {
+    // Definición de labels e íconos por origen
+    final sources = [
+      ('standQueue', 'Sacadas de la base', Icons.queue),
+      ('street', 'Calle', Icons.traffic),
+      ('manual', '+1 carrera (yo)', Icons.add_circle_outline),
+      ('apkOperadora', 'Operadora', Icons.assignment),
+      ('walkieTalkie', 'Radio', Icons.radio),
+      ('webCliente', 'Cliente web', Icons.language),
+    ];
+
+    final hasData = sources.any((s) => (bySource[s.$1] ?? 0) > 0);
+
+    if (!hasData) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: Text(
+          'Aún no se han registrado carreras con origen detallado.',
+          style: TextStyle(color: Colors.grey, fontStyle: FontStyle.italic, fontSize: 12),
+        ),
+      );
+    }
+
+    final colors = [
+      Colors.orange.shade700,
+      Colors.teal.shade600,
+      Colors.purple.shade600,
+      Colors.blue.shade700,
+      Colors.red.shade600,
+      Colors.green.shade700,
+    ];
+
+    final visible = sources.where((s) => (bySource[s.$1] ?? 0) > 0).toList();
+
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: List.generate(visible.length, (i) {
+        final s = visible[i];
+        final count = bySource[s.$1] ?? 0;
+        final color = colors[sources.indexWhere((x) => x.$1 == s.$1) % colors.length];
+        return Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.09),
+            borderRadius: BorderRadius.circular(10),
+            border: Border.all(color: color.withValues(alpha: 0.3)),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(s.$3, size: 14, color: color),
+              const SizedBox(width: 5),
+              Text(s.$2,
+                  style: TextStyle(
+                      fontSize: 11,
+                      color: color,
+                      fontWeight: FontWeight.w600)),
+              const SizedBox(width: 6),
+              Text('$count',
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w900,
+                      color: color)),
+            ],
+          ),
+        );
+      }),
     );
   }
 }

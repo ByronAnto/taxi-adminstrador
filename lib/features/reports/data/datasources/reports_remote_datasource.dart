@@ -46,13 +46,19 @@ class ReportsRemoteDatasource {
     final averageFare =
         completedTrips.isEmpty ? 0.0 : totalRevenue / completedTrips.length;
 
-    // 4. Carreras por hora
+    // 4. Carreras por hora + heatmap día×hora
     final Map<int, int> tripsByHour = {};
+    final Map<int, Map<int, int>> tripsByDayAndHour = {};
     for (final trip in trips) {
       final ts = trip['createdAt'];
       if (ts is Timestamp) {
-        final hour = ts.toDate().hour;
+        final d = ts.toDate();
+        final hour = d.hour;
         tripsByHour[hour] = (tripsByHour[hour] ?? 0) + 1;
+        final dow = d.weekday; // 1=Lun..7=Dom
+        tripsByDayAndHour.putIfAbsent(dow, () => <int, int>{});
+        tripsByDayAndHour[dow]![hour] =
+            (tripsByDayAndHour[dow]![hour] ?? 0) + 1;
       }
     }
 
@@ -76,6 +82,15 @@ class ReportsRemoteDatasource {
       driverMap.putIfAbsent(dId, () => _DriverAggr());
       driverMap[dId]!.tripCount++;
       driverMap[dId]!.income += (trip['fare'] ?? 0.0).toDouble();
+      // Hora del viaje para calcular hora pico por conductor
+      final ts = trip['createdAt'];
+      if (ts is Timestamp) {
+        final h = ts.toDate().hour;
+        driverMap[dId]!.hourCounts[h] = (driverMap[dId]!.hourCounts[h] ?? 0) + 1;
+      }
+      // Origen del viaje
+      final src = (trip['source'] as String?) ?? 'manual';
+      driverMap[dId]!.sourceCounts[src] = (driverMap[dId]!.sourceCounts[src] ?? 0) + 1;
     }
 
     // Obtener nombres de conductores
@@ -96,11 +111,23 @@ class ReportsRemoteDatasource {
     }
 
     final topDrivers = driverMap.entries.map((e) {
+      // Calcular hora pico del conductor
+      int peakHour = 0;
+      int peakHourCount = 0;
+      for (final entry in e.value.hourCounts.entries) {
+        if (entry.value > peakHourCount) {
+          peakHourCount = entry.value;
+          peakHour = entry.key;
+        }
+      }
       return DriverReportItem(
         driverId: e.key,
         name: driverNames[e.key] ?? 'Conductor',
         tripCount: e.value.tripCount,
         income: e.value.income,
+        peakHour: peakHour,
+        peakHourCount: peakHourCount,
+        bySource: Map.unmodifiable(e.value.sourceCounts),
       );
     }).toList()
       ..sort((a, b) => b.tripCount.compareTo(a.tripCount));
@@ -199,6 +226,7 @@ class ReportsRemoteDatasource {
       topDrivers: topDrivers.take(5).toList(),
       paymentMethodDistribution: paymentDistribution,
       frequentDestinations: destinations,
+      tripsByDayAndHour: tripsByDayAndHour,
     );
   }
 
@@ -211,4 +239,6 @@ class ReportsRemoteDatasource {
 class _DriverAggr {
   int tripCount = 0;
   double income = 0;
+  final Map<int, int> hourCounts = {};
+  final Map<String, int> sourceCounts = {};
 }

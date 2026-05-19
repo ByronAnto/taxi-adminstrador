@@ -95,6 +95,8 @@ class _ReportsContent extends StatelessWidget {
           _PaymentMethodSection(distribution: data.paymentMethodDistribution),
           const SizedBox(height: 24),
           _FrequentDestinations(destinations: data.frequentDestinations),
+          const SizedBox(height: 24),
+          _HeatmapSection(tripsByDayAndHour: data.tripsByDayAndHour),
           const SizedBox(height: 32),
         ],
       ),
@@ -531,29 +533,82 @@ class _TopDriversSection extends StatelessWidget {
               Colors.brown[300]!,
             ];
 
+            // Calcular los 2 sources con más carreras
+            final sortedSources = driver.bySource.entries.toList()
+              ..sort((a, b) => b.value.compareTo(a.value));
+            final top2 = sortedSources.take(2).toList();
+
+            String sourceLabel(String src) {
+              switch (src) {
+                case 'standQueue': return 'Cola';
+                case 'street': return 'Calle';
+                case 'manual': return '+1';
+                case 'apkOperadora': return 'Op';
+                case 'walkieTalkie': return 'Radio';
+                case 'webCliente': return 'Web';
+                default: return src;
+              }
+            }
+
+            final sourceSummary = top2
+                .map((e) => '${sourceLabel(e.key)}: ${e.value}')
+                .join(' · ');
+
             return Card(
               margin: const EdgeInsets.only(bottom: 8),
-              child: ListTile(
-                leading: CircleAvatar(
-                  backgroundColor:
-                      index < 3 ? medalColors[index] : Colors.grey[200],
-                  child: Text(
-                    '${index + 1}',
-                    style: TextStyle(
-                      fontWeight: FontWeight.bold,
-                      color: index < 3 ? Colors.white : Colors.grey[600],
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                child: Row(
+                  children: [
+                    CircleAvatar(
+                      backgroundColor:
+                          index < 3 ? medalColors[index] : Colors.grey[200],
+                      child: Text(
+                        '${index + 1}',
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: index < 3 ? Colors.white : Colors.grey[600],
+                        ),
+                      ),
                     ),
-                  ),
-                ),
-                title: Text(driver.name,
-                    style: const TextStyle(fontWeight: FontWeight.w600)),
-                subtitle: Text('${driver.tripCount} carreras'),
-                trailing: Text(
-                  '\$${driver.income.toStringAsFixed(2)}',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    color: AppTheme.secondaryColor,
-                  ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(driver.name,
+                              style: const TextStyle(fontWeight: FontWeight.w600)),
+                          Row(
+                            children: [
+                              Text('${driver.tripCount} carreras',
+                                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
+                              if (driver.peakHourCount > 0) ...[
+                                const SizedBox(width: 8),
+                                Text(
+                                  'Pico: ${driver.peakHour}h (${driver.peakHourCount})',
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      color: Colors.orange.shade700,
+                                      fontWeight: FontWeight.w600),
+                                ),
+                              ],
+                            ],
+                          ),
+                          if (sourceSummary.isNotEmpty)
+                            Text(sourceSummary,
+                                style: TextStyle(
+                                    fontSize: 11, color: Colors.grey[500])),
+                        ],
+                      ),
+                    ),
+                    Text(
+                      '\$${driver.income.toStringAsFixed(2)}',
+                      style: const TextStyle(
+                        fontWeight: FontWeight.bold,
+                        color: AppTheme.secondaryColor,
+                      ),
+                    ),
+                  ],
                 ),
               ),
             );
@@ -734,6 +789,151 @@ class _FrequentDestinations extends StatelessWidget {
                 ),
               )),
       ],
+    );
+  }
+}
+
+// ================ HEATMAP DÍAS × HORAS ================
+
+class _HeatmapSection extends StatelessWidget {
+  final Map<int, Map<int, int>> tripsByDayAndHour;
+  const _HeatmapSection({required this.tripsByDayAndHour});
+
+  static const _dayLabels = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+
+  @override
+  Widget build(BuildContext context) {
+    // Calcular máximo global para escalar colores
+    int maxVal = 1;
+    for (final hourMap in tripsByDayAndHour.values) {
+      for (final v in hourMap.values) {
+        if (v > maxVal) maxVal = v;
+      }
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
+          children: [
+            Icon(Icons.grid_on, size: 20, color: Colors.deepOrange),
+            SizedBox(width: 8),
+            Text('Mapa de calor (días × horas)',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+          ],
+        ),
+        const SizedBox(height: 8),
+        if (tripsByDayAndHour.isEmpty)
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Center(
+                child: Text('Sin datos para el mapa de calor',
+                    style: TextStyle(color: Colors.grey[500])),
+              ),
+            ),
+          )
+        else
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // Header de horas
+                Row(
+                  children: [
+                    const SizedBox(width: 36), // espacio para labels de días
+                    ...List.generate(24, (h) => _HeatCell(
+                      size: 16,
+                      color: Colors.transparent,
+                      child: Text(
+                        h % 3 == 0 ? '$h' : '',
+                        style: const TextStyle(fontSize: 7, color: Colors.grey),
+                        textAlign: TextAlign.center,
+                      ),
+                    )),
+                  ],
+                ),
+                // Filas por día de la semana (1=Lun..7=Dom)
+                ...List.generate(7, (di) {
+                  final dow = di + 1;
+                  final hourMap = tripsByDayAndHour[dow] ?? {};
+                  return Row(
+                    children: [
+                      SizedBox(
+                        width: 36,
+                        child: Text(
+                          _dayLabels[di],
+                          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600),
+                          textAlign: TextAlign.right,
+                        ),
+                      ),
+                      const SizedBox(width: 2),
+                      ...List.generate(24, (h) {
+                        final count = hourMap[h] ?? 0;
+                        final intensity = maxVal > 0 ? count / maxVal : 0.0;
+                        final color = _heatColor(intensity);
+                        return Tooltip(
+                          message: count > 0
+                              ? '${_dayLabels[di]} ${h}h: $count carreras'
+                              : '',
+                          child: _HeatCell(size: 16, color: color),
+                        );
+                      }),
+                    ],
+                  );
+                }),
+                // Leyenda
+                const SizedBox(height: 6),
+                Row(
+                  children: [
+                    const SizedBox(width: 38),
+                    const Text('0', style: TextStyle(fontSize: 9, color: Colors.grey)),
+                    const SizedBox(width: 4),
+                    ...List.generate(5, (i) {
+                      return _HeatCell(size: 12, color: _heatColor(i / 4));
+                    }),
+                    const SizedBox(width: 4),
+                    const Text('máx', style: TextStyle(fontSize: 9, color: Colors.grey)),
+                  ],
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+
+  static Color _heatColor(double intensity) {
+    if (intensity <= 0) return Colors.grey.shade100;
+    // Gradiente: gris claro → naranja → rojo
+    if (intensity < 0.5) {
+      return Color.lerp(Colors.grey.shade200, Colors.orange.shade400,
+          intensity * 2)!;
+    }
+    return Color.lerp(
+        Colors.orange.shade400, Colors.red.shade700, (intensity - 0.5) * 2)!;
+  }
+}
+
+class _HeatCell extends StatelessWidget {
+  final double size;
+  final Color color;
+  final Widget? child;
+
+  const _HeatCell({required this.size, required this.color, this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: size,
+      height: size,
+      margin: const EdgeInsets.all(1),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(2),
+      ),
+      child: child,
     );
   }
 }

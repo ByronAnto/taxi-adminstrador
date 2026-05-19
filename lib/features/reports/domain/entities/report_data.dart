@@ -35,6 +35,11 @@ class ReportData extends Equatable {
   /// Destinos más frecuentes
   final List<DestinationReportItem> frequentDestinations;
 
+  /// Mapa de calor: día de la semana (1=Lun..7=Dom) x hora (0-23) → count.
+  /// Estructura: `tripsByDayAndHour[1][8] = 23` significa que los lunes
+  /// a las 8am hay en promedio 23 carreras (acumulado del periodo).
+  final Map<int, Map<int, int>> tripsByDayAndHour;
+
   const ReportData({
     required this.period,
     required this.fromDate,
@@ -53,6 +58,7 @@ class ReportData extends Equatable {
     this.topDrivers = const [],
     this.paymentMethodDistribution = const {},
     this.frequentDestinations = const [],
+    this.tripsByDayAndHour = const {},
   });
 
   @override
@@ -74,6 +80,7 @@ class ReportData extends Equatable {
         topDrivers,
         paymentMethodDistribution,
         frequentDestinations,
+        tripsByDayAndHour,
       ];
 }
 
@@ -85,16 +92,29 @@ class DriverReportItem extends Equatable {
   final double income;
   final double rating;
 
+  /// Hora con más carreras del conductor (0-23).
+  final int peakHour;
+
+  /// Cantidad de carreras en la hora pico.
+  final int peakHourCount;
+
+  /// Distribución de carreras por origen, ej: {standQueue: 12, street: 5}.
+  final Map<String, int> bySource;
+
   const DriverReportItem({
     required this.driverId,
     required this.name,
     required this.tripCount,
     required this.income,
     this.rating = 0.0,
+    this.peakHour = 0,
+    this.peakHourCount = 0,
+    this.bySource = const {},
   });
 
   @override
-  List<Object?> get props => [driverId, name, tripCount, income, rating];
+  List<Object?> get props =>
+      [driverId, name, tripCount, income, rating, peakHour, peakHourCount, bySource];
 }
 
 /// Datos de un destino frecuente
