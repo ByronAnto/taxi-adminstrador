@@ -25,6 +25,7 @@ import 'core/services/claims_refresh_service.dart';
 import 'core/services/queue_alert_service.dart';
 import 'core/services/single_session_service.dart';
 import 'core/services/version_gate_service.dart';
+import 'core/services/voice/voice_provider_factory.dart';
 import 'core/widgets/force_update_screen.dart';
 import 'core/widgets/connectivity_banner.dart';
 import 'config/injection/injection.dart';
@@ -239,6 +240,10 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                 FcmTokenService.instance.bind(user.uid);
                 // Cargar theme custom de la asociación (logo + colores).
                 AssociationThemeService.instance.loadFor(user.associationId);
+                // Seleccionar provider de audio (Agora|LiveKit) según el
+                // flag `voiceProvider` en associations/{id}. Default Agora.
+                // Rollback en 5 s cambiando el campo en Firestore + reinicio.
+                VoiceProviderFactory.selectFor(user.associationId);
                 // Inicializar GPS para conductores y admins con vehículo
                 if (user.role == AppConstants.roleDriver ||
                     (user.role == AppConstants.roleAdmin &&

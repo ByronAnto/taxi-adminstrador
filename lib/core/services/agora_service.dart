@@ -8,6 +8,8 @@ import 'package:flutter/foundation.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'voice/voice_provider.dart';
+
 /// Servicio singleton para audio en tiempo real con Agora RTC.
 ///
 /// Implementa el patrón walkie-talkie PTT (Push-to-Talk):
@@ -22,7 +24,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 /// Cambio v3 (seguridad): App Certificate ya NO está en el cliente.
 /// Los tokens se obtienen de la Cloud Function `generateAgoraToken`,
 /// que también devuelve el App ID. El cliente no conoce credenciales.
-class AgoraService {
+class AgoraService implements VoiceProvider {
   AgoraService._();
   static final AgoraService instance = AgoraService._();
 
@@ -81,15 +83,21 @@ class AgoraService {
   /// walkie lo usa para auto-soltar el PTT si nadie habla por X segundos.
   void Function(bool active)? onLocalVoiceActivity;
 
+  @override
   bool get isInitialized => _isInitialized;
+  @override
   bool get isInChannel => _isInChannel;
+  @override
   bool get isMicMuted => !_isMicPublishing;
   bool get isRemoteAudioMuted => _isRemoteAudioMuted;
+  @override
   String? get currentChannelId => _currentChannelId;
 
   /// true cuando el canal está "parked" — engine vivo pero fuera del
   /// canal Agora por inactividad. Listo para `resumeFromPark()` instantáneo.
+  @override
   bool get isParked => _parkedChannelId != null;
+  @override
   String? get parkedChannelId => _parkedChannelId;
 
   void _log(String msg) => debugPrint('[AgoraService] $msg');
@@ -270,6 +278,7 @@ class AgoraService {
 
   /// Inicializa el engine. Requiere un [channelHint] para obtener el
   /// App ID desde el servidor antes de crear el engine.
+  @override
   Future<void> initialize({String? channelHint}) async {
     if (_isInitialized) return;
 
@@ -503,6 +512,7 @@ class AgoraService {
 
   /// Se une a un canal Agora. Todos entran SIN publicar micrófono.
   /// El mic se activa solo con PTT (unmuteMic → publishMicrophoneTrack: true).
+  @override
   Future<void> joinChannel(String channelId) async {
     try {
       await _ensureInitialized(channelHint: channelId);
@@ -581,6 +591,7 @@ class AgoraService {
 
   /// Sale del canal Agora actual.
   /// Deshabilita local audio primero para liberar el micrófono hardware.
+  @override
   Future<void> leaveChannel() async {
     if (_engine == null) return;
     try {
@@ -611,6 +622,7 @@ class AgoraService {
   /// **Mic release invariant:** `enableLocalAudio(false)` se llama antes
   /// del `leaveChannel()` interno, así que el mic hardware queda libre
   /// para otras apps mientras estamos parked.
+  @override
   Future<void> parkChannel() async {
     if (_engine == null || !_isInChannel) return;
     final cid = _currentChannelId;
@@ -634,6 +646,7 @@ class AgoraService {
   ///
   /// Devuelve `true` si se reconectó (o si ya estaba en canal); `false` si
   /// no había canal parked.
+  @override
   Future<bool> resumeFromPark() async {
     if (_isInChannel) return true;
     final cid = _parkedChannelId;
@@ -656,6 +669,7 @@ class AgoraService {
 
   /// Libera el micrófono hardware sin salir del canal.
   /// Útil cuando la app va a segundo plano.
+  @override
   Future<void> releaseAudioCapture() async {
     if (_engine == null) return;
     try {
@@ -680,6 +694,7 @@ class AgoraService {
   /// el bug "al volver del background no se escucha". Android frecuentemente
   /// le saca el audio focus a la app cuando pasa a background y al volver
   /// no lo reclama solo — hay que pedirlo explícito.
+  @override
   Future<void> resumeAudioReceive() async {
     if (_engine == null || !_isInChannel) return;
     try {
@@ -701,6 +716,7 @@ class AgoraService {
   /// del sistema operativo. Esto es NECESARIO para que Android no reporte
   /// "en llamada" a otras apps (Zello, WhatsApp, etc.).
   /// Guarda el canal actual para poder reconectar al volver.
+  @override
   Future<void> destroyEngine() async {
     // Si estamos parked, preferir el canal parked como "último" — así si
     // alguien llama a destroy estando parked y luego rearma, sabe a dónde
@@ -814,6 +830,7 @@ class AgoraService {
   /// Activa la publicación del micrófono — llamar al PRESIONAR PTT.
   /// Pasa el role a Broadcaster para poder publicar audio. Esto es lo que
   /// activa la sesión de captura del SO, así que solo ocurre durante PTT.
+  @override
   Future<void> unmuteMic() async {
     if (_engine == null || !_isInChannel) {
       _log('unmuteMic ignorado: engine=$_engine isInChannel=$_isInChannel');
@@ -838,6 +855,7 @@ class AgoraService {
   /// Detiene la publicación del micrófono — llamar al SOLTAR PTT.
   /// Vuelve el role a Audience: deja de capturar el mic y libera la sesión
   /// de audio del SO, así WhatsApp/Zello pueden usar el micrófono.
+  @override
   Future<void> muteMic() async {
     if (_engine == null || !_isInChannel) return;
     try {
@@ -907,6 +925,7 @@ class AgoraService {
 
   // ─────────────────── Permisos ───────────────────
 
+  @override
   Future<bool> hasMicPermission() async {
     return await Permission.microphone.isGranted;
   }
