@@ -12,6 +12,7 @@ import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../associations/data/models/association_model.dart';
+import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../users/data/models/driver_model.dart';
 import '../../data/models/taxi_stand_model.dart';
@@ -625,7 +626,8 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
   }
 
   Set<Marker> _buildMarkers(
-      List<DriverModel> drivers, List<TaxiStandModel> stands) {
+      List<DriverModel> drivers, List<TaxiStandModel> stands,
+      {bool isOpOrAdmin = false}) {
     final markers = <Marker>{};
     final myDriverId = DriverLocationService.instance.driverId;
 
@@ -633,6 +635,10 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
     for (final driver in drivers) {
       // Omitir mi propio driver (se muestra como "my_car" ámbar)
       if (myDriverId != null && driver.uid == myDriverId) continue;
+
+      // Conductor: no ve marcadores de otros conductores.
+      // Admin/operadora sí ve todos.
+      if (!isOpOrAdmin) continue;
 
       final lat = driver.currentLatitude;
       final lng = driver.currentLongitude;
@@ -661,9 +667,12 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
             _statusHue(driver.status)),
         anchor: const Offset(0.5, 0.5),
         flat: true,
-        // Tap rápido = info breve (unidad / nombre / placa).
-        // Long-press del mapa cerca del marker = sheet completo con "Ir aquí".
-        onTap: () => _showDriverInfoCompact(driver),
+        // Admin/op: tap abre el sheet completo con fotos del vehículo.
+        // Conductor: nunca llega aquí (filtro de arriba), pero por las
+        // dudas se deja la rama compacta como fallback.
+        onTap: () => isOpOrAdmin
+            ? _showDriverInfoSheet(driver, stands)
+            : _showDriverInfoCompact(driver),
       ));
     }
 
@@ -706,12 +715,18 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
       appBar: AppBar(title: const Text('Mapa de Conductores')),
       body: BlocBuilder<MapBloc, MapState>(
         builder: (context, state) {
+          final auth = context.watch<AuthBloc>().state;
+          final isOpOrAdmin = auth is AuthAuthenticated &&
+              (auth.user.role == AppConstants.roleOperator ||
+                  auth.user.role == AppConstants.roleAdmin);
+
           final allDrivers =
               state is MapLoaded ? state.activeDrivers : <DriverModel>[];
           final taxiStands =
               state is MapLoaded ? state.taxiStands : <TaxiStandModel>[];
           final drivers = _filteredDrivers(allDrivers);
-          final markers = _buildMarkers(drivers, taxiStands);
+          final markers = _buildMarkers(drivers, taxiStands,
+              isOpOrAdmin: isOpOrAdmin);
           final circles = _buildAccuracyCircles(drivers);
 
           return Stack(
@@ -830,8 +845,8 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
                   ),
                 ),
 
-              // Bottom driver list sheet
-              DraggableScrollableSheet(
+              // Bottom driver list sheet — solo admin/operadora
+              if (isOpOrAdmin) DraggableScrollableSheet(
                 controller: _sheetController,
                 initialChildSize: _sheetMid,
                 minChildSize: _sheetMin,
@@ -1358,139 +1373,270 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
 
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (ctx) {
-        final color = _statusColor(driver.status);
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Handle
-                Center(
-                  child: Container(
-                    margin: const EdgeInsets.only(bottom: 12),
-                    width: 40,
-                    height: 4,
-                    decoration: BoxDecoration(
-                      color: Colors.grey[300],
-                      borderRadius: BorderRadius.circular(2),
-                    ),
-                  ),
-                ),
-                // Encabezado: número + placa + nombre
-                Row(
+        return StreamBuilder<DocumentSnapshot>(
+          stream: FirebaseFirestore.instance
+              .collection('users')
+              .doc(driver.userId)
+              .snapshots(),
+          builder: (_, userSnap) {
+            UserModel? userInfo;
+            if (userSnap.hasData && userSnap.data!.exists) {
+              userInfo = UserModel.fromFirestore(userSnap.data!);
+            }
+
+            final color = _statusColor(driver.status);
+            return SafeArea(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    CircleAvatar(
-                      backgroundColor: color.withValues(alpha: 0.15),
-                      child: Icon(Icons.directions_car, color: color),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(
-                            driver.vehicleNumber.isNotEmpty
-                                ? 'Unidad #${driver.vehicleNumber}'
-                                : 'Conductor ${driver.licenseNumber}',
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 16,
-                            ),
-                          ),
-                          if (driver.plate.isNotEmpty)
-                            Text(
-                              'Placa: ${driver.plate}',
-                              style: const TextStyle(
-                                fontSize: 13,
-                                color: AppTheme.textSecondary,
-                              ),
-                            ),
-                          if (driver.driverName.isNotEmpty)
-                            Text(
-                              driver.driverName,
-                              style: const TextStyle(fontSize: 13),
-                            ),
-                        ],
-                      ),
-                    ),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        color: color.withValues(alpha: 0.15),
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Text(
-                        _statusLabel(driver.status),
-                        style: TextStyle(
-                          fontWeight: FontWeight.w600,
-                          color: color,
-                          fontSize: 13,
+                    // Handle
+                    Center(
+                      child: Container(
+                        margin: const EdgeInsets.only(bottom: 12),
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.grey[300],
+                          borderRadius: BorderRadius.circular(2),
                         ),
                       ),
                     ),
+                    // Encabezado: número + placa + nombre
+                    Row(
+                      children: [
+                        CircleAvatar(
+                          backgroundColor: color.withValues(alpha: 0.15),
+                          child: Icon(Icons.directions_car, color: color),
+                        ),
+                        const SizedBox(width: 12),
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Text(
+                                driver.vehicleNumber.isNotEmpty
+                                    ? 'Unidad #${driver.vehicleNumber}'
+                                    : 'Conductor ${driver.licenseNumber}',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 16,
+                                ),
+                              ),
+                              if (driver.plate.isNotEmpty)
+                                Text(
+                                  'Placa: ${driver.plate}',
+                                  style: const TextStyle(
+                                    fontSize: 13,
+                                    color: AppTheme.textSecondary,
+                                  ),
+                                ),
+                              if (driver.driverName.isNotEmpty)
+                                Text(
+                                  driver.driverName,
+                                  style: const TextStyle(fontSize: 13),
+                                ),
+                            ],
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 10, vertical: 4),
+                          decoration: BoxDecoration(
+                            color: color.withValues(alpha: 0.15),
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: Text(
+                            _statusLabel(driver.status),
+                            style: TextStyle(
+                              fontWeight: FontWeight.w600,
+                              color: color,
+                              fontSize: 13,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    // Acción "Ir" — abre Google Maps con direcciones a este conductor.
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: () {
+                          Navigator.of(ctx).pop();
+                          _openInGoogleMaps(lat, lng,
+                              driver.vehicleNumber.isNotEmpty
+                                  ? 'Unidad ${driver.vehicleNumber}'
+                                  : driver.driverName);
+                        },
+                        icon: const Icon(Icons.directions),
+                        label: const Text('Ir aquí (Google Maps)'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: AppTheme.primaryColor,
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    const Divider(),
+                    const SizedBox(height: 8),
+                    // Distancias a bases
+                    const Text(
+                      'Distancia a bases:',
+                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                    ),
+                    const SizedBox(height: 8),
+                    // Distancia a la parada de la asociación (configurada).
+                    if (_associationStand != null &&
+                        _associationStand!.isConfigured)
+                      _buildDistanceRow(
+                        Icons.home,
+                        _associationStand!.label?.isNotEmpty == true
+                            ? _associationStand!.label!
+                            : 'Parada principal',
+                        _haversineKm(lat, lng, _associationStand!.lat!,
+                            _associationStand!.lng!),
+                      ),
+                    // Paradas de taxi registradas
+                    ...stands.where((s) => s.isActive).map(
+                      (stand) => _buildDistanceRow(
+                        Icons.flag,
+                        stand.name,
+                        _haversineKm(lat, lng, stand.latitude, stand.longitude),
+                      ),
+                    ),
+                    // Fotos del vehículo y licencia
+                    if (userInfo != null) _buildVehiclePhotosSection(userInfo),
                   ],
                 ),
-                const SizedBox(height: 12),
-                // Acción "Ir" — abre Google Maps con direcciones a este conductor.
-                SizedBox(
-                  width: double.infinity,
-                  child: ElevatedButton.icon(
-                    onPressed: () {
-                      Navigator.of(ctx).pop();
-                      _openInGoogleMaps(lat, lng,
-                          driver.vehicleNumber.isNotEmpty
-                              ? 'Unidad ${driver.vehicleNumber}'
-                              : driver.driverName);
-                    },
-                    icon: const Icon(Icons.directions),
-                    label: const Text('Ir aquí (Google Maps)'),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTheme.primaryColor,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(vertical: 12),
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 16),
-                const Divider(),
-                const SizedBox(height: 8),
-                // Distancias a bases
-                const Text(
-                  'Distancia a bases:',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-                ),
-                const SizedBox(height: 8),
-                // Distancia a la parada de la asociación (configurada).
-                if (_associationStand != null &&
-                    _associationStand!.isConfigured)
-                  _buildDistanceRow(
-                    Icons.home,
-                    _associationStand!.label?.isNotEmpty == true
-                        ? _associationStand!.label!
-                        : 'Parada principal',
-                    _haversineKm(lat, lng, _associationStand!.lat!,
-                        _associationStand!.lng!),
-                  ),
-                // Paradas de taxi registradas
-                ...stands.where((s) => s.isActive).map(
-                  (stand) => _buildDistanceRow(
-                    Icons.flag,
-                    stand.name,
-                    _haversineKm(lat, lng, stand.latitude, stand.longitude),
-                  ),
-                ),
-              ],
-            ),
-          ),
+              ),
+            );
+          },
         );
       },
+    );
+  }
+
+  /// Sección de fotos del vehículo y licencia para el sheet de conductor
+  Widget _buildVehiclePhotosSection(UserModel user) {
+    final photos = <_LabeledPhoto>[];
+    if ((user.fotoVehiculo ?? '').isNotEmpty) {
+      photos.add(_LabeledPhoto('Vehículo frontal', user.fotoVehiculo!));
+    }
+    if ((user.fotoLicenciaFrontal ?? '').isNotEmpty) {
+      photos.add(_LabeledPhoto('Licencia frontal', user.fotoLicenciaFrontal!));
+    }
+    if ((user.fotoLicenciaTrasera ?? '').isNotEmpty) {
+      photos.add(_LabeledPhoto('Licencia trasera', user.fotoLicenciaTrasera!));
+    }
+    if (photos.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 8),
+        child: Text(
+          'Sin fotos registradas para este conductor',
+          style: TextStyle(fontStyle: FontStyle.italic, color: Colors.grey),
+        ),
+      );
+    }
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const SizedBox(height: 12),
+        const Divider(),
+        const SizedBox(height: 8),
+        const Text(
+          'Fotos del vehículo y licencia',
+          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+        ),
+        const SizedBox(height: 8),
+        SizedBox(
+          height: 110,
+          child: ListView.separated(
+            scrollDirection: Axis.horizontal,
+            itemCount: photos.length,
+            separatorBuilder: (ctx2, idx) => const SizedBox(width: 8),
+            itemBuilder: (ctx2, i) {
+              final p = photos[i];
+              return GestureDetector(
+                onTap: () => _showPhotoFullscreen(p.url, p.label),
+                child: Column(
+                  children: [
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(8),
+                      child: Image.network(
+                        p.url,
+                        width: 130,
+                        height: 90,
+                        fit: BoxFit.cover,
+                        errorBuilder: (ctx3, err, stack) => Container(
+                          width: 130,
+                          height: 90,
+                          color: Colors.grey.shade300,
+                          child: const Icon(Icons.broken_image,
+                              color: Colors.grey),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(p.label,
+                        style: const TextStyle(fontSize: 10),
+                        overflow: TextOverflow.ellipsis),
+                  ],
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _showPhotoFullscreen(String url, String label) {
+    showDialog(
+      context: context,
+      builder: (ctx) => Dialog(
+        backgroundColor: Colors.black,
+        insetPadding: const EdgeInsets.all(12),
+        child: Stack(
+          children: [
+            InteractiveViewer(
+              minScale: 0.5,
+              maxScale: 4,
+              child: Center(
+                child: Image.network(url),
+              ),
+            ),
+            Positioned(
+              top: 12,
+              right: 12,
+              child: IconButton(
+                icon: const Icon(Icons.close, color: Colors.white, size: 32),
+                onPressed: () => Navigator.of(ctx).pop(),
+              ),
+            ),
+            Positioned(
+              top: 12,
+              left: 12,
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                color: Colors.black54,
+                child: Text(label,
+                    style: const TextStyle(
+                        color: Colors.white, fontSize: 14)),
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -1533,4 +1679,11 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
       ),
     );
   }
+}
+
+/// Foto con etiqueta para la sección de fotos del conductor en el sheet.
+class _LabeledPhoto {
+  final String label;
+  final String url;
+  const _LabeledPhoto(this.label, this.url);
 }
