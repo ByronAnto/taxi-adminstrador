@@ -65,6 +65,20 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// Último channelId al que nos unimos en Agora (para detectar cambios)
   String? _lastAgoraChannelId;
 
+  // ─── Auto-disconnect por inactividad ───
+  /// Última vez que vimos a alguien hablando en el canal. Si pasa más de
+  /// [_idleParkAfterSeconds] sin actividad, hacemos `parkChannel()` para
+  /// dejar de quemar minutos Agora mientras el canal está mudo. El engine
+  /// sigue vivo así que `resumeFromPark()` reconecta en ~300 ms cuando
+  /// alguien arranca de nuevo.
+  DateTime? _lastChannelActivityAt;
+  Timer? _idleParkTimer;
+
+  /// Segundos sin actividad de speaker antes de auto-park. 30 s es buen
+  /// balance: corto para ahorrar costos, largo para no reconectar cada
+  /// pausa breve en una conversación viva.
+  static const int _idleParkAfterSeconds = 30;
+
 
   /// Estado de la grabación local del audio del canal (historial 24h).
   String? _recordingEntryId;
@@ -142,6 +156,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     _overlayService.onStateChanged = null;
     _recordingTimer?.cancel();
     _durationTimer?.cancel();
+    _idleParkTimer?.cancel();
+    _idleParkTimer = null;
     // Si quedó una grabación abierta, cerrarla para no perder metadata.
     _stopLocalRecordingIfAny();
     // ⚠️ IMPORTANTE: NO destruimos el engine Agora ni el foreground
@@ -319,6 +335,48 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     if (mounted) setState(() {}); // Refrescar la lista del historial
   }
 
+  // ─────────── Auto-park por inactividad (ahorro de costos Agora) ───────────
+
+  /// Arranca (si no está corriendo) el timer que monitorea inactividad
+  /// del canal. Sólo tiene efecto cuando estamos en canal Agora con el
+  /// radio ON — el `parkChannel()` requiere ambos.
+  void _armIdleTimer() {
+    if (_idleParkTimer != null) return;
+    _lastChannelActivityAt ??= DateTime.now();
+    _idleParkTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!mounted) return;
+      if (!_radioPower.isOn) return;
+      if (_isOffline) return;
+      if (_isRecording) return; // estoy hablando, claramente activo
+      if (!_agoraService.isInChannel) return;
+      // Si hay alguien hablando ahora mismo, refrescá la marca y salí.
+      final commState = context.read<CommunicationBloc>().state;
+      if (commState is CommunicationLoaded && commState.isPttLocked) {
+        _lastChannelActivityAt = DateTime.now();
+        return;
+      }
+      final last = _lastChannelActivityAt;
+      if (last == null) {
+        _lastChannelActivityAt = DateTime.now();
+        return;
+      }
+      final idleSec = DateTime.now().difference(last).inSeconds;
+      if (idleSec >= _idleParkAfterSeconds) {
+        debugPrint(
+            '🅿️ WalkieTalkie: $idleSec s sin speaker → parkChannel()');
+        _agoraService.parkChannel().catchError((e) {
+          debugPrint('Error parkChannel: $e');
+        });
+      }
+    });
+  }
+
+  void _disarmIdleTimer() {
+    _idleParkTimer?.cancel();
+    _idleParkTimer = null;
+    _lastChannelActivityAt = null;
+  }
+
   /// Reacciona al toggle ON/OFF del walkie-talkie.
   ///
   /// - ON  → inicializa Agora, se une al canal activo (si hay), arranca el
@@ -347,6 +405,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           if (channelName != null && !_radioService.isRunning) {
             await _radioService.startService(channelName);
           }
+          // Empezar a monitorear inactividad del canal para auto-park.
+          _armIdleTimer();
         }
       } catch (e) {
         debugPrint('Error encendiendo radio: $e');
@@ -360,6 +420,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           _stopPtt(currentState);
         }
       }
+      // Frenar el monitor de inactividad antes de destruir el engine.
+      _disarmIdleTimer();
       // Salir de Agora y destruir engine — libera mic hardware
       await _agoraService.destroyEngine();
       _lastAgoraChannelId = null;
@@ -460,11 +522,31 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             _agoraService.joinChannel(channelId).catchError((e) {
               debugPrint('Error Agora joinChannel: $e');
             });
+            _armIdleTimer();
           } else if (channelId == null && _lastAgoraChannelId != null) {
             _lastAgoraChannelId = null;
+            _disarmIdleTimer();
             _agoraService.leaveChannel().catchError((e) {
               debugPrint('Error Agora leaveChannel: $e');
             });
+          }
+
+          // === Auto-resume desde park ===
+          // Si el canal estaba parked por inactividad y alguien acaba de
+          // arrancar a hablar, volvemos a conectar para escucharlo.
+          // ~300 ms de delay vs. estar siempre conectado, pero deja de
+          // facturar minutos Agora durante los silencios.
+          if (state.isPttLocked && _agoraService.isParked && !_isOffline) {
+            _agoraService.resumeFromPark().catchError((e) {
+              debugPrint('Error resumeFromPark: $e');
+              return false;
+            });
+          }
+          // Refrescar la marca de actividad cada vez que vemos a alguien
+          // hablando → el timer de inactividad no nos sacará en medio
+          // de una conversación.
+          if (state.isPttLocked) {
+            _lastChannelActivityAt = DateTime.now();
           }
 
           if (channelName != null) {
@@ -1528,6 +1610,31 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         );
       }
       return;
+    }
+
+    // ── Auto-resume desde park ──
+    // Si el canal está parked por inactividad, hay que volver a Agora
+    // antes de poder transmitir. ~300 ms en buena red. Mostramos
+    // feedback al usuario para que entienda el delay.
+    if (_agoraService.isParked) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Conectando...'),
+            duration: Duration(milliseconds: 1500),
+          ),
+        );
+      }
+      final ok = await _agoraService.resumeFromPark();
+      if (!ok && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No se pudo reconectar al canal. Intentá de nuevo.'),
+            backgroundColor: Colors.orange,
+          ),
+        );
+        return;
+      }
     }
 
     setState(() {

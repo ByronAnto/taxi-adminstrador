@@ -62,6 +62,12 @@ class AgoraService {
   String? _currentChannelId;
   int _localUid = 0;
 
+  /// Canal "estacionado": cuando hacemos `parkChannel()` (auto-disconnect
+  /// por inactividad) guardamos acá el canal del que salimos. El engine
+  /// sigue vivo, sólo dejamos de pagar minutos en Agora. `resumeFromPark()`
+  /// re-une al mismo canal cuando alguien empieza a hablar.
+  String? _parkedChannelId;
+
   // Cache de tokens por canal
   final Map<String, _CachedToken> _tokenCache = {};
 
@@ -80,6 +86,11 @@ class AgoraService {
   bool get isMicMuted => !_isMicPublishing;
   bool get isRemoteAudioMuted => _isRemoteAudioMuted;
   String? get currentChannelId => _currentChannelId;
+
+  /// true cuando el canal está "parked" — engine vivo pero fuera del
+  /// canal Agora por inactividad. Listo para `resumeFromPark()` instantáneo.
+  bool get isParked => _parkedChannelId != null;
+  String? get parkedChannelId => _parkedChannelId;
 
   void _log(String msg) => debugPrint('[AgoraService] $msg');
 
@@ -582,7 +593,65 @@ class AgoraService {
     _isInChannel = false;
     _currentChannelId = null;
     _isMicPublishing = false;
+    // leaveChannel() es desconexión intencional (radio OFF / cambio de canal):
+    // limpiamos también el park para que un siguiente resumeFromPark() no
+    // intente reconectar a un canal viejo.
+    _parkedChannelId = null;
     _log('Salió del canal Agora (mic liberado)');
+  }
+
+  /// "Estaciona" el canal: sale de Agora (deja de facturar minutos) pero
+  /// recuerda el canal para reconexión rápida. El engine sigue vivo.
+  ///
+  /// Pensado para auto-disconnect por inactividad: nadie habla por X
+  /// segundos → llamamos a `parkChannel()` para no quemar minutos Agora
+  /// mientras el canal está mudo. Cuando alguien arranca a hablar
+  /// (currentSpeakerId cambia de null → uid) llamamos a `resumeFromPark()`.
+  ///
+  /// **Mic release invariant:** `enableLocalAudio(false)` se llama antes
+  /// del `leaveChannel()` interno, así que el mic hardware queda libre
+  /// para otras apps mientras estamos parked.
+  Future<void> parkChannel() async {
+    if (_engine == null || !_isInChannel) return;
+    final cid = _currentChannelId;
+    if (cid == null) return;
+    try {
+      await _engine!.enableLocalAudio(false);
+      await _engine!.leaveChannel();
+    } catch (e) {
+      _log('Error parkChannel: $e');
+      return;
+    }
+    _isInChannel = false;
+    _currentChannelId = null;
+    _isMicPublishing = false;
+    _parkedChannelId = cid;
+    _log('🅿️ Canal "$cid" PARKED (engine vivo, no facturando minutos)');
+  }
+
+  /// Reconecta al canal parked. Idempotente: si ya estamos en canal o no
+  /// hay nada parked, no hace nada.
+  ///
+  /// Devuelve `true` si se reconectó (o si ya estaba en canal); `false` si
+  /// no había canal parked.
+  Future<bool> resumeFromPark() async {
+    if (_isInChannel) return true;
+    final cid = _parkedChannelId;
+    if (cid == null) return false;
+    _log('🅿️▶️ resumeFromPark — reuniéndome a "$cid"');
+    _parkedChannelId = null; // limpiamos antes del join para evitar bucles
+    try {
+      await joinChannel(cid);
+      // joinChannel actualiza _isInChannel vía callback async, esperamos
+      // brevemente para que la UI vea el estado actualizado.
+      for (int i = 0; i < 60 && !_isInChannel; i++) {
+        await Future.delayed(const Duration(milliseconds: 50));
+      }
+      return _isInChannel;
+    } catch (e) {
+      _log('Error resumeFromPark: $e');
+      return false;
+    }
   }
 
   /// Libera el micrófono hardware sin salir del canal.
@@ -633,7 +702,11 @@ class AgoraService {
   /// "en llamada" a otras apps (Zello, WhatsApp, etc.).
   /// Guarda el canal actual para poder reconectar al volver.
   Future<void> destroyEngine() async {
-    _lastChannelBeforeDestroy = _currentChannelId;
+    // Si estamos parked, preferir el canal parked como "último" — así si
+    // alguien llama a destroy estando parked y luego rearma, sabe a dónde
+    // volver.
+    _lastChannelBeforeDestroy = _currentChannelId ?? _parkedChannelId;
+    _parkedChannelId = null;
     _log('🔥 destroyEngine — guardando canal: $_lastChannelBeforeDestroy');
     try {
       if (_isInChannel && _engine != null) {
