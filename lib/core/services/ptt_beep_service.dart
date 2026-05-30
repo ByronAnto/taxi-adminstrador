@@ -163,12 +163,22 @@ class PttBeepService {
     // Sólo se usa cuando el engine Agora NO está vivo (ej: radio OFF,
     // arranque temprano de la app). En esos escenarios no hay MIUI
     // bloqueando porque tampoco hay MODE_IN_COMMUNICATION activo.
+    // IMPORTANTE: audioplayers NO soporta BytesSource en PlayerMode.lowLatency
+    // ("Bytes sources are not supported on LOW_LATENCY mode yet"). Como los WAV
+    // ya están escritos en disco, reproducimos el ARCHIVO (DeviceFileSource),
+    // que sí funciona en lowLatency. Esto es lo que usa LiveKit (playLocalEffect
+    // devuelve false → cae a este fallback).
+    final fp = filePath ?? _startPath;
     final b = bytes ?? _startBytes;
-    if (b == null) return;
+    if (fp == null && b == null) return;
     try {
       await _applyContext();
       await _player.stop();
-      await _player.play(BytesSource(b), mode: PlayerMode.lowLatency);
+      if (fp != null) {
+        await _player.play(DeviceFileSource(fp), mode: PlayerMode.lowLatency);
+      } else {
+        await _player.play(BytesSource(b!), mode: PlayerMode.mediaPlayer);
+      }
       debugPrint('🔔 PttBeepService: beep via AudioPlayer fallback');
     } catch (e) {
       debugPrint('PttBeepService._play error: $e');

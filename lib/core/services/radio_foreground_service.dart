@@ -18,6 +18,12 @@ class RadioForegroundService {
   bool _isRunning = false;
   bool _isStarting = false;
   String? _activeChannelName;
+  // El FGS (flutter_foreground_task, único) se comparte entre dos motivos:
+  // radio (microphone/mediaPlayback) y ubicación (location). Corre mientras
+  // CUALQUIERA esté activo. Esto permite que "Activo General" mantenga el GPS
+  // vivo en background aunque el radio esté apagado.
+  bool _radioActive = false;
+  bool _locationActive = false;
   VoidCallback? _connListener;
   bool _showingOfflineNotif = false;
 
@@ -115,14 +121,35 @@ class RadioForegroundService {
   ///     pedimos ignorar optimizaciones (silenciosamente — el usuario
   ///     ya tendrá la notificación de permiso si Android la requiere).
   Future<void> startService(String channelName) async {
-    if (_isRunning || _isStarting) {
-      // Ya corriendo o en proceso, solo actualizar notificación
-      if (_isRunning) await _safeUpdateNotification(channelName);
+    _radioActive = true;
+    _activeChannelName = channelName;
+    await _ensureRunning();
+  }
+
+  /// Activa/desactiva el FGS por motivo "ubicación" (Activo General).
+  /// Mientras esté activo, el foreground service (tipo location) mantiene la
+  /// app viva y el GPS fluyendo en background — el admin/operadora siempre ven
+  /// la unidad. Comparte el MISMO FGS con el radio.
+  Future<void> setLocationTracking(bool active) async {
+    if (_locationActive == active) return;
+    _locationActive = active;
+    if (active) {
+      await _ensureRunning();
+    } else {
+      await _reconcile();
+    }
+  }
+
+  /// Arranca el FGS si no corre (idempotente); si ya corre, refresca la
+  /// notificación. Usado por radio y ubicación.
+  Future<void> _ensureRunning() async {
+    if (_isRunning) {
+      await _refreshNotification();
       return;
     }
+    if (_isStarting) return;
 
     _isStarting = true;
-    _activeChannelName = channelName;
 
     try {
       // ─── Permiso 1: POST_NOTIFICATIONS (Android 13+) ───
@@ -166,19 +193,19 @@ class RadioForegroundService {
       } catch (_) {}
 
       // ─── Intentar arrancar (con 1 retry tras 500ms si falla) ───
-      var result = await _tryStartService(channelName);
+      var result = await _tryStartService();
       if (result is! ServiceRequestSuccess) {
         _logger.w('startService falló al primer intento, reintentando...');
         await Future.delayed(const Duration(milliseconds: 500));
-        result = await _tryStartService(channelName);
+        result = await _tryStartService();
       }
 
       if (result is ServiceRequestSuccess) {
         _isRunning = true;
-        _logger.i('Radio foreground service started for channel: $channelName');
+        _logger.i('Foreground service started '
+            '(radio=$_radioActive, location=$_locationActive)');
       } else {
-        _logger.e(
-            'Failed to start radio foreground service tras retry: $result');
+        _logger.e('Failed to start foreground service tras retry: $result');
       }
     } catch (e) {
       _logger.e('Exception starting foreground service: $e');
@@ -187,11 +214,31 @@ class RadioForegroundService {
     }
   }
 
-  Future<ServiceRequestResult> _tryStartService(String channelName) async {
+  // Notificación según el motivo activo (radio tiene prioridad de texto).
+  String get _notifTitle =>
+      _radioActive ? '📻 Radio Activo' : '📍 Enviando ubicación';
+  String get _notifText => _radioActive
+      ? 'Canal: ${_activeChannelName ?? ""} — Escuchando...'
+      : 'Tu ubicación es visible para la operadora';
+
+  /// Refresca la notificación al estado actual (cambio de motivo radio↔ubicación).
+  Future<void> _refreshNotification() async {
+    if (!_isRunning) return;
+    try {
+      await FlutterForegroundTask.updateService(
+        notificationTitle: _notifTitle,
+        notificationText: _notifText,
+      );
+    } catch (e) {
+      _logger.e('Error refrescando notificación FGS: $e');
+    }
+  }
+
+  Future<ServiceRequestResult> _tryStartService() async {
     try {
       return await FlutterForegroundTask.startService(
-        notificationTitle: '📻 Radio Activo',
-        notificationText: 'Canal: $channelName — Escuchando...',
+        notificationTitle: _notifTitle,
+        notificationText: _notifText,
         callback: _radioTaskCallback,
       );
     } catch (e) {
@@ -225,14 +272,32 @@ class RadioForegroundService {
     await _safeUpdateNotification(channelName);
   }
 
-  /// Detiene el foreground service al salir del radio o cerrar sesión.
+  /// El radio dejó de necesitar el FGS. NO apaga el servicio si la ubicación
+  /// (Activo General) aún lo necesita — solo reconcilia.
+  Future<void> stopService() async {
+    _radioActive = false;
+    _activeChannelName = null;
+    await _reconcile();
+  }
+
+  /// Decide si el FGS debe seguir corriendo: corre si radio O ubicación están
+  /// activos. Si ninguno → lo detiene; si sigue uno → refresca la notificación.
+  Future<void> _reconcile() async {
+    if (!_radioActive && !_locationActive) {
+      await _doStop();
+    } else if (_isRunning) {
+      await _refreshNotification();
+    }
+  }
+
+  /// Detiene realmente el foreground service.
   ///
   /// Si el plugin devuelve `ServiceRequestFailure` significa que Android
   /// ya consideraba el FGS detenido (típico tras hot-reload, cold-start
   /// con FGS huérfano, o pérdida de permisos en Android 14+). En ese
   /// caso no es un error crítico: forzamos reset de los flags internos
   /// para que el próximo `startService` funcione.
-  Future<void> stopService() async {
+  Future<void> _doStop() async {
     if (!_isRunning) return;
 
     // Verificar primero si el FGS realmente está corriendo a nivel

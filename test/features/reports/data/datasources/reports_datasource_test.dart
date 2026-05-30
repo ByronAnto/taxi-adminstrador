@@ -71,7 +71,8 @@ void main() {
     ];
 
     for (final trip in todayTrips) {
-      await fs.collection('trips').add(trip);
+      // El datasource ahora filtra por tenant; sembramos el associationId.
+      await fs.collection('trips').add({...trip, 'associationId': 'assoc1'});
     }
 
     // Viajes del periodo anterior (ayer)
@@ -95,7 +96,7 @@ void main() {
     ];
 
     for (final trip in yesterdayTrips) {
-      await fs.collection('trips').add(trip);
+      await fs.collection('trips').add({...trip, 'associationId': 'assoc1'});
     }
   }
 
@@ -108,6 +109,7 @@ void main() {
   group('ReportsRemoteDatasource', () {
     test('retorna ReportData con conteos correctos', () async {
       final result = await datasource.getReportData(
+        associationId: 'assoc1',
         period: 'Hoy',
         fromDate: todayStart,
         toDate: now,
@@ -127,6 +129,7 @@ void main() {
 
     test('calcula ingresos correctamente', () async {
       final result = await datasource.getReportData(
+        associationId: 'assoc1',
         period: 'Hoy',
         fromDate: todayStart,
         toDate: now,
@@ -142,6 +145,7 @@ void main() {
 
     test('genera tripsByHour correctamente', () async {
       final result = await datasource.getReportData(
+        associationId: 'assoc1',
         period: 'Hoy',
         fromDate: todayStart,
         toDate: now,
@@ -158,6 +162,7 @@ void main() {
 
     test('genera dailyRevenue correctamente', () async {
       final result = await datasource.getReportData(
+        associationId: 'assoc1',
         period: 'Hoy',
         fromDate: todayStart,
         toDate: now,
@@ -172,6 +177,7 @@ void main() {
 
     test('genera top conductores ordenados por viajes', () async {
       final result = await datasource.getReportData(
+        associationId: 'assoc1',
         period: 'Hoy',
         fromDate: todayStart,
         toDate: now,
@@ -193,6 +199,7 @@ void main() {
 
     test('calcula distribucion de pago correctamente', () async {
       final result = await datasource.getReportData(
+        associationId: 'assoc1',
         period: 'Hoy',
         fromDate: todayStart,
         toDate: now,
@@ -209,6 +216,7 @@ void main() {
 
     test('genera destinos frecuentes ordenados', () async {
       final result = await datasource.getReportData(
+        associationId: 'assoc1',
         period: 'Hoy',
         fromDate: todayStart,
         toDate: now,
@@ -224,6 +232,7 @@ void main() {
 
     test('cuenta conductores activos correctamente', () async {
       final result = await datasource.getReportData(
+        associationId: 'assoc1',
         period: 'Hoy',
         fromDate: todayStart,
         toDate: now,
@@ -238,6 +247,7 @@ void main() {
 
     test('calcula tendencias vs periodo anterior', () async {
       final result = await datasource.getReportData(
+        associationId: 'assoc1',
         period: 'Hoy',
         fromDate: todayStart,
         toDate: now,
@@ -257,6 +267,7 @@ void main() {
 
     test('funciona sin periodo anterior (sin tendencias)', () async {
       final result = await datasource.getReportData(
+        associationId: 'assoc1',
         period: 'Hoy',
         fromDate: todayStart,
         toDate: now,
@@ -273,6 +284,7 @@ void main() {
       final emptyDs = ReportsRemoteDatasource(firestore: emptyFs);
 
       final result = await emptyDs.getReportData(
+        associationId: 'assoc1',
         period: 'Hoy',
         fromDate: todayStart,
         toDate: now,

@@ -10,6 +10,7 @@ class ReportsRepositoryImpl implements ReportsRepository {
 
   @override
   Future<ReportData> getReportData({
+    required String associationId,
     required String period,
     required DateTime fromDate,
     required DateTime toDate,
@@ -20,6 +21,7 @@ class ReportsRepositoryImpl implements ReportsRepository {
       toDate: toDate,
     );
     return remoteDatasource.getReportData(
+      associationId: associationId,
       period: period,
       fromDate: fromDate,
       toDate: toDate,

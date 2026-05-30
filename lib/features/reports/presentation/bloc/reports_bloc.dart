@@ -10,12 +10,17 @@ abstract class ReportsEvent extends Equatable {
   List<Object?> get props => [];
 }
 
-/// Solicita cargar el reporte para un período
+/// Solicita cargar el reporte para un período.
+///
+/// [associationId] es obligatorio para que la consulta de `trips` filtre por
+/// tenant (las reglas de Firestore deniegan consultas sin este filtro a
+/// usuarios no-superadmin). Lo provee la página desde el usuario autenticado.
 class ReportsLoadRequested extends ReportsEvent {
   final String period;
-  ReportsLoadRequested({this.period = 'Hoy'});
+  final String associationId;
+  ReportsLoadRequested({this.period = 'Hoy', required this.associationId});
   @override
-  List<Object?> get props => [period];
+  List<Object?> get props => [period, associationId];
 }
 
 // ============ STATES ============
@@ -58,12 +63,18 @@ class ReportsBloc extends Bloc<ReportsEvent, ReportsState> {
     ReportsLoadRequested event,
     Emitter<ReportsState> emit,
   ) async {
+    // Sin tenant no podemos consultar (la query sería denegada por reglas).
+    if (event.associationId.isEmpty) {
+      emit(ReportsError('No se pudo determinar la asociación del usuario.'));
+      return;
+    }
     emit(ReportsLoading());
     try {
       final now = DateTime.now();
       final (fromDate, toDate) = _periodToDateRange(event.period, now);
 
       final data = await getReportData(
+        associationId: event.associationId,
         period: event.period,
         fromDate: fromDate,
         toDate: toDate,

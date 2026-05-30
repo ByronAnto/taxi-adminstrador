@@ -23,7 +23,12 @@ interface TripRequest {
   cuandoSolicitado: Date | null;
   paraCuando: Date | null;
   asignadoA: string | null;
+  conductorNombre: string | null;
+  conductorVehiculo: string | null;
   notas: string | null;
+  rating: number | null;
+  ratingComment: string | null;
+  ratedAt: Date | null;
 }
 
 export default function MyTripsPage() {
@@ -51,7 +56,12 @@ export default function MyTripsPage() {
           cuandoSolicitado: x.cuandoSolicitado?.toDate?.() ?? null,
           paraCuando: x.paraCuando?.toDate?.() ?? null,
           asignadoA: (x.asignadoA as string) ?? null,
+          conductorNombre: (x.conductorNombre as string) ?? null,
+          conductorVehiculo: (x.conductorVehiculo as string) ?? null,
           notas: (x.notas as string) ?? null,
+          rating: typeof x.rating === "number" ? (x.rating as number) : null,
+          ratingComment: (x.ratingComment as string) ?? null,
+          ratedAt: x.ratedAt?.toDate?.() ?? null,
         } as TripRequest;
       });
       setItems(list);
@@ -127,6 +137,41 @@ export default function MyTripsPage() {
                   📝 {t.notas}
                 </p>
               )}
+
+              {/* Estado de asignación: se actualiza en vivo vía onSnapshot */}
+              {t.estado === "pendiente" && (
+                <div className="mt-2 bg-yellow-50 border border-yellow-200 text-yellow-900 text-sm rounded-md p-2">
+                  🔎 Buscando unidad… la operadora te asignará un taxi en breve.
+                </div>
+              )}
+              {t.estado === "asignada" && (
+                <div className="mt-2 bg-green-50 border border-green-200 text-green-900 text-sm rounded-md p-2">
+                  <p className="font-semibold">✅ Taxi asignado</p>
+                  {(t.conductorNombre || t.conductorVehiculo) && (
+                    <p className="mt-0.5">
+                      {t.conductorNombre && (
+                        <>
+                          <span className="font-medium">Conductor:</span>{" "}
+                          {t.conductorNombre}
+                        </>
+                      )}
+                      {t.conductorNombre && t.conductorVehiculo && " · "}
+                      {t.conductorVehiculo && (
+                        <>
+                          <span className="font-medium">Vehículo:</span>{" "}
+                          {t.conductorVehiculo}
+                        </>
+                      )}
+                    </p>
+                  )}
+                </div>
+              )}
+              {t.estado === "cancelada" && (
+                <div className="mt-2 bg-gray-100 border border-gray-200 text-gray-700 text-sm rounded-md p-2">
+                  Carrera cancelada
+                </div>
+              )}
+
               {t.estado === "pendiente" && (
                 <button
                   onClick={() => cancel(t.id)}
@@ -134,6 +179,13 @@ export default function MyTripsPage() {
                 >
                   Cancelar
                 </button>
+              )}
+              {t.estado === "finalizada" && (
+                <RateTrip
+                  id={t.id}
+                  rating={t.rating}
+                  ratingComment={t.ratingComment}
+                />
               )}
             </li>
           ))}
@@ -151,6 +203,7 @@ function labelEstado(e: string): string {
       return "Asignada";
     case "rechazada":
       return "Rechazada";
+    case "finalizada":
     case "cumplida":
       return "Completada";
     case "cancelada":
@@ -168,6 +221,7 @@ function badgeClass(e: string): string {
       return base + "bg-amber-100 text-amber-900";
     case "asignada":
       return base + "bg-blue-100 text-blue-900";
+    case "finalizada":
     case "cumplida":
       return base + "bg-green-100 text-green-900";
     case "rechazada":
@@ -176,4 +230,116 @@ function badgeClass(e: string): string {
     default:
       return base + "bg-gray-100 text-gray-700";
   }
+}
+
+function RateTrip({
+  id,
+  rating,
+  ratingComment,
+}: {
+  id: string;
+  rating: number | null;
+  ratingComment: string | null;
+}) {
+  const [stars, setStars] = useState(0);
+  const [hover, setHover] = useState(0);
+  const [comment, setComment] = useState("");
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [done, setDone] = useState(false);
+
+  // Ya calificada (desde Firestore) o recién guardada: modo lectura.
+  if (rating != null || done) {
+    const shown = rating ?? stars;
+    const shownComment = rating != null ? ratingComment : comment.trim() || null;
+    return (
+      <div className="mt-2 border-t border-gray-200 pt-2">
+        <p className="text-sm text-gray-700">
+          <span className="font-medium">Calificaste:</span>{" "}
+          <span className="text-amber-500" aria-label={`${shown} de 5 estrellas`}>
+            {"★".repeat(shown)}
+            <span className="text-gray-300">{"☆".repeat(5 - shown)}</span>
+          </span>
+        </p>
+        {shownComment && (
+          <p className="text-sm text-gray-700 italic">“{shownComment}”</p>
+        )}
+      </div>
+    );
+  }
+
+  async function submit() {
+    if (stars < 1 || stars > 5) {
+      setError("Selecciona de 1 a 5 estrellas.");
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    try {
+      const { db } = getFirebase();
+      await updateDoc(doc(db, "tripRequests", id), {
+        rating: stars,
+        ratingComment: comment.trim() ? comment.trim() : null,
+        ratedAt: serverTimestamp(),
+      });
+      setDone(true);
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? `No se pudo guardar tu calificación: ${e.message}`
+          : "No se pudo guardar tu calificación.",
+      );
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div className="mt-2 border-t border-gray-200 pt-2 space-y-2">
+      <p className="text-sm font-medium text-gray-700">
+        ¿Cómo estuvo tu carrera?
+      </p>
+      <div className="flex gap-1" role="radiogroup" aria-label="Calificación">
+        {[1, 2, 3, 4, 5].map((n) => (
+          <button
+            key={n}
+            type="button"
+            disabled={saving}
+            onClick={() => setStars(n)}
+            onMouseEnter={() => setHover(n)}
+            onMouseLeave={() => setHover(0)}
+            aria-label={`${n} estrella${n > 1 ? "s" : ""}`}
+            aria-checked={stars === n}
+            role="radio"
+            className={`text-2xl leading-none transition-colors ${
+              (hover || stars) >= n ? "text-amber-500" : "text-gray-300"
+            } hover:text-amber-500 disabled:opacity-50`}
+          >
+            ★
+          </button>
+        ))}
+      </div>
+      <textarea
+        value={comment}
+        onChange={(e) => setComment(e.target.value)}
+        disabled={saving}
+        rows={2}
+        placeholder="Comentario (opcional)"
+        className="w-full text-sm border border-gray-300 rounded-md p-2 focus:outline-none focus:ring-1 focus:ring-primary disabled:opacity-50"
+      />
+      {error && (
+        <div className="bg-red-50 text-red-700 text-sm rounded-md p-2">
+          {error}
+        </div>
+      )}
+      <button
+        type="button"
+        onClick={submit}
+        disabled={saving || stars < 1}
+        className="text-sm bg-primary text-white px-3 py-1.5 rounded-md hover:opacity-90 disabled:opacity-50"
+      >
+        {saving ? "Enviando…" : "Calificar"}
+      </button>
+    </div>
+  );
 }

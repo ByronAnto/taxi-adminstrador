@@ -46,6 +46,7 @@ class AgoraService implements VoiceProvider {
   static const int playbackVolumeMax = 400;
   static const int playbackVolumeDefault = 200;
   int _playbackVolume = playbackVolumeDefault;
+  @override
   int get playbackVolume => _playbackVolume;
 
   // appId se obtiene de la Cloud Function (junto con cada token).
@@ -149,6 +150,7 @@ class AgoraService implements VoiceProvider {
   /// [volume] se acota a [playbackVolumeMin]..[playbackVolumeMax] (100..400).
   /// Aplica inmediatamente al engine si está vivo; en cold-starts futuros
   /// se reinstaura desde SharedPreferences vía `_hydrateFromPrefs`.
+  @override
   Future<void> setPlaybackVolume(int volume) async {
     final v = volume.clamp(playbackVolumeMin, playbackVolumeMax);
     _playbackVolume = v;
@@ -187,6 +189,7 @@ class AgoraService implements VoiceProvider {
   /// usuario seleccionó un canal pero todavía no encendió el radio —
   /// el token está listo para cuando lo haga (encendido instantáneo).
   /// No bloquea ni propaga errores.
+  @override
   void prewarmToken(String channelId) {
     if (channelId.isEmpty) return;
     // Si ya está cacheado y vivo, no hace nada.
@@ -710,6 +713,7 @@ class AgoraService implements VoiceProvider {
 
   /// Canal al que estaba conectado antes de destroy (para reconexión)
   String? _lastChannelBeforeDestroy;
+  @override
   String? get lastChannelBeforeDestroy => _lastChannelBeforeDestroy;
 
   /// Destruye completamente el engine Agora para liberar la sesión de audio
@@ -754,6 +758,7 @@ class AgoraService implements VoiceProvider {
   /// Activa el modo overlay: inicializa engine + se une al canal + mic OFF.
   /// El engine permanece conectado mientras el overlay esté activo.
   /// Esto permite PTT instantáneo (0ms) — solo alterna mic on/off.
+  @override
   Future<void> overlayActivate(String channelId) async {
     _log('🟢 overlayActivate — conectando al canal: $channelId');
 
@@ -789,6 +794,7 @@ class AgoraService implements VoiceProvider {
   }
 
   /// Desactiva el modo overlay: destruye engine → mic 100% libre.
+  @override
   Future<void> overlayDeactivate() async {
     _log('🔴 overlayDeactivate — destruyendo engine');
     await destroyEngine();
@@ -799,6 +805,7 @@ class AgoraService implements VoiceProvider {
   /// Si por alguna razón perdimos la conexión al canal, intentamos
   /// reconectar antes de unmute. Si falla, lanza excepción para que la UI
   /// muestre feedback al usuario (botón rojo de error).
+  @override
   Future<void> quickPttStart(String channelId) async {
     _log('⚡ quickPttStart — unmute mic (canal persistente)');
     if (!_isInChannel || _engine == null) {
@@ -819,6 +826,7 @@ class AgoraService implements VoiceProvider {
   }
 
   /// PTT instantáneo: solo apaga el mic (engine sigue conectado).
+  @override
   Future<void> quickPttStop() async {
     _log('⚡ quickPttStop — mute mic (canal persistente)');
     await muteMic();
@@ -880,7 +888,12 @@ class AgoraService implements VoiceProvider {
   /// El archivo es AAC encoded (extensión .aac o .m4a).
   /// Captura TODO lo que se escucha en el canal (incluyendo nuestro propio
   /// PTT cuando estamos hablando) para tenerlo en historial local.
-  Future<bool> startLocalRecording(String filePath) async {
+  @override
+  Future<bool> startLocalRecording(String filePath,
+      {bool recordMic = false}) async {
+    // Agora graba la mezcla completa del canal (mic + remoto), así que el
+    // flag recordMic no aplica aquí (sirve para LiveKit, que graba una sola
+    // dirección por vez).
     if (_engine == null || !_isInChannel) {
       _log('startLocalRecording ignorado: engine=$_engine, isInChannel=$_isInChannel');
       return false;
@@ -900,6 +913,7 @@ class AgoraService implements VoiceProvider {
     }
   }
 
+  @override
   Future<void> stopLocalRecording() async {
     if (_engine == null) return;
     try {
@@ -912,6 +926,7 @@ class AgoraService implements VoiceProvider {
 
   // ─────────────────── Audio Remoto ───────────────────
 
+  @override
   Future<void> setRemoteAudioMuted(bool muted) async {
     _isRemoteAudioMuted = muted;
     if (_engine == null || !_isInChannel) return;
@@ -957,6 +972,7 @@ class AgoraService implements VoiceProvider {
 
   // ─────────────────── Limpieza ───────────────────
 
+  @override
   Future<void> dispose() async {
     _lastChannelBeforeDestroy = null; // dispose intencional, no guardar canal
     await destroyEngine();

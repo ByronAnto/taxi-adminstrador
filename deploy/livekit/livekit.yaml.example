@@ -1,0 +1,19 @@
+# Plantilla de configuración LiveKit.
+# Copiar a `livekit.yaml` (ignorado por git) y rellenar las keys reales.
+#
+# Generar key/secret:
+#   API_KEY="API$(openssl rand -hex 6)"
+#   API_SECRET="$(openssl rand -base64 32)"
+
+port: 7880
+bind_addresses:
+  - ""
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: true   # detecta la IP pública vía STUN (VM detrás de NAT 1:1)
+keys:
+  # FORMATO:  <API_KEY>: <API_SECRET>
+  CHANGE_ME_API_KEY: CHANGE_ME_API_SECRET
+logging:
+  level: info

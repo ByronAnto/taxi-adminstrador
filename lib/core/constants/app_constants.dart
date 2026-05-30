@@ -29,6 +29,7 @@ class AppConstants {
   static const String driversCollection = 'drivers';
   static const String vehiclesCollection = 'vehicles';
   static const String tripsCollection = 'trips';
+  static const String tripRequestsCollection = 'tripRequests';
   static const String paymentsCollection = 'payments';
   static const String channelsCollection = 'channels';
   static const String messagesCollection = 'messages';

@@ -1,0 +1,3 @@
+# Config real con secretos — NO versionar (usar livekit.yaml.example como plantilla)
+livekit.yaml
+.livekit_keys

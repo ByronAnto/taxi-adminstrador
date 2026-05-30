@@ -4,6 +4,7 @@ import '../entities/report_data.dart';
 abstract class ReportsRepository {
   /// Obtener datos agregados del reporte para un período
   Future<ReportData> getReportData({
+    required String associationId,
     required String period,
     required DateTime fromDate,
     required DateTime toDate,

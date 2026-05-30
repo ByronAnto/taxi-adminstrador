@@ -149,6 +149,7 @@ void _initTrips() {
   sl.registerLazySingleton(() => GetTripsHistoryUseCase(sl<TripRepository>()));
   sl.registerLazySingleton(() => CreateTripUseCase(sl<TripRepository>()));
   sl.registerLazySingleton(() => CompleteTripUseCase(sl<TripRepository>()));
+  sl.registerLazySingleton(() => FinalizeTripUseCase(sl<TripRepository>()));
   sl.registerLazySingleton(() => CancelTripUseCase(sl<TripRepository>()));
   sl.registerLazySingleton(() => GetDriverTripStatsUseCase(sl<TripRepository>()));
 
@@ -160,6 +161,7 @@ void _initTrips() {
       getTripsHistory: sl<GetTripsHistoryUseCase>(),
       createTrip: sl<CreateTripUseCase>(),
       completeTrip: sl<CompleteTripUseCase>(),
+      finalizeTrip: sl<FinalizeTripUseCase>(),
       cancelTrip: sl<CancelTripUseCase>(),
       getDriverTripStats: sl<GetDriverTripStatsUseCase>(),
     ),

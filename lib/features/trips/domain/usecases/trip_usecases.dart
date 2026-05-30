@@ -66,14 +66,26 @@ class CompleteTripParams {
   });
 }
 
+/// Caso de uso: Finalizar viaje directamente (sin tarifa).
+/// El conductor dueño cierra la carrera; la Cloud Function incrementa
+/// los totales al ver la transición a 'finalizado'.
+class FinalizeTripUseCase {
+  final TripRepository repository;
+
+  FinalizeTripUseCase(this.repository);
+
+  Future<void> call(String tripId, {String? tripRequestId}) =>
+      repository.finalizeTrip(tripId, tripRequestId: tripRequestId);
+}
+
 /// Caso de uso: Cancelar viaje
 class CancelTripUseCase {
   final TripRepository repository;
 
   CancelTripUseCase(this.repository);
 
-  Future<void> call(String tripId, {String? reason}) =>
-      repository.cancelTrip(tripId, reason: reason);
+  Future<void> call(String tripId, {String? reason, String? tripRequestId}) =>
+      repository.cancelTrip(tripId, reason: reason, tripRequestId: tripRequestId);
 }
 
 /// Caso de uso: Obtener historial de viajes

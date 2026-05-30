@@ -1,5 +1,5 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
-const { onDocumentWritten } = require("firebase-functions/v2/firestore");
+const { onDocumentWritten, onDocumentUpdated } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { defineSecret } = require("firebase-functions/params");
 const { initializeApp } = require("firebase-admin/app");
@@ -7,6 +7,14 @@ const { getAuth } = require("firebase-admin/auth");
 const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
 const { getStorage } = require("firebase-admin/storage");
 const { RtcTokenBuilder, RtcRole } = require("agora-token");
+const { buildLiveKitToken } = require("./lib/livekitToken");
+const {
+  isTransitionToFinalized,
+  isFirstRating,
+  computeNewAverage,
+  fareForHour,
+  localDateHourEC,
+} = require("./lib/tripStats");
 
 initializeApp();
 const db = getFirestore();
@@ -24,6 +32,14 @@ const SUPER_ADMIN_EMAILS = ["brealpeaymara@gmail.com"];
 
 const AGORA_APP_ID = defineSecret("AGORA_APP_ID");
 const AGORA_APP_CERTIFICATE = defineSecret("AGORA_APP_CERTIFICATE");
+// LiveKit self-hosted (Oracle Cloud). Reemplazo gradual de Agora detrás del
+// feature flag `associations/{id}.voiceProvider`. Setear con:
+//   firebase functions:secrets:set LIVEKIT_API_KEY
+//   firebase functions:secrets:set LIVEKIT_API_SECRET
+//   firebase functions:secrets:set LIVEKIT_URL   (= wss://livekit.it-services.center)
+const LIVEKIT_API_KEY = defineSecret("LIVEKIT_API_KEY");
+const LIVEKIT_API_SECRET = defineSecret("LIVEKIT_API_SECRET");
+const LIVEKIT_URL = defineSecret("LIVEKIT_URL");
 const GEMINI_API_KEY = defineSecret("GEMINI_API_KEY");
 // Credenciales SMTP propias para enviar el correo de recuperación de
 // contraseña. Usamos Gmail con App Password para máxima entregabilidad
@@ -118,6 +134,65 @@ exports.generateAgoraToken = onCall(
     );
 
     return { appId, token, expiresAt: privilegeExpiredTs };
+  }
+);
+
+// ───────────────────────────────────────────────────────────────────
+//  generateLiveKitToken — token JWT para walkie-talkie (LiveKit)
+//
+//  Equivalente a generateAgoraToken pero para el servidor LiveKit
+//  self-hosted. El cliente (LiveKitVoiceProvider, Fase 3) llama a esta
+//  función con el mismo `channelName` que usaría en Agora. Devuelve la
+//  URL del server + el JWT con grant de roomJoin/publish/subscribe.
+//
+//  La `identity` del token es el uid de Firebase (único por usuario),
+//  lo que LiveKit usa como identificador del participante en la sala.
+// ───────────────────────────────────────────────────────────────────
+
+exports.generateLiveKitToken = onCall(
+  {
+    secrets: [LIVEKIT_API_KEY, LIVEKIT_API_SECRET, LIVEKIT_URL],
+    enforceAppCheck: false,
+  },
+  async (request) => {
+    const auth = requireAuth(request);
+
+    const { channelName } = request.data || {};
+
+    if (!channelName || typeof channelName !== "string") {
+      throw new HttpsError(
+        "invalid-argument",
+        "Se requiere channelName (string)."
+      );
+    }
+    if (channelName.length > 64) {
+      throw new HttpsError(
+        "invalid-argument",
+        "channelName demasiado largo (máx 64 caracteres)."
+      );
+    }
+
+    const apiKey = LIVEKIT_API_KEY.value();
+    const apiSecret = LIVEKIT_API_SECRET.value();
+    const url = LIVEKIT_URL.value();
+
+    if (!apiKey || !apiSecret || !url) {
+      throw new HttpsError(
+        "failed-precondition",
+        "LIVEKIT_API_KEY/LIVEKIT_API_SECRET/LIVEKIT_URL no están configurados en el servidor."
+      );
+    }
+
+    // TTL alineado con Agora (24h) para cubrir un turno completo del
+    // conductor sin refresco a mitad de jornada.
+    return buildLiveKitToken({
+      apiKey,
+      apiSecret,
+      url,
+      identity: auth.uid,
+      channelName,
+      ttlSeconds: 86400,
+    });
   }
 );
 
@@ -3986,7 +4061,10 @@ exports.cleanupOrphanedDrivers = onCall({}, async (request) => {
 //  Cron cada 2 minutos. Threshold: 3 minutos sin updatedAt.
 // ───────────────────────────────────────────────────────────────────
 
-const STALE_MINUTES = 3;
+// 6 min: debe ser MAYOR que el heartbeat estacionario de la app (2 min) con
+// margen para jitter de background/doze. Antes era 3 min, lo que apagaba
+// falsamente a conductores quietos (estacionados) cuyo heartbeat es de minutos.
+const STALE_MINUTES = 6;
 
 async function _runMarkStaleDriversOffline() {
   const cutoffMs = Date.now() - STALE_MINUTES * 60 * 1000;
@@ -4008,7 +4086,9 @@ async function _runMarkStaleDriversOffline() {
     try {
       await d.ref.update({
         isActive: false,
-        status: "offline",
+        // 'desconectado' = constante que usa la app (statusOffline). Antes
+        // ponía 'offline' (inconsistente con el filtro del mapa).
+        status: "desconectado",
         currentPosition: null,
         currentLatitude: null,
         currentLongitude: null,
@@ -4051,4 +4131,329 @@ exports.markStaleDriversOfflineNow = onCall({}, async (request) => {
   const summary = await _runMarkStaleDriversOffline();
   return summary;
 });
+
+// ───────────────────────────────────────────────────────────────────
+//  onTripFinalized — al finalizar una carrera, sumar totales y
+//  propagar el estado al pedido (tripRequest) para que el cliente web
+//  pueda calificar.
+//
+//  Trigger: update de trips/{tripId}.
+//  Idempotencia: solo actúa en la TRANSICIÓN a finalizado
+//  (before NO finalizado && after SÍ finalizado). Re-escrituras de un
+//  trip que ya estaba finalizado no vuelven a contar.
+//
+//  Contrato de datos (totales = SOLO cantidad de carreras, no montos):
+//    - drivers/{driverId}.totalTrips += 1
+//    - associations/{associationId}.totalTrips += 1  (total de la base)
+//    - tripStatsDaily/{associationId}_{YYYY-MM-DD} → agregado diario por
+//      asociación: carreras por hora, total y estimado monetario (UTC-5)
+//    - tripRequests/{tripRequestId} → estado:'finalizada', finalizadoAt
+// ───────────────────────────────────────────────────────────────────
+
+// Resuelve la REFERENCIA al doc de un conductor a partir de su UID de auth.
+// IMPORTANTE: en este proyecto los docs de `drivers/` tienen id AUTO-generado
+// y guardan el uid en el campo `userId` (así los crea approveDriver/.add() y
+// los resuelve DriverLocationService). `trips.driverId` y `tripRequests.driverId`
+// son el UID del usuario, NO el id del doc. Por eso buscamos por `userId`.
+// Fallback: algún doc legacy podría tener id == uid (código que usa .doc(uid)).
+async function resolveDriverRef(driverUid) {
+  if (!driverUid) return null;
+  const q = await db
+    .collection("drivers")
+    .where("userId", "==", driverUid)
+    .limit(1)
+    .get();
+  if (!q.empty) return q.docs[0].ref;
+  const direct = db.collection("drivers").doc(driverUid);
+  const snap = await direct.get();
+  return snap.exists ? direct : null;
+}
+
+// Deriva el epoch (ms UTC) del momento de la carrera para el agregado
+// diario. Preferimos `createdAt`; si falta, `finalizadoAt`; y por último
+// la hora actual. Acepta Timestamp de Firestore (.toMillis()), Date,
+// número de epoch (ms) o segundos (campo {seconds}).
+function resolveTripEpochMs(after) {
+  const candidates = [after?.createdAt, after?.finalizadoAt];
+  for (const c of candidates) {
+    if (!c) continue;
+    if (typeof c.toMillis === "function") return c.toMillis(); // Timestamp
+    if (c instanceof Date) return c.getTime();
+    if (typeof c === "number") return c; // epoch ms
+    if (typeof c.seconds === "number") return c.seconds * 1000; // {seconds,...}
+  }
+  return Date.now();
+}
+
+exports.onTripFinalized = onDocumentUpdated(
+  {
+    document: "trips/{tripId}",
+    region: "us-central1",
+  },
+  async (event) => {
+    const tripId = event.params.tripId;
+    const before = event.data?.before?.data();
+    const after = event.data?.after?.data();
+
+    // Sin datos (borrado) → nada que hacer.
+    if (!after) return;
+
+    // Propagación de CANCELACIÓN al pedido web. Robustez extra: aunque el
+    // cliente Flutter ya intenta poner el tripRequest en 'cancelada' al
+    // cancelar, lo hacemos también server-side por si esa escritura falla o
+    // el cancel vino de otra ruta. Solo en la transición a 'cancelado'.
+    if (before?.status !== "cancelado" && after.status === "cancelado") {
+      if (after.tripRequestId) {
+        try {
+          await db.collection("tripRequests").doc(after.tripRequestId).update({
+            estado: "cancelada",
+            updatedAt: FieldValue.serverTimestamp(),
+          });
+          console.log(
+            `[onTripFinalized] trip ${tripId} cancelado → tripRequest ${after.tripRequestId} = cancelada`,
+          );
+        } catch (e) {
+          console.warn(
+            `[onTripFinalized] no pude propagar cancelación a ` +
+              `tripRequest ${after.tripRequestId}: ${e.message}`,
+          );
+        }
+      }
+      return; // cancelar NO suma totales ni agregados.
+    }
+
+    // Sin transición a finalizado → nada más que hacer.
+    if (!isTransitionToFinalized(before?.status, after.status)) {
+      return;
+    }
+
+    const driverId = after.driverId || null;
+    // Resolvemos el doc real del conductor (id auto, ubicado por userId).
+    const driverRef = await resolveDriverRef(driverId);
+
+    // 1) Incrementar totalTrips del conductor (si lo encontramos).
+    if (driverRef) {
+      try {
+        await driverRef.update({
+          totalTrips: FieldValue.increment(1),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        console.log(
+          `[onTripFinalized] trip ${tripId}: +1 totalTrips a driver ${driverId} (doc ${driverRef.id})`,
+        );
+      } catch (e) {
+        // Si el doc del driver no existe, no rompemos el resto del flujo.
+        console.warn(
+          `[onTripFinalized] no pude incrementar driver ${driverId}: ${e.message}`,
+        );
+      }
+    } else {
+      console.log(
+        `[onTripFinalized] trip ${tripId} sin driver doc (driverId=${driverId}); no cuento al conductor.`,
+      );
+    }
+
+    // 2) Incrementar totalTrips de la asociación (total de la base).
+    //    Si el trip no trae associationId (docs viejos), lo derivamos del
+    //    driver y, en su defecto, del tripRequest. Si aun así no hay,
+    //    logueamos y omitimos el total de base.
+    let aid = after.associationId || null;
+    if (!aid && driverRef) {
+      try {
+        const dSnap = await driverRef.get();
+        if (dSnap.exists) aid = dSnap.data().associationId || null;
+      } catch (_) { /* noop */ }
+    }
+    if (!aid && after.tripRequestId) {
+      try {
+        const reqSnap = await db
+          .collection("tripRequests")
+          .doc(after.tripRequestId)
+          .get();
+        if (reqSnap.exists) aid = reqSnap.data().associationId || null;
+      } catch (_) { /* noop */ }
+    }
+    if (aid) {
+      try {
+        await db.collection("associations").doc(aid).update({
+          totalTrips: FieldValue.increment(1),
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        console.log(
+          `[onTripFinalized] trip ${tripId}: +1 totalTrips a association ${aid}`,
+        );
+      } catch (e) {
+        console.warn(
+          `[onTripFinalized] no pude incrementar association ${aid}: ${e.message}`,
+        );
+      }
+    } else {
+      console.log(
+        `[onTripFinalized] trip ${tripId} sin associationId derivable; omito total de base.`,
+      );
+    }
+
+    // 2b) Mantener el AGREGADO DIARIO por asociación (tripStatsDaily).
+    //     Permite que el reporte del CONDUCTOR compare contra "la base"
+    //     (carreras por hora + estimado monetario) sin leer carreras
+    //     ajenas. Solo corre en la transición a finalizado, así que cada
+    //     carrera se cuenta exactamente una vez (idempotencia heredada).
+    //
+    //     Fecha/hora en zona America/Guayaquil (UTC-5). Tomamos el momento
+    //     de la carrera de `after.createdAt`; si falta, `after.finalizadoAt`;
+    //     y como último recurso la hora actual. Soportamos tanto Timestamp
+    //     de Firestore (con .toMillis()) como número de epoch.
+    if (aid) {
+      try {
+        const epochMs = resolveTripEpochMs(after);
+        const { date, hour } = localDateHourEC(epochMs);
+        const statsId = `${aid}_${date}`;
+        // Inicio del día en UTC-5 → 00:00 local = 05:00 UTC del mismo día.
+        // Lo guardamos como Timestamp para poder hacer range queries por fecha.
+        const dateTs = Timestamp.fromMillis(Date.parse(`${date}T05:00:00.000Z`));
+
+        // OJO: en el Admin SDK, una clave con punto dentro de set() se toma
+        // LITERAL (no como ruta anidada). Para incrementar el bucket de la
+        // hora dentro del map `tripsByHour` anidamos el objeto: { [hour]: inc }.
+        // Con {merge:true} esto sólo toca esa hora, sin pisar las demás.
+        await db
+          .collection("tripStatsDaily")
+          .doc(statsId)
+          .set(
+            {
+              associationId: aid,
+              date,
+              dateTs,
+              tripsByHour: { [String(hour)]: FieldValue.increment(1) },
+              totalTrips: FieldValue.increment(1),
+              estimatedRevenue: FieldValue.increment(fareForHour(hour)),
+              updatedAt: FieldValue.serverTimestamp(),
+            },
+            { merge: true },
+          );
+        console.log(
+          `[onTripFinalized] trip ${tripId}: agregado diario ${statsId} ` +
+            `(hora ${hour}, +${fareForHour(hour)} estimado).`,
+        );
+      } catch (e) {
+        console.warn(
+          `[onTripFinalized] no pude actualizar agregado diario de ` +
+            `association ${aid}: ${e.message}`,
+        );
+      }
+    } else {
+      console.log(
+        `[onTripFinalized] trip ${tripId} sin associationId; omito agregado diario.`,
+      );
+    }
+
+    // 3) Propagar al pedido para que el cliente web vea "finalizada" y
+    //    pueda calificar. finalizadoAt: usamos el del trip si existe,
+    //    si no serverTimestamp.
+    if (after.tripRequestId) {
+      try {
+        await db.collection("tripRequests").doc(after.tripRequestId).update({
+          estado: "finalizada",
+          finalizadoAt: after.finalizadoAt || FieldValue.serverTimestamp(),
+          tripId,
+          updatedAt: FieldValue.serverTimestamp(),
+        });
+        console.log(
+          `[onTripFinalized] tripRequest ${after.tripRequestId} → finalizada`,
+        );
+      } catch (e) {
+        console.warn(
+          `[onTripFinalized] no pude actualizar tripRequest ` +
+            `${after.tripRequestId}: ${e.message}`,
+        );
+      }
+    }
+  },
+);
+
+// ───────────────────────────────────────────────────────────────────
+//  onTripRequestRated — al calificar el cliente, actualizar el
+//  promedio del conductor.
+//
+//  Trigger: update de tripRequests/{reqId}.
+//  Idempotencia: solo cuenta la PRIMERA vez que aparece la calificación
+//  (before sin rating válido && after rating entero 1..5). Si el cliente
+//  edita la calificación luego, NO se recuenta (evita inflar el promedio).
+//
+//  Acción (en transacción para leer-modificar-escribir de forma atómica):
+//    drivers/{after.driverId}:
+//      ratingSum   += after.rating
+//      ratingCount += 1
+//      rating       = ratingSum / ratingCount
+//    Inicializa ratingSum/ratingCount en 0 si el driver es nuevo.
+// ───────────────────────────────────────────────────────────────────
+
+exports.onTripRequestRated = onDocumentUpdated(
+  {
+    document: "tripRequests/{reqId}",
+    region: "us-central1",
+  },
+  async (event) => {
+    const reqId = event.params.reqId;
+    const before = event.data?.before?.data();
+    const after = event.data?.after?.data();
+
+    if (!after) return;
+    if (!isFirstRating(before?.rating, after.rating)) {
+      return;
+    }
+
+    const driverId = after.driverId || null;
+    if (!driverId) {
+      console.log(
+        `[onTripRequestRated] tripRequest ${reqId} sin driverId; omito.`,
+      );
+      return;
+    }
+
+    const newRating = after.rating;
+    // El doc de drivers tiene id auto; lo ubicamos por userId (resolvemos
+    // FUERA de la transacción porque runTransaction no admite queries dentro).
+    const driverRef = await resolveDriverRef(driverId);
+    if (!driverRef) {
+      console.warn(
+        `[onTripRequestRated] tripRequest ${reqId}: no encontré driver doc ` +
+          `para uid ${driverId}; omito el promedio.`,
+      );
+      return;
+    }
+
+    try {
+      await db.runTransaction(async (tx) => {
+        const snap = await tx.get(driverRef);
+        const current = snap.exists ? snap.data() : {};
+        const { ratingSum, ratingCount, rating } = computeNewAverage(
+          current,
+          newRating,
+        );
+        // Si el doc no existe lo dejamos pasar a update (fallaría); por eso
+        // usamos set con merge para inicializar acumuladores en driver nuevo.
+        tx.set(
+          driverRef,
+          {
+            ratingSum,
+            ratingCount,
+            rating,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true },
+        );
+      });
+      console.log(
+        `[onTripRequestRated] tripRequest ${reqId}: rating ${newRating} ` +
+          `aplicado a driver ${driverId}`,
+      );
+    } catch (e) {
+      console.error(
+        `[onTripRequestRated] falló transacción para driver ${driverId}: ` +
+          `${e.message}`,
+      );
+    }
+  },
+);
 

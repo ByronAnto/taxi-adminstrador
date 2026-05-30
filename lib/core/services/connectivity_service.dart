@@ -30,6 +30,12 @@ class ConnectivityService extends ChangeNotifier {
   ConnectivityStatus _status = ConnectivityStatus.connected;
   Timer? _periodicCheck;
 
+  /// Nº de probes de internet fallidos seguidos. En datos móviles un timeout
+  /// puntual (radio despertando, congestión, TLS lento) es normal y NO debe
+  /// cortar el radio. Solo declaramos "sin red" tras 2 fallos consecutivos;
+  /// un único éxito lo resetea a 0.
+  int _failedProbes = 0;
+
   ConnectivityStatus get status => _status;
   bool get isConnected => _status == ConnectivityStatus.connected;
 
@@ -44,6 +50,8 @@ class ConnectivityService extends ChangeNotifier {
         final hasNetwork = results.any((r) => r != ConnectivityResult.none);
 
         if (!hasNetwork) {
+          // El SO dice que NO hay interfaz de red → offline definitivo.
+          _failedProbes = 0;
           _updateStatus(ConnectivityStatus.disconnected);
         } else {
           // Tiene red, pero ¿tiene internet real?
@@ -52,9 +60,10 @@ class ConnectivityService extends ChangeNotifier {
       },
     );
 
-    // Verificación periódica cada 15 segundos (detecta intermitencia)
+    // Verificación periódica cada 10 segundos (detecta intermitencia y
+    // recupera rápido tras un falso negativo en datos móviles).
     _periodicCheck = Timer.periodic(
-      const Duration(seconds: 15),
+      const Duration(seconds: 10),
       (_) => _checkConnectivity(),
     );
   }
@@ -66,6 +75,8 @@ class ConnectivityService extends ChangeNotifier {
       final hasNetwork = results.any((r) => r != ConnectivityResult.none);
 
       if (!hasNetwork) {
+        // Sin interfaz de red → offline definitivo (sin debounce).
+        _failedProbes = 0;
         _updateStatus(ConnectivityStatus.disconnected);
         return;
       }
@@ -73,42 +84,60 @@ class ConnectivityService extends ChangeNotifier {
       await _verifyInternetAccess();
     } catch (e) {
       _logger.w('Error verificando conectividad: $e');
-      _updateStatus(ConnectivityStatus.disconnected);
+      _registerProbeFailure();
     }
   }
 
-  /// Verifica internet REAL haciendo una petición HTTP.
+  /// Verifica internet REAL. El SO ya confirmó que hay interfaz de red; este
+  /// probe confirma que hay salida a internet.
   ///
-  /// DNS puede estar cacheado y responder "ok" incluso sin datos.
-  /// Por eso hacemos un HTTP HEAD a un servidor rápido y ligero.
+  /// Con debounce: un probe exitoso restaura "conectado" al instante; un
+  /// fallo NO corta el radio de inmediato (ver [_registerProbeFailure]).
   Future<void> _verifyInternetAccess() async {
-    try {
-      // Primero DNS rápido (descarta caso obvio sin red)
-      final dns = await InternetAddress.lookup('google.com')
-          .timeout(const Duration(seconds: 3));
-      if (dns.isEmpty || dns[0].rawAddress.isEmpty) {
-        _updateStatus(ConnectivityStatus.disconnected);
-        return;
-      }
+    if (await _probeInternet()) {
+      _failedProbes = 0;
+      _updateStatus(ConnectivityStatus.connected);
+    } else {
+      _registerProbeFailure();
+    }
+  }
 
-      // Luego HTTP real — si esto responde, hay internet de verdad
-      final response = await http
-          .head(Uri.parse('https://www.google.com/generate_204'))
-          .timeout(const Duration(seconds: 5));
-      if (response.statusCode >= 200 && response.statusCode < 400) {
-        _updateStatus(ConnectivityStatus.connected);
-      } else {
-        _updateStatus(ConnectivityStatus.disconnected);
+  /// Hace el probe HTTP al endpoint canónico de detección de internet con
+  /// fallback. HTTPS porque Android (targetSdk 36) bloquea cleartext por
+  /// defecto. 204/2xx/3xx = internet OK.
+  Future<bool> _probeInternet() async {
+    const endpoints = [
+      'https://connectivitycheck.gstatic.com/generate_204',
+      'https://clients3.google.com/generate_204',
+    ];
+    for (final url in endpoints) {
+      try {
+        final r = await http
+            .get(Uri.parse(url))
+            .timeout(const Duration(seconds: 8));
+        if (r.statusCode >= 200 && r.statusCode < 400) return true;
+      } on SocketException catch (_) {
+        // probar siguiente endpoint
+      } on TimeoutException catch (_) {
+        // probar siguiente endpoint
+      } on http.ClientException catch (_) {
+        // probar siguiente endpoint
+      } catch (_) {
+        // probar siguiente endpoint
       }
-    } on SocketException catch (_) {
-      _updateStatus(ConnectivityStatus.disconnected);
-    } on TimeoutException catch (_) {
-      _updateStatus(ConnectivityStatus.disconnected);
-    } on http.ClientException catch (_) {
-      _updateStatus(ConnectivityStatus.disconnected);
-    } catch (_) {
+    }
+    return false;
+  }
+
+  /// Registra un fallo de probe. Solo declara "sin red" tras 2 fallos
+  /// CONSECUTIVOS — así un timeout puntual en datos móviles no deshabilita
+  /// el radio. Si aún no llega al umbral, mantiene el estado actual (optimista).
+  void _registerProbeFailure() {
+    _failedProbes++;
+    if (_failedProbes >= 2) {
       _updateStatus(ConnectivityStatus.disconnected);
     }
+    // Primer fallo: mantenemos el estado actual (no cortamos el radio aún).
   }
 
   void _updateStatus(ConnectivityStatus newStatus) {

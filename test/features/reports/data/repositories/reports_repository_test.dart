@@ -92,6 +92,7 @@ void main() {
     group('getReportData', () {
       test('calcula periodo anterior y delega al datasource', () async {
         when(() => mockDatasource.getReportData(
+              associationId: any(named: 'associationId'),
               period: any(named: 'period'),
               fromDate: any(named: 'fromDate'),
               toDate: any(named: 'toDate'),
@@ -100,6 +101,7 @@ void main() {
             )).thenAnswer((_) async => sampleData);
 
         final result = await repository.getReportData(
+          associationId: 'assoc1',
           period: 'Mes',
           fromDate: fromDate,
           toDate: toDate,
@@ -109,6 +111,7 @@ void main() {
 
         // Verificar que se paso el periodo anterior correcto
         final captured = verify(() => mockDatasource.getReportData(
+              associationId: any(named: 'associationId'),
               period: 'Mes',
               fromDate: fromDate,
               toDate: toDate,
@@ -127,6 +130,7 @@ void main() {
 
       test('propaga excepciones del datasource', () async {
         when(() => mockDatasource.getReportData(
+              associationId: any(named: 'associationId'),
               period: any(named: 'period'),
               fromDate: any(named: 'fromDate'),
               toDate: any(named: 'toDate'),
@@ -136,6 +140,7 @@ void main() {
 
         expect(
           () => repository.getReportData(
+            associationId: 'assoc1',
             period: 'Hoy',
             fromDate: fromDate,
             toDate: toDate,

@@ -37,12 +37,16 @@ class _QuickStreetAssignModalState extends State<QuickStreetAssignModal> {
     super.dispose();
   }
 
+  /// Stream de conductores ACTIVOS en el mapa de la asociación.
+  /// Activo = isActive == true. El filtro de status != desconectado se aplica
+  /// client-side (misma definición que MapRemoteDatasource).
   Stream<QuerySnapshot<Map<String, dynamic>>> _onlineDriversStream(
       String aid) {
     return FirebaseFirestore.instance
         .collection(AppConstants.driversCollection)
         .where('associationId', isEqualTo: aid)
-        .where('status', whereNotIn: [AppConstants.statusOffline]).snapshots();
+        .where('isActive', isEqualTo: true)
+        .snapshots();
   }
 
   Future<void> _assign({
@@ -203,7 +207,12 @@ class _QuickStreetAssignModalState extends State<QuickStreetAssignModal> {
                       child: Center(child: CircularProgressIndicator()),
                     );
                   }
-                  final docs = snap.data?.docs ?? [];
+                  // Solo conductores activos en el mapa (status != desconectado).
+                  final docs = (snap.data?.docs ?? [])
+                      .where((d) =>
+                          (d.data()['status'] as String?) !=
+                          AppConstants.statusOffline)
+                      .toList();
                   if (docs.isEmpty) {
                     return Container(
                       padding: const EdgeInsets.all(16),
@@ -219,7 +228,7 @@ class _QuickStreetAssignModalState extends State<QuickStreetAssignModal> {
                           const SizedBox(width: 12),
                           const Expanded(
                             child: Text(
-                              'No hay unidades en línea ahora.',
+                              'No hay unidades activas en este momento.',
                               style: TextStyle(fontSize: 14),
                             ),
                           ),

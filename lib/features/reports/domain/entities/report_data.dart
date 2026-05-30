@@ -15,6 +15,11 @@ class ReportData extends Equatable {
   final double averageFare;
   final int activeDriversCount;
 
+  /// Estimado monetario del periodo basado en la tarifa mínima de Quito
+  /// (UTC-5): Σ fareForHour(horaLocal del createdAt) sobre las carreras
+  /// finalizadas/completadas. Es independiente del `fare` real cobrado.
+  final double estimatedRevenue;
+
   // Variación porcentual respecto al período anterior
   final double tripsTrend;
   final double revenueTrend;
@@ -50,6 +55,7 @@ class ReportData extends Equatable {
     this.totalRevenue = 0.0,
     this.averageFare = 0.0,
     this.activeDriversCount = 0,
+    this.estimatedRevenue = 0.0,
     this.tripsTrend = 0.0,
     this.revenueTrend = 0.0,
     this.cancelledTrend = 0.0,
@@ -72,6 +78,7 @@ class ReportData extends Equatable {
         totalRevenue,
         averageFare,
         activeDriversCount,
+        estimatedRevenue,
         tripsTrend,
         revenueTrend,
         cancelledTrend,

@@ -65,8 +65,12 @@ class TripRepositoryImpl implements TripRepository {
       );
 
   @override
-  Future<void> cancelTrip(String tripId, {String? reason}) =>
-      remoteDatasource.cancelTrip(tripId, reason: reason);
+  Future<void> finalizeTrip(String tripId, {String? tripRequestId}) =>
+      remoteDatasource.finalizeTrip(tripId, tripRequestId: tripRequestId);
+
+  @override
+  Future<void> cancelTrip(String tripId, {String? reason, String? tripRequestId}) =>
+      remoteDatasource.cancelTrip(tripId, reason: reason, tripRequestId: tripRequestId);
 
   @override
   Future<Map<String, dynamic>> getDriverTripStats(String driverId) =>

@@ -39,12 +39,14 @@ void main() {
   group('GetReportDataUseCase', () {
     test('delega al repositorio con los parametros correctos', () async {
       when(() => mockRepository.getReportData(
+            associationId: any(named: 'associationId'),
             period: any(named: 'period'),
             fromDate: any(named: 'fromDate'),
             toDate: any(named: 'toDate'),
           )).thenAnswer((_) async => sampleData);
 
       final result = await useCase(
+        associationId: 'assoc1',
         period: 'Mes',
         fromDate: fromDate,
         toDate: toDate,
@@ -52,6 +54,7 @@ void main() {
 
       expect(result, equals(sampleData));
       verify(() => mockRepository.getReportData(
+            associationId: any(named: 'associationId'),
             period: 'Mes',
             fromDate: fromDate,
             toDate: toDate,
@@ -61,6 +64,7 @@ void main() {
 
     test('propaga excepciones del repositorio', () async {
       when(() => mockRepository.getReportData(
+            associationId: any(named: 'associationId'),
             period: any(named: 'period'),
             fromDate: any(named: 'fromDate'),
             toDate: any(named: 'toDate'),
@@ -68,6 +72,7 @@ void main() {
 
       expect(
         () => useCase(
+          associationId: 'assoc1',
           period: 'Hoy',
           fromDate: fromDate,
           toDate: toDate,
@@ -78,12 +83,14 @@ void main() {
 
     test('retorna datos con valores correctos de KPI', () async {
       when(() => mockRepository.getReportData(
+            associationId: any(named: 'associationId'),
             period: any(named: 'period'),
             fromDate: any(named: 'fromDate'),
             toDate: any(named: 'toDate'),
           )).thenAnswer((_) async => sampleData);
 
       final result = await useCase(
+        associationId: 'assoc1',
         period: 'Mes',
         fromDate: fromDate,
         toDate: toDate,

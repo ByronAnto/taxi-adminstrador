@@ -39,12 +39,27 @@ class TripCompleteRequested extends TripEvent {
   List<Object?> get props => [params.tripId];
 }
 
+class TripFinalizeRequested extends TripEvent {
+  final String tripId;
+
+  /// Si la carrera vino de un `tripRequests/{id}`, lo pasamos para
+  /// reflejar el cierre también en esa colección (la lee el portal web).
+  final String? tripRequestId;
+  TripFinalizeRequested(this.tripId, {this.tripRequestId});
+  @override
+  List<Object?> get props => [tripId, tripRequestId];
+}
+
 class TripCancelRequested extends TripEvent {
   final String tripId;
   final String? reason;
-  TripCancelRequested(this.tripId, {this.reason});
+
+  /// Si la carrera vino de un `tripRequests/{id}`, lo pasamos para reflejar
+  /// también allí la cancelación (la lee el portal web del cliente).
+  final String? tripRequestId;
+  TripCancelRequested(this.tripId, {this.reason, this.tripRequestId});
   @override
-  List<Object?> get props => [tripId, reason];
+  List<Object?> get props => [tripId, reason, tripRequestId];
 }
 
 class TripHistoryLoadRequested extends TripEvent {
@@ -122,6 +137,7 @@ class TripBloc extends Bloc<TripEvent, TripState> {
   final WatchDriverTripsUseCase watchDriverTrips;
   final CreateTripUseCase createTrip;
   final CompleteTripUseCase completeTrip;
+  final FinalizeTripUseCase finalizeTrip;
   final CancelTripUseCase cancelTrip;
   final GetTripsHistoryUseCase getTripsHistory;
   final GetDriverTripStatsUseCase getDriverTripStats;
@@ -133,6 +149,7 @@ class TripBloc extends Bloc<TripEvent, TripState> {
     required this.watchDriverTrips,
     required this.createTrip,
     required this.completeTrip,
+    required this.finalizeTrip,
     required this.cancelTrip,
     required this.getTripsHistory,
     required this.getDriverTripStats,
@@ -141,6 +158,7 @@ class TripBloc extends Bloc<TripEvent, TripState> {
     on<TripsUpdated>(_onTripsUpdated);
     on<TripCreateRequested>(_onCreateRequested);
     on<TripCompleteRequested>(_onCompleteRequested);
+    on<TripFinalizeRequested>(_onFinalizeRequested);
     on<TripCancelRequested>(_onCancelRequested);
     on<TripHistoryLoadRequested>(_onHistoryRequested);
     on<TripStatsLoadRequested>(_onStatsRequested);
@@ -199,12 +217,25 @@ class TripBloc extends Bloc<TripEvent, TripState> {
     }
   }
 
+  Future<void> _onFinalizeRequested(
+    TripFinalizeRequested event,
+    Emitter<TripState> emit,
+  ) async {
+    try {
+      await finalizeTrip(event.tripId, tripRequestId: event.tripRequestId);
+      emit(TripActionSuccess('Viaje finalizado'));
+    } catch (e) {
+      emit(TripError('Error al finalizar la carrera: $e'));
+    }
+  }
+
   Future<void> _onCancelRequested(
     TripCancelRequested event,
     Emitter<TripState> emit,
   ) async {
     try {
-      await cancelTrip(event.tripId, reason: event.reason);
+      await cancelTrip(event.tripId,
+          reason: event.reason, tripRequestId: event.tripRequestId);
       emit(TripActionSuccess('Carrera cancelada'));
     } catch (e) {
       emit(TripError('Error al cancelar la carrera: $e'));

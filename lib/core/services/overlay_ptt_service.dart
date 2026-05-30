@@ -3,8 +3,9 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-import 'agora_service.dart';
 import 'ptt_beep_service.dart';
+import 'voice/voice_provider.dart';
+import 'voice/voice_provider_factory.dart';
 
 /// Servicio que gestiona el botón PTT flotante (overlay).
 ///
@@ -29,7 +30,10 @@ class OverlayPttService {
   bool _isPttActive = false;
   bool get isPttActive => _isPttActive;
 
-  final _agoraService = AgoraService.instance;
+  // Provider de voz activo (Agora o LiveKit). GETTER: lee siempre el actual
+  // del factory, para que el overlay funcione con el provider seleccionado
+  // en login (igual criterio que walkie_talkie_page).
+  VoiceProvider get _agoraService => VoiceProviderFactory.current;
 
   /// Callback para notificar a la UI que el estado cambió
   VoidCallback? onStateChanged;

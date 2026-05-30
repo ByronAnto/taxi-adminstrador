@@ -68,19 +68,21 @@ void main() {
       'emite [ReportsLoading, ReportsLoaded] al cargar con periodo Hoy',
       build: () {
         when(() => mockUseCase(
+              associationId: any(named: 'associationId'),
               period: any(named: 'period'),
               fromDate: any(named: 'fromDate'),
               toDate: any(named: 'toDate'),
             )).thenAnswer((_) async => _makeReportData());
         return ReportsBloc(getReportData: mockUseCase);
       },
-      act: (bloc) => bloc.add(ReportsLoadRequested(period: 'Hoy')),
+      act: (bloc) => bloc.add(ReportsLoadRequested(period: 'Hoy', associationId: 'assoc1')),
       expect: () => [
         isA<ReportsLoading>(),
         isA<ReportsLoaded>(),
       ],
       verify: (_) {
         verify(() => mockUseCase(
+              associationId: any(named: 'associationId'),
               period: 'Hoy',
               fromDate: any(named: 'fromDate'),
               toDate: any(named: 'toDate'),
@@ -93,13 +95,14 @@ void main() {
       'emite [ReportsLoading, ReportsLoaded] al cargar con periodo Semana',
       build: () {
         when(() => mockUseCase(
+              associationId: any(named: 'associationId'),
               period: any(named: 'period'),
               fromDate: any(named: 'fromDate'),
               toDate: any(named: 'toDate'),
             )).thenAnswer((_) async => _makeReportData(period: 'Semana'));
         return ReportsBloc(getReportData: mockUseCase);
       },
-      act: (bloc) => bloc.add(ReportsLoadRequested(period: 'Semana')),
+      act: (bloc) => bloc.add(ReportsLoadRequested(period: 'Semana', associationId: 'assoc1')),
       expect: () => [
         isA<ReportsLoading>(),
         isA<ReportsLoaded>(),
@@ -111,13 +114,14 @@ void main() {
       'emite [ReportsLoading, ReportsLoaded] al cargar con periodo Mes',
       build: () {
         when(() => mockUseCase(
+              associationId: any(named: 'associationId'),
               period: any(named: 'period'),
               fromDate: any(named: 'fromDate'),
               toDate: any(named: 'toDate'),
             )).thenAnswer((_) async => _makeReportData(period: 'Mes'));
         return ReportsBloc(getReportData: mockUseCase);
       },
-      act: (bloc) => bloc.add(ReportsLoadRequested(period: 'Mes')),
+      act: (bloc) => bloc.add(ReportsLoadRequested(period: 'Mes', associationId: 'assoc1')),
       expect: () => [
         isA<ReportsLoading>(),
         isA<ReportsLoaded>(),
@@ -129,13 +133,14 @@ void main() {
       'emite [ReportsLoading, ReportsLoaded] al cargar con periodo Ano',
       build: () {
         when(() => mockUseCase(
+              associationId: any(named: 'associationId'),
               period: any(named: 'period'),
               fromDate: any(named: 'fromDate'),
               toDate: any(named: 'toDate'),
             )).thenAnswer((_) async => _makeReportData(period: 'Ano'));
         return ReportsBloc(getReportData: mockUseCase);
       },
-      act: (bloc) => bloc.add(ReportsLoadRequested(period: 'Ano')),
+      act: (bloc) => bloc.add(ReportsLoadRequested(period: 'Ano', associationId: 'assoc1')),
       expect: () => [
         isA<ReportsLoading>(),
         isA<ReportsLoaded>(),
@@ -147,13 +152,14 @@ void main() {
       'emite [ReportsLoading, ReportsError] cuando el use case falla',
       build: () {
         when(() => mockUseCase(
+              associationId: any(named: 'associationId'),
               period: any(named: 'period'),
               fromDate: any(named: 'fromDate'),
               toDate: any(named: 'toDate'),
             )).thenThrow(Exception('Firestore no disponible'));
         return ReportsBloc(getReportData: mockUseCase);
       },
-      act: (bloc) => bloc.add(ReportsLoadRequested()),
+      act: (bloc) => bloc.add(ReportsLoadRequested(associationId: 'assoc1')),
       expect: () => [
         isA<ReportsLoading>(),
         isA<ReportsError>(),
@@ -165,13 +171,14 @@ void main() {
       'ReportsLoaded contiene el ReportData correcto',
       build: () {
         when(() => mockUseCase(
+              associationId: any(named: 'associationId'),
               period: any(named: 'period'),
               fromDate: any(named: 'fromDate'),
               toDate: any(named: 'toDate'),
             )).thenAnswer((_) async => _makeReportData());
         return ReportsBloc(getReportData: mockUseCase);
       },
-      act: (bloc) => bloc.add(ReportsLoadRequested()),
+      act: (bloc) => bloc.add(ReportsLoadRequested(associationId: 'assoc1')),
       verify: (bloc) {
         final state = bloc.state;
         expect(state, isA<ReportsLoaded>());
@@ -185,7 +192,7 @@ void main() {
 
     // ---- Periodo por defecto es Hoy ----
     test('ReportsLoadRequested tiene periodo Hoy por defecto', () {
-      final event = ReportsLoadRequested();
+      final event = ReportsLoadRequested(associationId: 'assoc1');
       expect(event.period, 'Hoy');
     });
 
@@ -194,13 +201,14 @@ void main() {
       'ReportsError contiene mensaje descriptivo',
       build: () {
         when(() => mockUseCase(
+              associationId: any(named: 'associationId'),
               period: any(named: 'period'),
               fromDate: any(named: 'fromDate'),
               toDate: any(named: 'toDate'),
             )).thenThrow(Exception('timeout'));
         return ReportsBloc(getReportData: mockUseCase);
       },
-      act: (bloc) => bloc.add(ReportsLoadRequested()),
+      act: (bloc) => bloc.add(ReportsLoadRequested(associationId: 'assoc1')),
       verify: (bloc) {
         final state = bloc.state;
         expect(state, isA<ReportsError>());
@@ -213,6 +221,7 @@ void main() {
       'dos cargas iguales emiten estados completos cada vez',
       build: () {
         when(() => mockUseCase(
+              associationId: any(named: 'associationId'),
               period: any(named: 'period'),
               fromDate: any(named: 'fromDate'),
               toDate: any(named: 'toDate'),
@@ -220,9 +229,9 @@ void main() {
         return ReportsBloc(getReportData: mockUseCase);
       },
       act: (bloc) async {
-        bloc.add(ReportsLoadRequested());
+        bloc.add(ReportsLoadRequested(associationId: 'assoc1'));
         await Future.delayed(const Duration(milliseconds: 100));
-        bloc.add(ReportsLoadRequested());
+        bloc.add(ReportsLoadRequested(associationId: 'assoc1'));
       },
       expect: () => [
         isA<ReportsLoading>(),
@@ -237,15 +246,15 @@ void main() {
   group('ReportsEvent Equatable', () {
     test('dos ReportsLoadRequested con mismo periodo son iguales', () {
       expect(
-        ReportsLoadRequested(period: 'Hoy'),
-        equals(ReportsLoadRequested(period: 'Hoy')),
+        ReportsLoadRequested(period: 'Hoy', associationId: 'assoc1'),
+        equals(ReportsLoadRequested(period: 'Hoy', associationId: 'assoc1')),
       );
     });
 
     test('dos ReportsLoadRequested con distinto periodo son distintos', () {
       expect(
-        ReportsLoadRequested(period: 'Hoy'),
-        isNot(equals(ReportsLoadRequested(period: 'Mes'))),
+        ReportsLoadRequested(period: 'Hoy', associationId: 'assoc1'),
+        isNot(equals(ReportsLoadRequested(period: 'Mes', associationId: 'assoc1'))),
       );
     });
   });

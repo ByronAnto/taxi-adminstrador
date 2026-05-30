@@ -4,6 +4,9 @@
 *.pyc
 *.swp
 .DS_Store
+
+# Node dependencies (functions/, client_web/) — nunca al repo
+node_modules/
 .atom/
 .build/
 .buildlog/

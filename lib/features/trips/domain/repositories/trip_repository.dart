@@ -37,8 +37,13 @@ abstract class TripRepository {
     required double distanceKm,
   });
 
-  /// Cancelar viaje
-  Future<void> cancelTrip(String tripId, {String? reason});
+  /// Finalizar viaje directamente (status 'finalizado' + finalizadoAt).
+  /// No captura tarifa: los totales solo cuentan cantidad de carreras.
+  Future<void> finalizeTrip(String tripId, {String? tripRequestId});
+
+  /// Cancelar viaje. Si la carrera vino de un `tripRequests/{id}`, se propaga
+  /// el estado 'cancelada' a esa colección (la lee el portal web).
+  Future<void> cancelTrip(String tripId, {String? reason, String? tripRequestId});
 
   /// Obtener estadísticas de viajes de un conductor
   Future<Map<String, dynamic>> getDriverTripStats(String driverId);

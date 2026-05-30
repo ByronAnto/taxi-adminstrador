@@ -11,7 +11,6 @@ import 'core/theme/app_theme.dart';
 import 'core/constants/app_constants.dart';
 import 'core/services/connectivity_service.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'core/services/agora_service.dart';
 import 'core/services/association_theme_service.dart';
 import 'core/services/current_user_context.dart';
 import 'core/services/driver_location_service.dart';
@@ -20,7 +19,9 @@ import 'core/services/fcm_token_service.dart';
 import 'core/services/local_audio_history_service.dart';
 import 'core/services/ptt_beep_service.dart';
 import 'core/services/overlay_ptt_service.dart';
+import 'package:livekit_client/livekit_client.dart' as lk;
 import 'core/services/radio_power_service.dart';
+import 'core/services/radio_foreground_service.dart';
 import 'core/services/claims_refresh_service.dart';
 import 'core/services/queue_alert_service.dart';
 import 'core/services/single_session_service.dart';
@@ -55,6 +56,17 @@ void main() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  // bypassVoiceProcessing=TRUE → MODE_NORMAL → el mic NO se reserva: otras apps
+  // (WhatsApp, grabadora) pueden usar el micrófono con el radio encendido
+  // (decisión de Byron: prioridad mic libre sobre cancelación de ruido). Sin
+  // AGC/NS de WebRTC; se compensa con boost de volumen + altavoz forzado. La
+  // cancelación de ruido queda como alternativa a evaluar (Krisp u otra).
+  try {
+    await lk.LiveKitClient.initialize(bypassVoiceProcessing: true);
+  } catch (e) {
+    debugPrint('LiveKitClient.initialize falló: $e');
+  }
 
   // Inicializar handler de mensajes FCM (canal Android + listeners foreground)
   await FcmMessageHandler.instance.initialize();
@@ -91,6 +103,12 @@ void main() async {
 
   // Cargar el último estado del walkie-talkie (ON/OFF persistido)
   await RadioPowerService.instance.initialize();
+
+  // Configurar el foreground service (flutter_foreground_task) al arrancar.
+  // Antes solo se hacía al abrir el walkie; ahora la ubicación (Activo General)
+  // también lo usa, así que debe estar listo aunque el conductor no entre al
+  // walkie. Idempotente.
+  RadioForegroundService.instance.init();
 
   // Inicializar historial de audios local (purga audios > 24h al iniciar)
   await LocalAudioHistoryService.instance.initialize();
@@ -131,8 +149,8 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
     WidgetsBinding.instance.removeObserver(this);
     // Marcar offline al cerrar la app
     DriverLocationService.instance.goOffline();
-    // Destruir Agora al cerrar la app
-    AgoraService.instance.dispose();
+    // Destruir el provider de voz activo (Agora/LiveKit) al cerrar la app
+    VoiceProviderFactory.current.dispose();
     super.dispose();
   }
 
@@ -214,6 +232,47 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                   associationId: user.associationId,
                   role: user.role,
                 );
+                // 🚫 Usuario suspendido/bloqueado: el bloqueo debe ser
+                // FUNCIONAL, no solo visual. Cortar voz + radio + FGS + overlay
+                // + ubicación, sin depender del desmontaje del walkie (que vive
+                // en un IndexedStack y no se desmonta). Mantenemos claims y
+                // single-session ligados para detectar si lo des-bloquean.
+                if (user.isBlocked) {
+                  debugPrint(
+                      '🚫 [Main] Usuario BLOQUEADO → teardown voz/radio/ubicación');
+                  SingleSessionService.instance.bind(user.uid);
+                  ClaimsRefreshService.instance.bind(user.uid);
+                  ClaimsRefreshService.instance.onProfileChanged = () {
+                    if (!context.mounted) return;
+                    context.read<AuthBloc>().add(AuthCheckRequested());
+                  };
+                  RadioPowerService.instance.turnOff();
+                  VoiceProviderFactory.current.dispose();
+                  RadioForegroundService.instance.stopService();
+                  RadioForegroundService.instance.setLocationTracking(false);
+                  OverlayPttService.instance.stop();
+                  DriverLocationService.instance.goOffline(hardOffline: true);
+                  return;
+                }
+                // Seleccionar el provider de voz (Agora/LiveKit). Por defecto
+                // se lee el feature flag `voiceProvider` de la asociación.
+                // Override de pruebas: `--dart-define=VOICE_PROVIDER=livekit`
+                // (o `agora`) fuerza el provider SIN tocar Firestore — útil
+                // para probar LiveKit en un dispositivo sin migrar la coop.
+                const voiceOverride =
+                    String.fromEnvironment('VOICE_PROVIDER');
+                if (voiceOverride == 'livekit' || voiceOverride == 'agora') {
+                  debugPrint(
+                      '🎙️ [Main] VOICE_PROVIDER override → $voiceOverride');
+                  VoiceProviderFactory.forceUse(voiceOverride);
+                } else {
+                  VoiceProviderFactory.selectFor(user.associationId);
+                }
+                // Restaurar el radio PTT si ESTE conductor lo dejó encendido
+                // (comportamiento Zello). Scoped por uid → no hereda entre
+                // conductores. Si queda ON, el walkie reconecta al último
+                // canal al cargar.
+                RadioPowerService.instance.restoreForUser(user.uid);
                 // Garantizar 1 sola sesión activa: este login GANA, los
                 // demás dispositivos verán el mismatch y se cerrarán.
                 SingleSessionService.instance.bind(user.uid);
@@ -240,10 +299,9 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                 FcmTokenService.instance.bind(user.uid);
                 // Cargar theme custom de la asociación (logo + colores).
                 AssociationThemeService.instance.loadFor(user.associationId);
-                // Seleccionar provider de audio (Agora|LiveKit) según el
-                // flag `voiceProvider` en associations/{id}. Default Agora.
-                // Rollback en 5 s cambiando el campo en Firestore + reinicio.
-                VoiceProviderFactory.selectFor(user.associationId);
+                // (La selección del provider de voz se hace arriba, con
+                // soporte de override por --dart-define. No duplicar aquí:
+                // un segundo selectFor pisaba el override → volvía a Agora.)
                 // Inicializar GPS para conductores y admins con vehículo
                 if (user.role == AppConstants.roleDriver ||
                     (user.role == AppConstants.roleAdmin &&
@@ -259,6 +317,14 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                 }
               } else if (state is AuthUnauthenticated) {
                 CurrentUserContext.instance.clear();
+                // BUG 1 — al cerrar sesión, resetear la sesión de voz:
+                // desconectar la Room viva e invalidar el token cacheado (que
+                // embebe la identidad/uid del usuario saliente). Sin esto, al
+                // entrar otra cuenta SIN reiniciar la app el dispositivo seguía
+                // conectado a LiveKit con la identidad anterior y reusaba su
+                // token. resetForUserChange deja el provider listo para pedir
+                // un token fresco con la nueva identidad en el próximo join.
+                VoiceProviderFactory.resetForUserChange();
                 FcmTokenService.instance.unbind();
                 SingleSessionService.instance.unbind();
                 ClaimsRefreshService.instance.onProfileChanged = null;
@@ -378,8 +444,20 @@ class _SingleSessionGateState extends State<_SingleSessionGate> {
   Future<void> _showModal() async {
     final ctx = context;
     if (!ctx.mounted) return;
+    // `_SingleSessionGate` vive en el `builder` de MaterialApp.router, POR
+    // ENCIMA del Navigator de go_router → `showDialog(context: ctx)` hacía
+    // `Navigator.of()` → null → crash (pantalla gris). Usamos el context del
+    // Navigator raíz (expuesto vía rootNavigatorKey) para abrir el diálogo
+    // dentro del overlay correcto. Si el Navigator aún no está montado,
+    // abortamos sin romper (se reintenta en el próximo cambio de `kicked`).
+    final navState = rootNavigatorKey.currentState;
+    final dialogContext = navState?.overlay?.context ?? navState?.context;
+    if (navState == null || dialogContext == null) {
+      _shown = false; // permitir reintento
+      return;
+    }
     await showDialog<void>(
-      context: ctx,
+      context: dialogContext,
       barrierDismissible: false,
       builder: (dCtx) => AlertDialog(
         icon: const Icon(Icons.warning_amber_rounded,

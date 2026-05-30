@@ -231,6 +231,28 @@ class _DriverReportPageState extends State<DriverReportPage> {
             ),
           ],
         ),
+        const SizedBox(height: 10),
+        // Estimado por tarifa mínima de Quito (UTC-5): el propio vs el de la
+        // base (asociación). Sirve cuando no se registra el cobro real.
+        Row(
+          children: [
+            Expanded(
+              child: _kpi(
+                  'Mi estimado',
+                  fmt.format(r.estimatedRevenue),
+                  Icons.calculate_outlined,
+                  Colors.teal.shade700),
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: _kpi(
+                  'Estimado base',
+                  fmt.format(r.associationEstimatedRevenue),
+                  Icons.groups_outlined,
+                  Colors.blue.shade700),
+            ),
+          ],
+        ),
         const SizedBox(height: 24),
 
         // Carreras por origen

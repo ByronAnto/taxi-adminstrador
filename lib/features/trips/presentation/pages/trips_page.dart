@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/driver_location_service.dart';
@@ -12,6 +13,7 @@ import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/models/trip_model.dart';
 import '../../domain/usecases/trip_usecases.dart';
 import '../bloc/trip_bloc.dart';
+import '../widgets/active_driver_picker_sheet.dart';
 
 /// Página de gestión de carreras/viajes
 class TripsPage extends StatefulWidget {
@@ -29,7 +31,12 @@ class _TripsPageState extends State<TripsPage>
   /// Mapeo de los chips válidos por tab. Evita combinaciones imposibles
   /// como "Historial + Asignado" (asignado nunca está en historial).
   static const _filtersForActive = ['Todos', 'En progreso', 'Asignado'];
-  static const _filtersForHistory = ['Todos', 'Completado', 'Cancelado'];
+  static const _filtersForHistory = [
+    'Todos',
+    'Finalizado',
+    'Completado',
+    'Cancelado',
+  ];
 
   @override
   void initState() {
@@ -39,8 +46,41 @@ class _TripsPageState extends State<TripsPage>
     // lugar canónico para análisis.
     _tabController = TabController(length: 2, vsync: this);
     _tabController.addListener(_onTabChanged);
-    context.read<TripBloc>().add(TripsWatchStarted());
-    context.read<TripBloc>().add(TripHistoryLoadRequested());
+
+    // Visibilidad por rol (debe cuadrar con las reglas Firestore):
+    // - Conductor: solo SUS carreras (watchTripsByDriver(uid)). No debe ver
+    //   las carreras asignadas a otros conductores.
+    // - Operadora/Admin: todas las activas (watchActiveTrips()).
+    final auth = context.read<AuthBloc>().state;
+    final isDriver = auth is AuthAuthenticated &&
+        auth.user.role == AppConstants.roleDriver;
+    if (isDriver) {
+      final uid = (auth).user.uid;
+      context.read<TripBloc>().add(TripsWatchStarted(driverId: uid));
+      context.read<TripBloc>().add(TripHistoryLoadRequested(driverId: uid));
+    } else {
+      context.read<TripBloc>().add(TripsWatchStarted());
+      context.read<TripBloc>().add(TripHistoryLoadRequested());
+    }
+  }
+
+  /// uid del conductor logueado, o null si el rol es operadora/admin.
+  /// Centraliza la decisión de query por rol para no divergir entre el
+  /// arranque (initState) y los refrescos tras una acción (listener).
+  String? get _driverScopeUid {
+    final auth = context.read<AuthBloc>().state;
+    if (auth is AuthAuthenticated &&
+        auth.user.role == AppConstants.roleDriver) {
+      return auth.user.uid;
+    }
+    return null;
+  }
+
+  /// Relanza los streams/historial respetando la visibilidad por rol.
+  void _refreshTripStreams() {
+    final uid = _driverScopeUid;
+    context.read<TripBloc>().add(TripsWatchStarted(driverId: uid));
+    context.read<TripBloc>().add(TripHistoryLoadRequested(driverId: uid));
   }
 
   /// Si el usuario tenía un chip que no aplica al nuevo tab, resetea a "Todos".
@@ -82,8 +122,7 @@ class _TripsPageState extends State<TripsPage>
               backgroundColor: AppTheme.statusFree,
             ),
           );
-          context.read<TripBloc>().add(TripsWatchStarted());
-          context.read<TripBloc>().add(TripHistoryLoadRequested());
+          _refreshTripStreams();
         } else if (state is TripError) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
@@ -96,9 +135,30 @@ class _TripsPageState extends State<TripsPage>
       buildWhen: (prev, curr) =>
           curr is TripsLoaded || curr is TripLoading || curr is TripInitial,
       builder: (context, state) {
-        return Column(
-          children: [
-            _buildQuickTripBar(),
+        // Esta página se abre como ruta pusheada (context.push('/trips')),
+        // por eso necesita su propio Scaffold + AppBar con flecha de
+        // regresar. El leading usa context.pop() (go_router) para volver a
+        // la pantalla anterior; si no hay nada que descartar, hace fallback
+        // a la raíz.
+        final title = _driverScopeUid != null ? 'Mis carreras' : 'Carreras';
+        return Scaffold(
+          appBar: AppBar(
+            title: Text(title),
+            leading: IconButton(
+              icon: const Icon(Icons.arrow_back),
+              tooltip: 'Regresar',
+              onPressed: () {
+                if (context.canPop()) {
+                  context.pop();
+                } else {
+                  context.go('/');
+                }
+              },
+            ),
+          ),
+          body: Column(
+            children: [
+              _buildQuickTripBar(),
             Container(
               color: AppTheme.secondaryColor,
               child: TabBar(
@@ -124,7 +184,8 @@ class _TripsPageState extends State<TripsPage>
                       ],
                     ),
             ),
-          ],
+            ],
+          ),
         );
       },
     );
@@ -343,9 +404,18 @@ class _TripsPageState extends State<TripsPage>
     );
   }
 
+  /// Filtro client-side: esta pantalla SOLO muestra las carreras del flujo
+  /// web (`source == 'webCliente'`), tanto en Activas como en Historial. Las
+  /// de calle (`street`) y parada/cola (`standQueue`) siguen otro flujo (se
+  /// finalizan al día siguiente) y no pertenecen a este apartado web de
+  /// asignar→finalizar. Se aplica sobre los resultados del stream para no
+  /// requerir índices Firestore nuevos. Las carreras viejas sin `source` se
+  /// leen como `manual` en el modelo, así que quedan excluidas (no-web).
+  static bool _isWebTrip(TripModel t) => t.source == TripSource.webCliente;
+
   List<TripModel> _getActiveTrips(TripState state) {
     if (state is! TripsLoaded) return [];
-    final trips = state.activeTrips;
+    final trips = state.activeTrips.where(_isWebTrip);
     if (_filterStatus == 'Todos') {
       return trips.where((t) => t.status == 'en_progreso' || t.status == 'asignado').toList();
     }
@@ -355,9 +425,17 @@ class _TripsPageState extends State<TripsPage>
 
   List<TripModel> _getHistoryTrips(TripState state) {
     if (state is! TripsLoaded) return [];
-    final trips = state.historyTrips;
+    final trips = state.historyTrips.where(_isWebTrip);
     if (_filterStatus == 'Todos') {
-      return trips.where((t) => t.status == 'completado' || t.status == 'cancelado').toList();
+      // El historial incluye las carreras finalizadas (status nuevo
+      // 'finalizado' del botón "Viaje finalizado"), las completadas (alias
+      // legacy 'completado') y las canceladas.
+      return trips
+          .where((t) =>
+              t.status == TripStatus.finalizado ||
+              t.status == TripStatus.completado ||
+              t.status == TripStatus.cancelado)
+          .toList();
     }
     final statusKey = _filterStatus.toLowerCase().replaceAll(' ', '_');
     return trips.where((t) => t.status == statusKey).toList();
@@ -365,19 +443,6 @@ class _TripsPageState extends State<TripsPage>
 
   Widget _buildActiveTrips(TripState state) {
     final activeTrips = _getActiveTrips(state);
-    if (activeTrips.isEmpty) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.local_taxi, size: 64, color: Colors.grey[300]),
-            const SizedBox(height: 16),
-            Text('No hay carreras activas',
-                style: TextStyle(color: Colors.grey[500], fontSize: 16)),
-          ],
-        ),
-      );
-    }
     // Separar carreras programadas (paraCuando en futuro) de inmediatas.
     // Las programadas van arriba con badge "PROGRAMADA · 14:30".
     final now = DateTime.now();
@@ -394,6 +459,25 @@ class _TripsPageState extends State<TripsPage>
     return ListView(
       padding: const EdgeInsets.all(12),
       children: [
+        // Sección "Por asignar": solicitudes pendientes del tenant. Visible a
+        // TODOS los roles (lectura); el botón "Asignar" se restringe dentro
+        // del widget a operadora/admin.
+        _buildPendingRequestsSection(),
+        if (activeTrips.isEmpty)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 32),
+            child: Center(
+              child: Column(
+                children: [
+                  Icon(Icons.local_taxi, size: 64, color: Colors.grey[300]),
+                  const SizedBox(height: 16),
+                  Text('No hay carreras web por ahora',
+                      style:
+                          TextStyle(color: Colors.grey[500], fontSize: 16)),
+                ],
+              ),
+            ),
+          ),
         if (scheduled.isNotEmpty) ...[
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 6),
@@ -431,6 +515,132 @@ class _TripsPageState extends State<TripsPage>
         ],
         for (final t in immediate) _buildTripCard(t, isActive: true),
       ],
+    );
+  }
+
+  /// Sección "Por asignar": tripRequests con estado 'pendiente' del tenant.
+  ///
+  /// La lista es de SOLO LECTURA para conductores (ven qué carreras hay por
+  /// asignar pero no pueden asignarlas). Operadora/admin obtienen el botón
+  /// "Asignar". Si no hay pendientes, no ocupa espacio.
+  Widget _buildPendingRequestsSection() {
+    final auth = context.watch<AuthBloc>().state;
+    if (auth is! AuthAuthenticated) return const SizedBox.shrink();
+    final user = auth.user;
+    final aid = user.associationId;
+    final canAssign = user.role == AppConstants.roleAdmin ||
+        user.role == AppConstants.roleOperator;
+
+    return StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
+      stream: FirebaseFirestore.instance
+          .collection(AppConstants.tripRequestsCollection)
+          .where('associationId', isEqualTo: aid)
+          .where('estado', isEqualTo: 'pendiente')
+          .orderBy('cuandoSolicitado', descending: true)
+          .limit(50)
+          .snapshots(),
+      builder: (context, snap) {
+        final docs = snap.data?.docs ?? [];
+        if (docs.isEmpty) return const SizedBox.shrink();
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Row(
+                children: [
+                  Icon(Icons.assignment_late,
+                      size: 16, color: Colors.orange.shade800),
+                  const SizedBox(width: 6),
+                  Text(
+                    'POR ASIGNAR (${docs.length})',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.6,
+                      color: Colors.orange.shade800,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            for (final d in docs)
+              _buildPendingRequestCard(
+                d.reference,
+                d.data(),
+                canAssign: canAssign,
+                user: user,
+                aid: aid,
+              ),
+            const SizedBox(height: 16),
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Text(
+                'CARRERAS ASIGNADAS',
+                style: TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.w900,
+                  letterSpacing: 0.6,
+                  color: Colors.grey.shade700,
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Card de una solicitud pendiente. El botón "Asignar" solo aparece para
+  /// operadora/admin; el conductor la ve en modo lectura.
+  Widget _buildPendingRequestCard(
+    DocumentReference<Map<String, dynamic>> ref,
+    Map<String, dynamic> r, {
+    required bool canAssign,
+    required dynamic user,
+    required String aid,
+  }) {
+    final cuando = (r['cuandoSolicitado'] as Timestamp?)?.toDate();
+    final origen = r['origen'] as Map<String, dynamic>?;
+    final destino = r['destino'] as Map<String, dynamic>?;
+    return Card(
+      elevation: 1,
+      shape: RoundedRectangleBorder(
+        side: BorderSide(color: Colors.orange.shade200),
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: ListTile(
+        leading: CircleAvatar(
+          backgroundColor: Colors.orange.withValues(alpha: 0.15),
+          child: Icon(Icons.schedule, color: Colors.orange.shade800),
+        ),
+        title: Text(
+          r['clienteNombre'] ?? 'Cliente sin nombre',
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            if ((r['clienteTelefono'] ?? '').toString().isNotEmpty)
+              Text('📞 ${r['clienteTelefono']}'),
+            Text('📍 ${origen?['address'] ?? '(sin origen)'}'),
+            if (destino != null && destino['address'] != null)
+              Text('🏁 ${destino['address']}'),
+            if (cuando != null)
+              Text(
+                'Solicitada: ${DateFormat('dd MMM HH:mm').format(cuando)}',
+                style:
+                    TextStyle(fontSize: 11, color: Colors.grey.shade600),
+              ),
+          ],
+        ),
+        trailing: canAssign
+            ? FilledButton.tonal(
+                onPressed: () => _assignPendingRequest(ref, r, user, aid),
+                child: const Text('Asignar'),
+              )
+            : null,
+      ),
     );
   }
 
@@ -529,7 +739,7 @@ class _TripsPageState extends State<TripsPage>
                 children: [
                   Icon(Icons.history, size: 64, color: Colors.grey[300]),
                   const SizedBox(height: 16),
-                  Text('Sin carreras en el historial',
+                  Text('No hay carreras web en el historial',
                       style: TextStyle(
                           color: Colors.grey[500], fontSize: 16)),
                 ],
@@ -568,6 +778,10 @@ class _TripsPageState extends State<TripsPage>
         statusColor = AppTheme.statusReturning;
         statusLabel = 'Asignado';
         statusIcon = Icons.assignment;
+      case 'finalizado':
+        statusColor = Colors.blue;
+        statusLabel = 'Finalizado';
+        statusIcon = Icons.flag;
       case 'completado':
         statusColor = Colors.blue;
         statusLabel = 'Completado';
@@ -657,13 +871,30 @@ class _TripsPageState extends State<TripsPage>
               const SizedBox(height: 12),
               const Divider(height: 1),
               const SizedBox(height: 12),
+              // Carrera web: lo relevante es el cliente. Mostramos su nombre
+              // de forma prominente (+ teléfono si hay) y el conductor por
+              // NOMBRE denormalizado, nunca por UID crudo.
               Row(
                 children: [
                   const Icon(Icons.person, size: 16, color: AppTheme.textSecondary),
                   const SizedBox(width: 4),
-                  Text(trip.driverId,
-                      style: const TextStyle(fontSize: 13, color: AppTheme.textSecondary)),
-                  const Spacer(),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(trip.clienteNombre ?? 'Cliente',
+                            style: const TextStyle(
+                                fontSize: 14, fontWeight: FontWeight.w600)),
+                        if ((trip.clienteTelefono ?? '').trim().isNotEmpty)
+                          Text('📞 ${trip.clienteTelefono!.trim()}',
+                              style: const TextStyle(
+                                  fontSize: 12, color: AppTheme.textSecondary)),
+                        Text('Conductor: ${trip.driverName ?? 'Conductor'}',
+                            style: const TextStyle(
+                                fontSize: 12, color: AppTheme.textSecondary)),
+                      ],
+                    ),
+                  ),
                   if (trip.fare != null && trip.fare! > 0)
                     Text('\$${trip.fare!.toStringAsFixed(2)}',
                         style: const TextStyle(
@@ -672,36 +903,7 @@ class _TripsPageState extends State<TripsPage>
                             color: AppTheme.secondaryColor)),
                 ],
               ),
-              if (isActive) ...[
-                const SizedBox(height: 12),
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.end,
-                  children: [
-                    OutlinedButton.icon(
-                      onPressed: () => _cancelTrip(trip),
-                      icon: const Icon(Icons.cancel, size: 16),
-                      label: const Text('Cancelar'),
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: AppTheme.errorColor,
-                        side: const BorderSide(color: AppTheme.errorColor),
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                      ),
-                    ),
-                    const SizedBox(width: 8),
-                    if (trip.status == 'en_progreso')
-                      ElevatedButton.icon(
-                        onPressed: () => _completeTrip(trip),
-                        icon: const Icon(Icons.check, size: 16),
-                        label: const Text('Completar'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: AppTheme.statusFree,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-                        ),
-                      ),
-                  ],
-                ),
-              ],
+              if (isActive) _buildActiveCardActions(trip),
             ],
           ),
         ),
@@ -709,13 +911,112 @@ class _TripsPageState extends State<TripsPage>
     );
   }
 
+  /// Botones de acción inline en una card de carrera activa.
+  ///
+  /// - El conductor DUEÑO (driverId == uid) puede "Viaje finalizado" desde
+  ///   'asignado' o 'en_progreso' (cierra directo, sin tarifa).
+  /// - "Completar" (legacy, captura datos por defecto) se mantiene solo para
+  ///   'en_progreso'.
+  /// - "Cancelar" disponible para operadora/admin sobre carreras vivas.
+  Widget _buildActiveCardActions(TripModel trip) {
+    final auth = context.read<AuthBloc>().state;
+    final user = auth is AuthAuthenticated ? auth.user : null;
+    final isDriverOwner = user != null && trip.driverId == user.uid;
+    final isOperatorOrAdmin = user != null &&
+        (user.role == AppConstants.roleAdmin ||
+            user.role == AppConstants.roleOperator);
+    final isLive = !trip.isFinished && trip.status != TripStatus.cancelado;
+
+    final buttons = <Widget>[];
+
+    if (isOperatorOrAdmin && isLive) {
+      // "Reasignar" visible directamente en la tarjeta (antes solo estaba
+      // enterrada en la hoja de detalle y la operadora no la encontraba).
+      // Reutiliza el flujo existente `_reassignTrip` (selector de activos +
+      // auditoría en trips/{id}/reassignments).
+      buttons.add(OutlinedButton.icon(
+        onPressed: () => _reassignTrip(trip),
+        icon: const Icon(Icons.swap_horiz, size: 16),
+        label: const Text('Reasignar'),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: AppTheme.secondaryColor,
+          side: const BorderSide(color: AppTheme.secondaryColor),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        ),
+      ));
+      buttons.add(OutlinedButton.icon(
+        onPressed: () => _cancelTrip(trip),
+        icon: const Icon(Icons.cancel, size: 16),
+        label: const Text('Cancelar'),
+        style: OutlinedButton.styleFrom(
+          foregroundColor: AppTheme.errorColor,
+          side: const BorderSide(color: AppTheme.errorColor),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        ),
+      ));
+    }
+
+    // "Viaje finalizado": el conductor dueño cierra la carrera directamente
+    // desde 'asignado' (o 'en_progreso'). No captura monto — los totales solo
+    // cuentan cantidad de carreras y los incrementa una Cloud Function.
+    if (isDriverOwner && isLive) {
+      buttons.add(ElevatedButton.icon(
+        onPressed: () => _finalizeTrip(trip),
+        icon: const Icon(Icons.flag, size: 16),
+        label: const Text('Viaje finalizado'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: AppTheme.primaryColor,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        ),
+      ));
+    }
+
+    if (trip.status == 'en_progreso' && (isDriverOwner || isOperatorOrAdmin)) {
+      buttons.add(ElevatedButton.icon(
+        onPressed: () => _completeTrip(trip),
+        icon: const Icon(Icons.check, size: 16),
+        label: const Text('Completar'),
+        style: ElevatedButton.styleFrom(
+          backgroundColor: AppTheme.statusFree,
+          foregroundColor: Colors.white,
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        ),
+      ));
+    }
+
+    if (buttons.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(top: 12),
+      child: Wrap(
+        alignment: WrapAlignment.end,
+        spacing: 8,
+        runSpacing: 8,
+        children: buttons,
+      ),
+    );
+  }
+
+  /// Finaliza la carrera (status 'finalizado' + finalizadoAt). Confirma con
+  /// un SnackBar a través del listener del BlocConsumer (TripActionSuccess).
+  void _finalizeTrip(TripModel trip) {
+    context.read<TripBloc>().add(
+          TripFinalizeRequested(trip.uid, tripRequestId: trip.tripRequestId),
+        );
+  }
+
+  /// Cancela la carrera (operadora/admin). Pide confirmación + motivo opcional,
+  /// despacha [TripCancelRequested] (pone `status: 'cancelado'` + `canceladoAt`
+  /// + `updatedAt`) y propaga la cancelación al `tripRequests/{id}` enlazado
+  /// (`estado: 'cancelada'`) cuando existe `tripRequestId`. El resultado se
+  /// confirma con un SnackBar vía el listener del BlocConsumer.
   void _cancelTrip(TripModel trip) {
     showDialog(
       context: context,
       builder: (ctx) {
         final reasonController = TextEditingController();
         return AlertDialog(
-          title: const Text('Cancelar carrera'),
+          title: const Text('¿Cancelar esta carrera?'),
           content: TextField(
             controller: reasonController,
             decoration: const InputDecoration(
@@ -731,6 +1032,7 @@ class _TripsPageState extends State<TripsPage>
                 context.read<TripBloc>().add(TripCancelRequested(
                   trip.uid,
                   reason: reasonController.text.isNotEmpty ? reasonController.text : null,
+                  tripRequestId: trip.tripRequestId,
                 ));
               },
               style: ElevatedButton.styleFrom(backgroundColor: AppTheme.errorColor),
@@ -783,7 +1085,13 @@ class _TripsPageState extends State<TripsPage>
               Text('Carrera ${trip.uid.length > 8 ? trip.uid.substring(0, 8) : trip.uid}',
                   style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20)),
               const SizedBox(height: 16),
-              _detailRow(Icons.person, 'Conductor', trip.driverId),
+              // Mostramos nombres legibles, nunca UIDs crudos.
+              _detailRow(Icons.account_circle, 'Cliente',
+                  trip.clienteNombre ?? 'Cliente'),
+              if ((trip.clienteTelefono ?? '').trim().isNotEmpty)
+                _detailRow(Icons.phone, 'Teléfono', trip.clienteTelefono!.trim()),
+              _detailRow(
+                  Icons.person, 'Conductor', trip.driverName ?? trip.driverId),
               if (trip.vehicleId != null)
                 _detailRow(Icons.directions_car, 'Vehículo', trip.vehicleId!),
               _detailRow(Icons.location_on, 'Origen', trip.pickupAddress),
@@ -822,11 +1130,63 @@ class _TripsPageState extends State<TripsPage>
     final canCancel = isOperatorOrAdmin && !trip.isFinished &&
         trip.status != TripStatus.cancelado;
     final canDelete = user.role == AppConstants.roleAdmin;
+    // Reasignar: solo operadora/admin y solo sobre carreras vivas
+    // (asignada / en ruta / en progreso). No tiene sentido reasignar una
+    // carrera finalizada o cancelada.
+    final canReassign = isOperatorOrAdmin &&
+        !trip.isFinished &&
+        trip.status != TripStatus.cancelado;
+
+    // Acciones del conductor asignado: navegar al punto de recogida y
+    // llamar al cliente. Solo se muestran cuando el conductor es el dueño
+    // de la carrera y existen los datos necesarios.
+    final hasPickupLocation =
+        trip.pickupLatitude != 0.0 || trip.pickupLongitude != 0.0;
+    final clientPhone = (trip.clienteTelefono ?? '').trim();
+    final hasClientPhone = clientPhone.isNotEmpty;
+
+    // El conductor dueño puede finalizar la carrera viva directamente.
+    final canFinalize = isDriverOwner &&
+        !trip.isFinished &&
+        trip.status != TripStatus.cancelado;
 
     return Wrap(
       spacing: 8,
       runSpacing: 8,
       children: [
+        if (canFinalize)
+          ElevatedButton.icon(
+            onPressed: () {
+              Navigator.of(sheetCtx).pop();
+              _finalizeTrip(trip);
+            },
+            icon: const Icon(Icons.flag, size: 18),
+            label: const Text('Viaje finalizado'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.primaryColor,
+              foregroundColor: Colors.white,
+            ),
+          ),
+        if (isDriverOwner && hasPickupLocation)
+          ElevatedButton.icon(
+            onPressed: () => _navigateToPickup(trip),
+            icon: const Icon(Icons.navigation, size: 18),
+            label: const Text('Navegar a recogida'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.statusFree,
+              foregroundColor: Colors.white,
+            ),
+          ),
+        if (isDriverOwner && hasClientPhone)
+          ElevatedButton.icon(
+            onPressed: () => _callClient(clientPhone),
+            icon: const Icon(Icons.phone, size: 18),
+            label: const Text('Llamar al cliente'),
+            style: ElevatedButton.styleFrom(
+              backgroundColor: AppTheme.secondaryColor,
+              foregroundColor: Colors.white,
+            ),
+          ),
         if (canEdit)
           ElevatedButton.icon(
             onPressed: () {
@@ -835,6 +1195,19 @@ class _TripsPageState extends State<TripsPage>
             },
             icon: const Icon(Icons.edit, size: 18),
             label: const Text('Editar'),
+          ),
+        if (canReassign)
+          OutlinedButton.icon(
+            onPressed: () {
+              Navigator.of(sheetCtx).pop();
+              _reassignTrip(trip);
+            },
+            icon: const Icon(Icons.swap_horiz, size: 18),
+            label: const Text('Reasignar'),
+            style: OutlinedButton.styleFrom(
+              foregroundColor: AppTheme.secondaryColor,
+              side: const BorderSide(color: AppTheme.secondaryColor),
+            ),
           ),
         if (canCancel)
           OutlinedButton.icon(
@@ -860,6 +1233,242 @@ class _TripsPageState extends State<TripsPage>
             ),
           ),
       ],
+    );
+  }
+
+  /// Asigna una solicitud pendiente (tripRequests) a un conductor activo.
+  ///
+  /// Reutiliza el mismo selector y contrato de datos que
+  /// `TripRequestsPage._assignRequest`: crea el doc en `trips/` con
+  /// `tripRequestId` y refleja en el tripRequest `estado: 'asignada'`,
+  /// `tripId` y `driverId` (para que el portal web del cliente y la Cloud
+  /// Function vean el enlace). Solo operadora/admin llegan aquí.
+  Future<void> _assignPendingRequest(
+    DocumentReference<Map<String, dynamic>> reqRef,
+    Map<String, dynamic> reqData,
+    dynamic user,
+    String aid,
+  ) async {
+    final pick = await showActiveDriverPicker(context, associationId: aid);
+    if (pick == null) return;
+    if (!mounted) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    final now = DateTime.now();
+    final tripId = const Uuid().v4();
+    final reqId = reqRef.id;
+    final origen = reqData['origen'] as Map<String, dynamic>?;
+    final destino = reqData['destino'] as Map<String, dynamic>?;
+    final operatorName = '${user.name} ${user.lastname}'.trim();
+
+    final trip = TripModel(
+      uid: tripId,
+      associationId: aid,
+      driverId: pick.userId,
+      driverName: pick.driverName,
+      operatorId: user.uid,
+      operatorName: operatorName,
+      tripRequestId: reqId,
+      clienteNombre: reqData['clienteNombre'],
+      clienteTelefono: reqData['clienteTelefono'],
+      pickupLatitude: (origen?['lat'] ?? 0.0).toDouble(),
+      pickupLongitude: (origen?['lng'] ?? 0.0).toDouble(),
+      pickupAddress: origen?['address'] ?? '',
+      dropoffLatitude:
+          destino != null ? (destino['lat'] ?? 0.0).toDouble() : null,
+      dropoffLongitude:
+          destino != null ? (destino['lng'] ?? 0.0).toDouble() : null,
+      dropoffAddress: destino?['address'],
+      status: TripStatus.asignado,
+      source: TripSource.webCliente,
+      startTime: now,
+      notes: reqData['notas'],
+      createdAt: now,
+    );
+
+    try {
+      await FirebaseFirestore.instance
+          .collection(AppConstants.tripsCollection)
+          .doc(tripId)
+          .set(trip.toFirestore());
+      await reqRef.update({
+        'estado': 'asignada',
+        'tripId': tripId,
+        'driverId': pick.userId,
+        // Datos denormalizados del conductor para que el portal web del
+        // cliente los lea desde su propio tripRequest (no tiene permiso para
+        // leer la colección `drivers/`).
+        'conductorNombre': pick.driverName,
+        'conductorVehiculo': pick.vehicleNumber,
+        // Compatibilidad con lectores previos:
+        'asignadoA': pick.userId,
+        'asignadoTripId': tripId,
+        'asignadoAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Carrera asignada a ${pick.driverName}'),
+          backgroundColor: AppTheme.statusFree,
+        ),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    }
+  }
+
+  /// Reasigna (redirecciona) una carrera viva a OTRO conductor activo.
+  ///
+  /// Reutiliza el selector centralizado de conductores activos
+  /// ([showActiveDriverPicker], mismo stream/filtro que la asignación inicial)
+  /// y deja registro de auditoría del cambio en
+  /// `trips/{id}/reassignments/{autoId}` + campos rápidos en el doc principal.
+  Future<void> _reassignTrip(TripModel trip) async {
+    final auth = context.read<AuthBloc>().state;
+    if (auth is! AuthAuthenticated) return;
+    final operator_ = auth.user;
+    final aid = operator_.associationId;
+
+    // 1) Elegir el nuevo conductor (se excluye el conductor actual).
+    final pick = await showActiveDriverPicker(
+      context,
+      associationId: aid,
+      title: 'Reasignar carrera a…',
+      excludeUserId: trip.driverId,
+    );
+    if (pick == null) return;
+    if (!mounted) return;
+
+    // 2) Capturar un motivo opcional del cambio.
+    final reason = await _askReassignReason(pick.driverName);
+    if (!mounted) return;
+    // Si el usuario cerró el diálogo con el botón "No reasignar", abortamos.
+    if (reason == _kReassignCancelled) return;
+
+    final messenger = ScaffoldMessenger.of(context);
+    final changedByName =
+        '${operator_.name} ${operator_.lastname}'.trim();
+
+    final tripRef =
+        FirebaseFirestore.instance.collection('trips').doc(trip.uid);
+    final reassignmentRef = tripRef.collection('reassignments').doc();
+
+    try {
+      // Escritura atómica: actualiza el trip + agrega el registro de
+      // auditoría en la subcolección, en un solo batch.
+      final batch = FirebaseFirestore.instance.batch();
+      batch.update(tripRef, {
+        'driverId': pick.userId,
+        'driverName': pick.driverName,
+        // Datos rápidos para mostrar el último cambio sin abrir la subcol.
+        'previousDriverId': trip.driverId,
+        'previousDriverName': trip.driverName,
+        'reassignedAt': FieldValue.serverTimestamp(),
+        'reassignedByUid': operator_.uid,
+        'reassignedByName': changedByName,
+        'reassignmentCount': FieldValue.increment(1),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      batch.set(reassignmentRef, {
+        'associationId': trip.associationId,
+        'fromDriverId': trip.driverId,
+        'fromDriverName': trip.driverName,
+        'toDriverId': pick.userId,
+        'toDriverName': pick.driverName,
+        'changedByUid': operator_.uid,
+        'changedByName': changedByName,
+        'reason': (reason ?? '').trim().isEmpty ? null : reason!.trim(),
+        'timestamp': FieldValue.serverTimestamp(),
+      });
+      // Propaga el nuevo conductor al tripRequest enlazado (si existe), para
+      // que el portal web del cliente vea el taxi reasignado sin leer
+      // `drivers/`. Se hace en el mismo batch para mantener la atomicidad.
+      final tripRequestId = trip.tripRequestId;
+      if (tripRequestId != null && tripRequestId.isNotEmpty) {
+        final reqRef = FirebaseFirestore.instance
+            .collection(AppConstants.tripRequestsCollection)
+            .doc(tripRequestId);
+        batch.update(reqRef, {
+          'driverId': pick.userId,
+          'conductorNombre': pick.driverName,
+          'conductorVehiculo': pick.vehicleNumber,
+          'updatedAt': FieldValue.serverTimestamp(),
+        });
+      }
+      await batch.commit();
+
+      // NOTA / TODO (status del conductor): NO tocamos el campo `status` de
+      // los docs `drivers/` (ni el anterior a 'libre' ni el nuevo a
+      // 'con_pasajero'). En esta app el status del conductor no se cambia
+      // automáticamente al asignar (ver AssignTripModal) — lo maneja el
+      // propio conductor / el flujo de queue. Cambiarlo aquí podría pisar
+      // ese estado y dejar al conductor anterior marcado libre cuando aún
+      // está atendiendo otra carrera. Se deja explícito como decisión.
+
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Carrera reasignada a ${pick.driverName}'),
+          backgroundColor: AppTheme.statusFree,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Error al reasignar: $e'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    }
+  }
+
+  /// Centinela para distinguir "diálogo cancelado" de "sin motivo".
+  static const String _kReassignCancelled = '__cancelled__';
+
+  /// Pide un motivo opcional para la reasignación. Devuelve el texto
+  /// (posiblemente vacío) si se confirma, o [_kReassignCancelled] si se
+  /// cancela el diálogo.
+  Future<String?> _askReassignReason(String toDriverName) async {
+    final reasonCtrl = TextEditingController();
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Reasignar carrera'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('Se reasignará a $toDriverName.',
+                style: const TextStyle(fontSize: 13)),
+            const SizedBox(height: 12),
+            TextField(
+              controller: reasonCtrl,
+              decoration: const InputDecoration(
+                labelText: 'Motivo (opcional)',
+                hintText: 'Ej. conductor no disponible',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, _kReassignCancelled),
+            child: const Text('No reasignar'),
+          ),
+          ElevatedButton.icon(
+            onPressed: () => Navigator.pop(ctx, reasonCtrl.text),
+            icon: const Icon(Icons.swap_horiz, size: 18),
+            label: const Text('Reasignar'),
+          ),
+        ],
+      ),
     );
   }
 
@@ -1006,6 +1615,108 @@ class _TripsPageState extends State<TripsPage>
         ),
       ),
     );
+  }
+
+  /// Muestra un selector (bottom sheet) para elegir la app de navegación
+  /// hacia el punto de recogida: Google Maps o Waze. Cada opción abre la app
+  /// externa correspondiente y avisa con SnackBar si no está disponible.
+  Future<void> _navigateToPickup(TripModel trip) async {
+    final lat = trip.pickupLatitude;
+    final lng = trip.pickupLongitude;
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('Navegar con…',
+                  style:
+                      TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+            ),
+            ListTile(
+              leading: const Icon(Icons.map, color: AppTheme.statusFree),
+              title: const Text('Google Maps'),
+              onTap: () => Navigator.pop(ctx, 'gmaps'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.navigation, color: Colors.blue),
+              title: const Text('Waze'),
+              onTap: () => Navigator.pop(ctx, 'waze'),
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+    if (choice == null) return;
+
+    // Google Maps: esquema universal (api=1) con travelmode=driving.
+    // Waze: deep link ll + navigate=yes.
+    final uri = choice == 'waze'
+        ? Uri.parse('https://waze.com/ul?ll=$lat,$lng&navigate=yes')
+        : Uri.parse(
+            'https://www.google.com/maps/dir/?api=1'
+            '&destination=$lat,$lng&travelmode=driving',
+          );
+    final appName = choice == 'waze' ? 'Waze' : 'Google Maps';
+    await _launchExternal(uri, appName);
+  }
+
+  /// Lanza un URI en una app externa y maneja errores con SnackBar.
+  Future<void> _launchExternal(Uri uri, String appName) async {
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      if (!ok && mounted) {
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text('No se pudo abrir $appName.'),
+            backgroundColor: AppTheme.errorColor,
+          ),
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('$appName no está disponible.'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    }
+  }
+
+  /// Abre el marcador del teléfono con el número del cliente (tel:).
+  /// Un toque → marcador listo para llamar.
+  Future<void> _callClient(String phone) async {
+    final messenger = ScaffoldMessenger.of(context);
+    // Limpia espacios y caracteres de formato que rompen el esquema tel:.
+    final sanitized = phone.replaceAll(RegExp(r'[^\d+]'), '');
+    final uri = Uri(scheme: 'tel', path: sanitized);
+    try {
+      final ok = await launchUrl(uri);
+      if (!ok && mounted) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('No se pudo abrir el marcador.'),
+            backgroundColor: AppTheme.errorColor,
+          ),
+        );
+      }
+    } catch (_) {
+      if (!mounted) return;
+      messenger.showSnackBar(
+        const SnackBar(
+          content: Text('No se pudo iniciar la llamada.'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    }
   }
 
   Widget _detailRow(IconData icon, String label, String value) {

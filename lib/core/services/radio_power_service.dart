@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'current_user_context.dart';
+
 /// Servicio singleton que controla si el walkie-talkie está encendido (ON)
 /// o apagado (OFF).
 ///
@@ -20,6 +22,9 @@ class RadioPowerService extends ChangeNotifier {
   static const String _prefsKey = 'radio.power.isOn';
   static const String _prefsLastChannelId = 'radio.power.lastChannelId';
   static const String _prefsLastChannelName = 'radio.power.lastChannelName';
+  // uid del conductor que dejó el radio encendido. Se usa para restaurar el
+  // estado ON SOLO si reabre el mismo usuario (no heredar entre conductores).
+  static const String _prefsOwnerUid = 'radio.power.ownerUid';
 
   bool _isOn = false;
   bool _initialized = false;
@@ -58,6 +63,31 @@ class RadioPowerService extends ChangeNotifier {
     _isOn = false;
     _initialized = true;
     notifyListeners();
+  }
+
+  /// Restaura el estado ON del radio tras login — comportamiento Zello: si el
+  /// conductor dejó el radio encendido y cerró/min la app, al reabrir vuelve
+  /// a quedar encendido y reconecta solo al último canal.
+  ///
+  /// SEGURIDAD: solo restaura ON si el `uid` actual coincide con el que dejó
+  /// el radio encendido (evita que otro conductor en el mismo equipo herede
+  /// el radio prendido — el bug que motivó arrancar siempre en OFF). El
+  /// reconnect al canal lo hace el walkie cuando este estado queda ON.
+  Future<void> restoreForUser(String uid) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final persistedOn = prefs.getBool(_prefsKey) ?? false;
+      final owner = prefs.getString(_prefsOwnerUid);
+      final shouldRestore = persistedOn && uid.isNotEmpty && owner == uid;
+      if (shouldRestore != _isOn) {
+        _isOn = shouldRestore;
+        notifyListeners();
+      } else {
+        _isOn = shouldRestore;
+      }
+    } catch (_) {
+      // sin restauración — queda OFF
+    }
   }
 
   /// Enciende el radio. [channelId] y [channelName] se persisten para
@@ -101,6 +131,12 @@ class RadioPowerService extends ChangeNotifier {
     try {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setBool(_prefsKey, _isOn);
+      // Guardar el dueño del estado (para restoreForUser). Si está ON, el
+      // dueño es el usuario actual; al apagar conservamos el último dueño.
+      final uid = CurrentUserContext.instance.uid;
+      if (_isOn && uid != null && uid.isNotEmpty) {
+        await prefs.setString(_prefsOwnerUid, uid);
+      }
       if (_lastChannelId != null) {
         await prefs.setString(_prefsLastChannelId, _lastChannelId!);
       } else {

@@ -438,3 +438,13 @@ DN: CN=Byron Realpe, OU=Mobile, O=Asociacion de Taxis, L=Quito, ST=Pichincha, C=
 ```
 
 ⚠️ **Backup obligatorio**. Sin esa keystore no puedes publicar updates en Play Store.
+
+######
+
+URL:        wss://livekit.it-services.center
+  API Key:    <ver Firebase Secrets: LIVEKIT_API_KEY>
+  API Secret: <ver Firebase Secrets: LIVEKIT_API_SECRET / Oracle ~/livekit/livekit.yaml>
+
+  NO pegar credenciales en este archivo. Viven en:
+  - Firebase Functions Secrets (LIVEKIT_API_KEY / LIVEKIT_API_SECRET / LIVEKIT_URL)
+  - Oracle: ~/livekit/livekit.yaml (gitignored)

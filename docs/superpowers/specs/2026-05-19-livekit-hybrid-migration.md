@@ -1,6 +1,57 @@
 # Migración híbrida Agora → LiveKit (self-hosted)
 
-> **Estado:** Diseño aprobado el 2026-05-19. Implementación arranca DESPUÉS del auto-disconnect en Agora.
+> **Estado:** Diseño aprobado el 2026-05-19. Implementación en curso — ver **Addendum 2026-05-29** abajo para el estado real y correcciones al plan original.
+
+---
+
+## Addendum 2026-05-29 — Estado real + correcciones
+
+### ✅ Infraestructura LiveKit desplegada (Fase 2 — server)
+
+No se usó un VPS Hetzner/DO como decía el borrador, sino una **VM Oracle Cloud** ya disponible:
+
+- **Host:** `ubuntu@149.130.183.24` (Ubuntu 24.04 LTS, **ARM64**, 4 vCPU, 23 GB RAM). SSH alias `sshoracle`.
+- **Docker** Engine 29.5.2 + Compose v5.1.4 (repo oficial).
+- **LiveKit** (`livekit/livekit-server:latest`, `network_mode: host`) en `~/livekit/`. Puertos 7880/tcp, 7881/tcp, 7882/udp. `use_external_ip: true`.
+- **TLS vía Caddy** (no certbot standalone como el borrador): `caddy:2` como reverse proxy, termina HTTPS en :443 → reenvía a `127.0.0.1:7880`. Cert Let's Encrypt automático y auto-renovado.
+- **URL real de producción:** **`wss://livekit.it-services.center`** (puerto 443, sin `:7880`). ⚠️ El borrador asumía `wss://livekit.tu-dominio.com:7880` — **usar la URL nueva** en cliente y CF.
+- **Doble firewall** abierto: iptables local de la VM (persistido) + Security List de Oracle Cloud (TCP 80, 443, 7880-7881, UDP 7882, todos con Source Port = All).
+- Deploy versionado en el repo: `deploy/livekit/` (docker-compose, Caddyfile, livekit.yaml.example, README). Secrets reales NO versionados (en `~/livekit/.livekit_keys` en la VM).
+
+### ✅ Cloud Function de token (Fase 2 — CF)
+
+- Implementada como **`generateLiveKitToken`** (nombre real; el borrador la llamaba `getLiveKitToken`). Espejo de `generateAgoraToken`.
+- Lógica pura en `functions/lib/livekitToken.js` + handler delgado en `index.js` (patrón `lib/` del repo).
+- **Tests:** `functions/test/livekitToken.test.js` — round-trip real con `TokenVerifier`, rechazo con secret equivocado, TTL default. 16/16 verde.
+- Dependencia: `livekit-server-sdk@^2.15.4`. Nota: en v2 **`toJwt()` es async** (await obligatorio).
+- Identity del token = `request.auth.uid`. TTL = 24h (alineado con Agora, no 6h del borrador).
+- Secrets pendientes de setear: `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `LIVEKIT_URL` (= `wss://livekit.it-services.center`).
+- ⚠️ **Pendiente del checklist:** el borrador pide "validada con membresía". Hoy `generateAgoraToken` **no** valida membresía (solo `requireAuth`), así que `generateLiveKitToken` lo espeja. Agregar validación de membresía a ambas si se requiere antes de Go-Live.
+
+### ⚠️ CORRECCIÓN al plan: Fase 1 NO es un find&replace mecánico
+
+El borrador decía *"cambio mecánico, find&replace, ~30 referencias"*. **Falso.** La interfaz `VoiceProvider` es un **subconjunto estricto** del API público de `AgoraService`. La UI llama métodos Agora-específicos que **no existen en la interfaz**, así que un swap a ciegas `AgoraService.instance → VoiceProviderFactory.current` **no compila**.
+
+Métodos usados fuera del contrato `VoiceProvider`:
+
+| Sitio | Métodos fuera de la interfaz | Decisión |
+|-------|------------------------------|----------|
+| `walkie_talkie_page.dart` | `setPlaybackVolume`, `playbackVolume` (getter), `startLocalRecording`, `stopLocalRecording`, `setRemoteAudioMuted` | **Agregar a la interfaz** — son funcionalidad de audio compartida que LiveKit también necesitará |
+| `walkie_talkie_page.dart` | `prewarmToken` | **Queda Agora-específico** (optimización; LiveKit puede no-op) |
+| `overlay_ptt_service.dart` | `overlayActivate/Deactivate`, `quickPttStart/Stop`, `lastChannelBeforeDestroy` | **Se queda en `AgoraService.instance`** — overlay PTT Android, ya excluido del contrato por diseño |
+| `main.dart`, `session_teardown_service.dart` | `dispose()` | **Agregar `dispose()` a la interfaz** (lifecycle; internamente llama a `destroyEngine()`) |
+
+**Plan corregido de Fase 1 (completar abstracción):**
+
+1. Extender `VoiceProvider` con: `dispose()`, `setPlaybackVolume(int)`, `int get playbackVolume`, `setRemoteAudioMuted(bool)`, `Future<bool> startLocalRecording(String)`, `stopLocalRecording()`.
+2. `AgoraService` ya los implementa → 0 cambios funcionales en Agora.
+3. Migrar a `VoiceProviderFactory.current`: `walkie_talkie_page.dart` (común), `main.dart` y `session_teardown_service.dart` (`dispose`).
+4. **NO migrar** `overlay_ptt_service.dart` ni la ref a `prewarmToken` — quedan ligados a `AgoraService` por ahora.
+5. Llamar `VoiceProviderFactory.selectFor(associationId)` tras login (hoy no se llama).
+
+**Implicancia para Fase 3:** `LiveKitVoiceProvider` deberá implementar también los métodos recién agregados a la interfaz (recording local, volumen de playback, remote-audio-mute). El borrador de la Fase 3 abajo NO los incluye — ampliarlo.
+
+---
 
 ## Motivación
 
@@ -474,7 +525,7 @@ if (userOverride != null) return providerFor(userOverride);
 - [ ] VPS healthcheck verde 7 días
 - [ ] Certificado TLS renovado automáticamente (probar `certbot renew --dry-run`)
 - [ ] Cron de renovación restart de Docker probado
-- [ ] Cloud Function `getLiveKitToken` validada con membresía (no permite tokens para users de otra coop)
+- [ ] Cloud Function `generateLiveKitToken` validada con membresía (no permite tokens para users de otra coop) — ver Addendum 2026-05-29
 - [ ] `LiveKitVoiceProvider` certificado en los 6 escenarios del invariante de mic release
 - [ ] Rollback a Agora probado en vivo (cambiar flag → reiniciar app → audio funciona)
 - [ ] Métrica de uptime LiveKit visible en dashboard admin

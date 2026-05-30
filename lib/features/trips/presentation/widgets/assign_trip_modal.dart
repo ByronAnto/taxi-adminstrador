@@ -48,13 +48,17 @@ class _AssignTripModalState extends State<AssignTripModal> {
     super.dispose();
   }
 
-  /// Stream de conductores online (status != desconectado) de la asociación.
+  /// Stream de conductores ACTIVOS en el mapa de la asociación.
+  /// Activo = isActive == true. El filtro de status != desconectado se aplica
+  /// client-side (misma definición que MapRemoteDatasource) para no requerir
+  /// un índice compuesto adicional.
   Stream<QuerySnapshot<Map<String, dynamic>>> _onlineDriversStream(
       String associationId) {
     return FirebaseFirestore.instance
         .collection(AppConstants.driversCollection)
         .where('associationId', isEqualTo: associationId)
-        .where('status', whereNotIn: [AppConstants.statusOffline]).snapshots();
+        .where('isActive', isEqualTo: true)
+        .snapshots();
   }
 
   Future<void> _submit({
@@ -295,7 +299,12 @@ class _AssignTripModalState extends State<AssignTripModal> {
         if (snap.connectionState == ConnectionState.waiting) {
           return const LinearProgressIndicator();
         }
-        final docs = snap.data?.docs ?? [];
+        // Solo conductores activos en el mapa (status != desconectado).
+        final docs = (snap.data?.docs ?? [])
+            .where((d) =>
+                (d.data()['status'] as String?) !=
+                AppConstants.statusOffline)
+            .toList();
         if (docs.isEmpty) {
           return Container(
             padding: const EdgeInsets.all(12),
@@ -310,7 +319,7 @@ class _AssignTripModalState extends State<AssignTripModal> {
                 const SizedBox(width: 8),
                 const Expanded(
                   child: Text(
-                    'No hay conductores en línea ahora mismo.',
+                    'No hay conductores activos en este momento.',
                     style: TextStyle(fontSize: 13),
                   ),
                 ),

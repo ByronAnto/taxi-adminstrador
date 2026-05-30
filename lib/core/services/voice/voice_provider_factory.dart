@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 
 import '../agora_service.dart';
+import 'livekit_voice_provider.dart';
 import 'voice_provider.dart';
 
 /// Selector del proveedor de audio en tiempo real para la sesión actual.
@@ -67,32 +68,52 @@ class VoiceProviderFactory {
     await _activate(key);
   }
 
+  /// BUG 1 — Resetea la sesión de voz al cambiar de cuenta SIN reiniciar la
+  /// app. Llamar en logout (AuthUnauthenticated) y cuando se autentica un uid
+  /// distinto al de la sesión de voz activa. Desconecta la Room viva e invalida
+  /// los tokens cacheados del provider activo (cada token embebe la identidad/
+  /// uid del usuario anterior), dejándolo listo para pedir un token fresco con
+  /// la nueva identidad en el próximo joinChannel.
+  ///
+  /// Si el provider activo es LiveKit usa su `resetForUserChange` (purga
+  /// tokens + identidad además del teardown); para Agora (sin token cacheado de
+  /// identidad) basta `destroyEngine`, que ya libera el engine del SO.
+  static Future<void> resetForUserChange() async {
+    final provider = _current;
+    try {
+      if (provider is LiveKitVoiceProvider) {
+        await provider.resetForUserChange();
+      } else {
+        await provider.destroyEngine();
+      }
+    } catch (e) {
+      debugPrint('[VoiceProviderFactory] resetForUserChange fail: $e');
+    }
+  }
+
   static Future<void> _activate(String key) async {
     final normalized = (key == _livekit) ? _livekit : _agora;
     if (normalized == _currentKey) return;
     final previous = _current;
-    final next = _providerFor(normalized);
-    // Liberar SO audio del provider saliente antes de swichear.
+    // Fijar el nuevo provider PRIMERO (síncrono), antes de cualquier await:
+    // así `current` lo devuelve de inmediato y la página walkie (que lee el
+    // getter) nunca ve el provider viejo durante el switch.
+    _current = _providerFor(normalized);
+    _currentKey = normalized;
+    debugPrint('[VoiceProviderFactory] provider activo → $normalized');
+    // Liberar el audio del SO del provider saliente (no bloquea el switch).
     try {
       await previous.destroyEngine();
     } catch (e) {
       debugPrint('[VoiceProviderFactory] destroyEngine fail al swichear: $e');
     }
-    _current = next;
-    _currentKey = normalized;
-    debugPrint('[VoiceProviderFactory] provider activo → $normalized');
   }
 
   static VoiceProvider _providerFor(String key) {
     switch (key) {
       case _livekit:
-        // TODO(Fase 3): retornar LiveKitVoiceProvider.instance cuando aterrice.
-        // Mientras tanto, caemos a Agora — el flag se respeta pero el provider
-        // físico sigue siendo Agora. Esto permite testear el feature flag end-to-end
-        // sin esperar el SDK LiveKit.
-        debugPrint(
-            '[VoiceProviderFactory] flag=livekit pero LiveKit provider aún no implementado — usando Agora');
-        return AgoraService.instance;
+        // Fase 3 (2026-05-29): LiveKitVoiceProvider implementado.
+        return LiveKitVoiceProvider.instance;
       case _agora:
       default:
         return AgoraService.instance;

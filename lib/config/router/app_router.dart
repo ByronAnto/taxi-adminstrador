@@ -19,6 +19,7 @@ import '../../features/reports/presentation/pages/operator_validations_page.dart
 // que sí filtra por status (pendingApproval/active/suspended/rejected).
 // import '../../features/users/presentation/pages/user_management_page.dart';
 import '../../features/trips/presentation/pages/assign_trip_page.dart';
+import '../../features/trips/presentation/pages/trips_page.dart';
 import '../../features/emergency/presentation/pages/emergency_page.dart';
 import '../../features/map/presentation/pages/taxi_stand_config_page.dart';
 import '../../features/super_admin/presentation/pages/super_admin_page.dart';
@@ -34,11 +35,22 @@ import '../../features/admin/presentation/pages/trip_requests_page.dart';
 import '../../features/payments/presentation/pages/my_payments_page.dart';
 import '../../features/payments/presentation/pages/payment_approvals_page.dart';
 import '../../features/admin/presentation/pages/vehicle_change_requests_page.dart';
+import '../../features/permissions/presentation/pages/permissions_onboarding_page.dart';
+
+/// Navigator raíz de la app. Se le pasa a [GoRouter] como `navigatorKey`
+/// para poder abrir diálogos globales (ej. el modal de "Sesión cerrada")
+/// desde widgets que viven POR ENCIMA del Navigator — como
+/// `_SingleSessionGate`, montado en el `builder` de `MaterialApp.router`.
+/// Sin esto, `showDialog(context: <ese widget>)` hacía `Navigator.of()`
+/// → null → "Null check operator used on a null value" → pantalla gris.
+final GlobalKey<NavigatorState> rootNavigatorKey =
+    GlobalKey<NavigatorState>(debugLabel: 'rootNavigator');
 
 /// Configuración de rutas de la aplicación
 class AppRouter {
   static GoRouter router(AuthBloc authBloc) {
     return GoRouter(
+      navigatorKey: rootNavigatorKey,
       initialLocation: '/login',
       refreshListenable: GoRouterRefreshStream(authBloc.stream),
       redirect: (context, state) {
@@ -124,10 +136,20 @@ class AppRouter {
         GoRoute(
           path: '/reports',
           name: 'reports',
-          builder: (context, state) => BlocProvider(
-            create: (_) => sl<ReportsBloc>()..add(ReportsLoadRequested()),
-            child: const ReportsPage(),
-          ),
+          builder: (context, state) {
+            // El reporte general consulta `trips` filtrando por tenant; le
+            // pasamos el associationId del usuario autenticado en la carga
+            // inicial (sin él la query sería denegada por reglas Firestore).
+            final authState = authBloc.state;
+            final aid = authState is AuthAuthenticated
+                ? authState.user.associationId
+                : '';
+            return BlocProvider(
+              create: (_) => sl<ReportsBloc>()
+                ..add(ReportsLoadRequested(associationId: aid)),
+              child: const ReportsPage(),
+            );
+          },
         ),
         GoRoute(
           path: '/driver-report',
@@ -236,6 +258,11 @@ class AppRouter {
           builder: (context, state) => const TripRequestsPage(),
         ),
         GoRoute(
+          path: '/trips',
+          name: 'trips',
+          builder: (context, state) => const TripsPage(),
+        ),
+        GoRoute(
           path: '/payment-approvals',
           name: 'payment-approvals',
           builder: (context, state) {
@@ -247,6 +274,11 @@ class AppRouter {
           path: '/vehicle-change-requests',
           name: 'vehicle-change-requests',
           builder: (context, state) => const VehicleChangeRequestsPage(),
+        ),
+        GoRoute(
+          path: '/permissions',
+          name: 'permissions',
+          builder: (context, state) => const PermissionsOnboardingPage(),
         ),
       ],
       errorBuilder: (context, state) => Scaffold(

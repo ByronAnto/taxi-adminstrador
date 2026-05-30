@@ -1,6 +1,6 @@
 import 'package:flutter/foundation.dart';
 
-import 'agora_service.dart';
+import 'voice/voice_provider_factory.dart';
 import 'claims_refresh_service.dart';
 import 'driver_location_service.dart';
 import 'fcm_token_service.dart';
@@ -42,8 +42,8 @@ class SessionTeardownService {
     // 2. Destruir engine Agora — sale del canal, libera mic, corta
     //    billing por minuto. CRÍTICO para que un user que cerró sesión
     //    no siga "ocupando" el canal del lado del proveedor.
-    await _safe('agora.destroyEngine', () async {
-      await AgoraService.instance.dispose();
+    await _safe('voice.dispose', () async {
+      await VoiceProviderFactory.current.dispose();
     });
 
     // 3. Detener el FGS del radio principal (notificación "Radio

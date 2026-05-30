@@ -1,26 +1,24 @@
 "use client";
 
-import "leaflet/dist/leaflet.css";
-import L from "leaflet";
-import { useCallback, useEffect, useRef, useState } from "react";
-import {
-  MapContainer,
-  Marker,
-  TileLayer,
-  useMap,
-  useMapEvents,
-} from "react-leaflet";
+// =====================================================================
+//  PickupMap — selector del "Punto exacto de recogida".
+//
+//  Proveedor de mapas: Google Maps JavaScript API (mismo que la app
+//  Flutter). Se carga con @react-google-maps/api.
+//
+//  La API key viene de la variable de entorno pública
+//  NEXT_PUBLIC_GOOGLE_MAPS_API_KEY. Por ser NEXT_PUBLIC_* se inlinea
+//  en build-time; en Docker/CI se inyecta como build-arg + ENV (ver
+//  Dockerfile). Sin key, el componente degrada con un mensaje claro
+//  ("Mapa no disponible") en vez de romper el build/render.
+//
+//  Google Cloud: debe estar habilitada "Maps JavaScript API" y la key
+//  debe ser de tipo "browser" restringida al dominio de producción
+//  (taxiseguro.it-services.center).
+// =====================================================================
 
-const icon = L.icon({
-  iconUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png",
-  iconRetinaUrl:
-    "https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png",
-  shadowUrl: "https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png",
-  iconSize: [25, 41],
-  iconAnchor: [12, 41],
-  popupAnchor: [1, -34],
-  shadowSize: [41, 41],
-});
+import { useCallback, useEffect, useRef, useState } from "react";
+import { GoogleMap, MarkerF, useJsApiLoader } from "@react-google-maps/api";
 
 interface Props {
   initialLat?: number;
@@ -28,66 +26,84 @@ interface Props {
   onChange: (lat: number, lng: number) => void;
 }
 
-const QUITO_CENTER: [number, number] = [-0.1807, -78.4678];
+// Quito, Ecuador — fallback idéntico al de la app Flutter.
+const QUITO_CENTER = { lat: -0.1807, lng: -78.4678 };
+
+const MAP_API_KEY = process.env.NEXT_PUBLIC_GOOGLE_MAPS_API_KEY ?? "";
+
+const CONTAINER_STYLE = { height: "260px", width: "100%" };
 
 type GeoStatus = "idle" | "locating" | "ok" | "denied" | "unavailable";
 
-export default function PickupMap({
-  initialLat,
-  initialLng,
-  onChange,
-}: Props) {
-  const [pos, setPos] = useState<[number, number] | null>(
-    initialLat != null && initialLng != null ? [initialLat, initialLng] : null,
+type LatLng = { lat: number; lng: number };
+
+export default function PickupMap({ initialLat, initialLng, onChange }: Props) {
+  const { isLoaded, loadError } = useJsApiLoader({
+    id: "taxiseguro-google-maps",
+    googleMapsApiKey: MAP_API_KEY,
+  });
+
+  const [pos, setPos] = useState<LatLng | null>(
+    initialLat != null && initialLng != null
+      ? { lat: initialLat, lng: initialLng }
+      : null,
   );
   const [status, setStatus] = useState<GeoStatus>("idle");
-  // onChange puede no ser estable; usamos ref para evitar re-disparos del effect.
+
+  // onChange puede no ser estable; usamos ref para evitar re-disparos.
   const onChangeRef = useRef(onChange);
   onChangeRef.current = onChange;
 
-  const requestLocation = useCallback((animate = false) => {
-    if (typeof window === "undefined") return;
-    if (!("geolocation" in navigator)) {
-      setStatus("unavailable");
-      return;
+  // Referencia al mapa para poder centrar/animar desde el botón 📍.
+  const mapRef = useRef<google.maps.Map | null>(null);
+
+  const setPoint = useCallback((p: LatLng, pan = false) => {
+    setPos(p);
+    onChangeRef.current(p.lat, p.lng);
+    if (pan && mapRef.current) {
+      mapRef.current.panTo(p);
+      mapRef.current.setZoom(17);
     }
-    if (!window.isSecureContext) {
-      // HTTPS o localhost requerido por todos los navegadores.
-      setStatus("unavailable");
-      return;
-    }
-    setStatus("locating");
-    navigator.geolocation.getCurrentPosition(
-      (p) => {
-        const point: [number, number] = [
-          p.coords.latitude,
-          p.coords.longitude,
-        ];
-        setPos(point);
-        onChangeRef.current(point[0], point[1]);
-        setStatus("ok");
-        if (animate && (window as any).__pickupMap) {
-          (window as any).__pickupMap.flyTo(point, 17, { duration: 0.8 });
-        }
-      },
-      (err) => {
-        if (err.code === err.PERMISSION_DENIED) {
-          setStatus("denied");
-        } else {
-          setStatus("unavailable");
-        }
-        if (!pos) {
-          setPos(QUITO_CENTER);
-          onChangeRef.current(QUITO_CENTER[0], QUITO_CENTER[1]);
-        }
-      },
-      {
-        enableHighAccuracy: true,
-        timeout: 10000,
-        maximumAge: 0,
-      },
-    );
-  }, [pos]);
+  }, []);
+
+  const requestLocation = useCallback(
+    (animate = false) => {
+      if (typeof window === "undefined") return;
+      if (!("geolocation" in navigator)) {
+        setStatus("unavailable");
+        return;
+      }
+      if (!window.isSecureContext) {
+        // HTTPS o localhost requerido por todos los navegadores.
+        setStatus("unavailable");
+        return;
+      }
+      setStatus("locating");
+      navigator.geolocation.getCurrentPosition(
+        (p) => {
+          setPoint(
+            { lat: p.coords.latitude, lng: p.coords.longitude },
+            animate,
+          );
+          setStatus("ok");
+        },
+        (err) => {
+          if (err.code === err.PERMISSION_DENIED) {
+            setStatus("denied");
+          } else {
+            setStatus("unavailable");
+          }
+          setPos((prev) => {
+            if (prev) return prev;
+            onChangeRef.current(QUITO_CENTER.lat, QUITO_CENTER.lng);
+            return QUITO_CENTER;
+          });
+        },
+        { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 },
+      );
+    },
+    [setPoint],
+  );
 
   useEffect(() => {
     // Pedimos geo al montar SOLO si no hay pos inicial.
@@ -98,26 +114,69 @@ export default function PickupMap({
 
   const center = pos ?? QUITO_CENTER;
 
+  // ---- Degradación: sin key o error al cargar Google Maps ----------
+  if (!MAP_API_KEY || loadError) {
+    return (
+      <div className="rounded-lg overflow-hidden border border-gray-300">
+        <div className="h-[260px] flex flex-col items-center justify-center bg-gray-100 text-center px-4 gap-1">
+          <span className="text-2xl">🗺️</span>
+          <p className="text-sm font-medium text-gray-700">
+            Mapa no disponible
+          </p>
+          <p className="text-xs text-gray-500">
+            {loadError
+              ? "No se pudo cargar Google Maps."
+              : "Falta configurar la clave de Google Maps."}{" "}
+            Escribe abajo la referencia del lugar de recogida.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="rounded-lg overflow-hidden border border-gray-300 relative">
-      <MapContainer
-        center={center}
-        zoom={16}
-        style={{ height: "260px", width: "100%" }}
-      >
-        <TileLayer
-          attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>'
-          url="https://{s}.tile.openstreetmap.org/{z}/{y}/{x}.png"
-        />
-        <Recenter center={center} />
-        <ClickHandler
-          onClick={(lat, lng) => {
-            setPos([lat, lng]);
-            onChangeRef.current(lat, lng);
+      {isLoaded ? (
+        <GoogleMap
+          mapContainerStyle={CONTAINER_STYLE}
+          center={center}
+          zoom={16}
+          onLoad={(map) => {
+            mapRef.current = map;
           }}
-        />
-        {pos && <Marker position={pos} icon={icon} />}
-      </MapContainer>
+          onUnmount={() => {
+            mapRef.current = null;
+          }}
+          onClick={(e) => {
+            if (e.latLng) {
+              setPoint({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+            }
+          }}
+          options={{
+            disableDefaultUI: true,
+            zoomControl: true,
+            clickableIcons: false,
+            gestureHandling: "greedy",
+            streetViewControl: false,
+            mapTypeControl: false,
+            fullscreenControl: false,
+          }}
+        >
+          {pos && (
+            <MarkerF
+              position={pos}
+              draggable
+              onDragEnd={(e) => {
+                if (e.latLng) {
+                  setPoint({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+                }
+              }}
+            />
+          )}
+        </GoogleMap>
+      ) : (
+        <div className="h-[260px] bg-gray-100 animate-pulse" />
+      )}
 
       <button
         type="button"
@@ -151,9 +210,7 @@ export default function PickupMap({
         )}
       </button>
 
-      <div
-        className={`px-3 py-2 text-xs border-t ${statusBg(status)}`}
-      >
+      <div className={`px-3 py-2 text-xs border-t ${statusBg(status)}`}>
         {statusMessage(status)}
       </div>
     </div>
@@ -165,7 +222,7 @@ function statusMessage(s: GeoStatus): string {
     case "locating":
       return "📡 Buscando tu ubicación…";
     case "ok":
-      return "Toca el mapa si quieres ajustar el punto exacto donde te vamos a recoger.";
+      return "Toca o arrastra el marcador para ajustar el punto exacto donde te vamos a recoger.";
     case "denied":
       return "No diste permiso de ubicación. Toca el botón 📍 arriba a la derecha y permite la ubicación, o toca el mapa para fijar el punto.";
     case "unavailable":
@@ -186,28 +243,4 @@ function statusBg(s: GeoStatus): string {
     default:
       return "bg-amber-50 text-amber-900 border-amber-200";
   }
-}
-
-function Recenter({ center }: { center: [number, number] }) {
-  const map = useMap();
-  useEffect(() => {
-    map.setView(center);
-    // Exponemos referencia para flyTo desde el botón externo.
-    (window as any).__pickupMap = map;
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [center[0], center[1]]);
-  return null;
-}
-
-function ClickHandler({
-  onClick,
-}: {
-  onClick: (lat: number, lng: number) => void;
-}) {
-  useMapEvents({
-    click(e) {
-      onClick(e.latlng.lat, e.latlng.lng);
-    },
-  });
-  return null;
 }

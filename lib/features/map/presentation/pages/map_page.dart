@@ -26,7 +26,8 @@ class MapPage extends StatefulWidget {
   State<MapPage> createState() => _MapPageState();
 }
 
-class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
+class _MapPageState extends State<MapPage>
+    with TickerProviderStateMixin, WidgetsBindingObserver {
   final Completer<GoogleMapController> _mapController = Completer();
   /// Controlador del sheet de "Conductores Cercanos" — permite expandirlo
   /// programáticamente cuando el usuario toca el handle.
@@ -67,11 +68,50 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     final bloc = context.read<MapBloc>();
     bloc.add(MapDriversWatchStarted());
     bloc.add(MapTaxiStandsWatchStarted());
     _requestLocationPermission();
     _loadAssociationStand();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    super.didChangeAppLifecycleState(state);
+    // Al volver del background/reposo, Android suele matar el stream de GPS y
+    // el mapa quedaba con la última posición vieja (o sin marcador). Reiniciamos
+    // el stream y re-obtenemos la posición para recentrar el mapa.
+    if (state == AppLifecycleState.resumed) {
+      _recoverLocationOnResume();
+    }
+  }
+
+  Future<void> _recoverLocationOnResume() async {
+    // 1) Reiniciar el stream de posición (pudo morir en doze/background).
+    await _positionStream?.cancel();
+    _startLocationStream();
+    // 2) Re-obtener posición actual y refrescar marcador + recentrar.
+    try {
+      final position = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 10),
+        ),
+      );
+      if (!mounted) return;
+      final pos = LatLng(position.latitude, position.longitude);
+      setState(() {
+        _myPosition = pos;
+        _animatedPosition = pos;
+      });
+      if (_mapController.isCompleted) {
+        final controller = await _mapController.future;
+        controller.animateCamera(CameraUpdate.newLatLng(pos));
+      }
+    } catch (_) {
+      // sin fix inmediato; el stream reiniciado actualizará al primer update
+    }
   }
 
   /// Carga la `standLocation` que el admin configuró en
@@ -121,6 +161,7 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _positionStream?.cancel();
     _moveController?.dispose();
     _sheetController.dispose();
@@ -133,9 +174,18 @@ class _MapPageState extends State<MapPage> with TickerProviderStateMixin {
   // gestiona GPS, status y datos denormalizados de forma global.
 
   Future<void> _requestLocationPermission() async {
-    final status = await Permission.locationWhenInUse.request();
-    if (status.isGranted) {
-      await _createAllCarIcons();
+    // NO pedimos el permiso acá: lo pide la PermissionsOnboardingPage (a la
+    // que Home redirige si faltan permisos), de a uno por gesto del usuario.
+    // Si dos `.request()` corren a la vez, permission_handler lanza "A request
+    // is already running" y aborta (eso hacía que NO se pidiera el mic). Acá
+    // solo ESPERAMOS a que el permiso quede concedido y arrancamos.
+    await _createAllCarIcons(); // no requiere permiso
+    var granted = await Permission.locationWhenInUse.isGranted;
+    for (int i = 0; i < 30 && !granted; i++) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      granted = await Permission.locationWhenInUse.isGranted;
+    }
+    if (granted) {
       try {
         final position = await Geolocator.getCurrentPosition(
           locationSettings: const LocationSettings(

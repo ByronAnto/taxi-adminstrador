@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../constants/app_constants.dart';
+import 'radio_foreground_service.dart';
 
 /// Servicio global de ubicación del conductor.
 ///
@@ -23,6 +24,7 @@ class DriverLocationService extends ChangeNotifier {
   String? _driverId;
   String? _userId;
   bool _isOnline = false;
+  bool _initialized = false;
   String _currentStatus = AppConstants.statusOffline;
   StreamSubscription<Position>? _positionSub;
   Timer? _heartbeatTimer;
@@ -76,11 +78,22 @@ class DriverLocationService extends ChangeNotifier {
   DateTime? _stationaryAnchorAt;
   static const double _stationaryRadiusMeters = 100;
   static const Duration _stationaryThreshold = Duration(minutes: 5);
+  // 2 min: DEBE ser menor que el umbral del cron de presencia
+  // (markStaleDriversOffline = 6 min) para que un conductor quieto/estacionado
+  // NO sea marcado offline por falso "stale". Antes 5 min, que con el cron a
+  // 3 min apagaba a los conductores parados aunque la app siguiera viva.
   static const Duration _stationaryHeartbeatInterval =
-      Duration(minutes: 5);
+      Duration(minutes: 2);
 
   /// ¿Está el conductor en línea?
   bool get isOnline => _isOnline;
+
+  /// True una vez que [initialize] resolvió (o intentó resolver) el driver
+  /// doc. Mientras es false, todavía no sabemos el estado real online/offline
+  /// del conductor — los consumidores (walkie-talkie) NO deben asumir
+  /// "Desconectado" en esta ventana, o bloquearían el radio por una carrera
+  /// de arranque (especialmente con datos móviles lentos).
+  bool get isInitialized => _initialized;
 
   /// ID del documento driver en Firestore (null si no hay driver doc).
   String? get driverId => _driverId;
@@ -199,14 +212,53 @@ class DriverLocationService extends ChangeNotifier {
       await goOnline();
     } catch (e) {
       debugPrint('📍 [LocationService] Error initialize: $e');
+    } finally {
+      // Marcamos "inicializado" pase lo que pase: aunque la query a
+      // Firestore haya fallado (datos móviles lentos en el Pixel), el
+      // walkie-talkie necesita saber que ya intentamos resolver el estado
+      // para dejar de mostrar "Modo Desconectado" de forma especulativa.
+      // notifyListeners() despierta a los suscriptores (walkie page) para
+      // que recalculen sus flags con el estado final.
+      _initialized = true;
+      notifyListeners();
     }
   }
 
   // ─── Online / Offline ────────────────────────────────────
 
+  /// Reintenta resolver `_driverId` a partir de `_userId` cuando la query
+  /// inicial de `initialize()` falló (red lenta/intermitente). No CREA el
+  /// doc — eso lo hace `initialize()` con los datos denormalizados. Solo
+  /// recupera el id de un doc existente para poder ponerse online.
+  Future<void> _resolveDriverIdIfNeeded() async {
+    if (_driverId != null || _userId == null) return;
+    try {
+      final snapshot = await _firestore
+          .collection(AppConstants.driversCollection)
+          .where('userId', isEqualTo: _userId)
+          .limit(1)
+          .get();
+      if (snapshot.docs.isNotEmpty) {
+        _driverId = snapshot.docs.first.id;
+        debugPrint(
+            '📍 [LocationService] Driver ID re-resuelto: $_driverId');
+      }
+    } catch (e) {
+      debugPrint('📍 [LocationService] Error re-resolviendo driverId: $e');
+    }
+  }
+
   /// Pone al conductor EN LÍNEA: actualiza status y arranca GPS.
   Future<void> goOnline({String? status}) async {
-    if (_driverId == null) return;
+    // Si el driver doc aún no se resolvió (p. ej. la query de Firestore en
+    // initialize() falló por datos móviles lentos en el Pixel), intentamos
+    // re-resolverlo aquí en vez de abortar silenciosamente. Sin esto,
+    // _isOnline quedaba en false para siempre y el walkie mostraba "Modo
+    // Desconectado" aunque el conductor SÍ estuviera disponible.
+    if (_driverId == null) {
+      await _resolveDriverIdIfNeeded();
+      if (_driverId == null) return; // sin red / sin usuario: no podemos
+    }
     _isOnline = true;
     _currentStatus = status ?? AppConstants.statusFree;
 
@@ -224,6 +276,10 @@ class DriverLocationService extends ChangeNotifier {
     }
 
     await _requestPermissionAndStartGps();
+    // Foreground service (tipo location) → mantiene el GPS vivo en background:
+    // mientras "Activo General" esté ON, la unidad NUNCA deja de enviar
+    // ubicación (admin/operadora siempre la ven). Comparte FGS con el radio.
+    await RadioForegroundService.instance.setLocationTracking(true);
     notifyListeners();
     debugPrint(
         '📍 [LocationService] ✅ ONLINE → status=$_currentStatus, GPS activo');
@@ -239,6 +295,8 @@ class DriverLocationService extends ChangeNotifier {
     _isOnline = false;
     _currentStatus = AppConstants.statusOffline;
     _stopGps();
+    // Soltar el FGS por ubicación (si el radio tampoco lo usa, se apaga).
+    RadioForegroundService.instance.setLocationTracking(false);
 
     try {
       final update = <String, dynamic>{
@@ -630,6 +688,7 @@ class DriverLocationService extends ChangeNotifier {
     }
     _driverId = null;
     _userId = null;
+    _initialized = false;
     _lastLatitude = null;
     _lastLongitude = null;
     _lastAccuracy = null;

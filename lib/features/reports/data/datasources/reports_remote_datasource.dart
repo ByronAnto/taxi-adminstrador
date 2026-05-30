@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../domain/entities/report_data.dart';
+import '../fare_estimate.dart';
 
 /// Fuente de datos remota para reportes (agrega datos de Firestore)
 class ReportsRemoteDatasource {
@@ -16,15 +17,23 @@ class ReportsRemoteDatasource {
       _firestore.collection(AppConstants.usersCollection);
 
   /// Obtener datos agregados del reporte
+  ///
+  /// [associationId] es OBLIGATORIO para multi-tenant: las reglas de Firestore
+  /// solo permiten leer `trips` del propio tenant a operadora/admin, por lo que
+  /// la consulta DEBE filtrar por `associationId` (de lo contrario Firestore
+  /// la deniega con permission-denied). Existe índice compuesto
+  /// `associationId + createdAt` que soporta esta query.
   Future<ReportData> getReportData({
+    required String associationId,
     required String period,
     required DateTime fromDate,
     required DateTime toDate,
     DateTime? prevFrom,
     DateTime? prevTo,
   }) async {
-    // 1. Obtener viajes del período actual
+    // 1. Obtener viajes del período actual (filtrados por tenant)
     final tripsSnap = await _tripsRef
+        .where('associationId', isEqualTo: associationId)
         .where('createdAt',
             isGreaterThanOrEqualTo: Timestamp.fromDate(fromDate))
         .where('createdAt', isLessThanOrEqualTo: Timestamp.fromDate(toDate))
@@ -46,19 +55,34 @@ class ReportsRemoteDatasource {
     final averageFare =
         completedTrips.isEmpty ? 0.0 : totalRevenue / completedTrips.length;
 
-    // 4. Carreras por hora + heatmap día×hora
+    // 4. Carreras por hora + heatmap día×hora.
+    // El bucket por hora usa la hora LOCAL en UTC-5 (`hourInEc`) para que sea
+    // comparable con el agregado `tripStatsDaily` que genera el backend.
     final Map<int, int> tripsByHour = {};
     final Map<int, Map<int, int>> tripsByDayAndHour = {};
     for (final trip in trips) {
       final ts = trip['createdAt'];
       if (ts is Timestamp) {
-        final d = ts.toDate();
-        final hour = d.hour;
+        final hour = hourInEc(ts);
         tripsByHour[hour] = (tripsByHour[hour] ?? 0) + 1;
-        final dow = d.weekday; // 1=Lun..7=Dom
+        // Día de la semana en hora local EC (UTC-5).
+        final localEc = ts.toDate().toUtc().subtract(const Duration(hours: 5));
+        final dow = localEc.weekday; // 1=Lun..7=Dom
         tripsByDayAndHour.putIfAbsent(dow, () => <int, int>{});
         tripsByDayAndHour[dow]![hour] =
             (tripsByDayAndHour[dow]![hour] ?? 0) + 1;
+      }
+    }
+
+    // 4b. Estimado monetario del periodo (tarifa mínima Quito por hora UTC-5).
+    // Cuenta como carrera válida las de status 'finalizado' o 'completado'.
+    double estimatedRevenue = 0;
+    for (final trip in trips) {
+      final status = trip['status'] as String? ?? '';
+      if (status != 'completado' && status != 'finalizado') continue;
+      final ts = trip['createdAt'];
+      if (ts is Timestamp) {
+        estimatedRevenue += fareForHour(hourInEc(ts));
       }
     }
 
@@ -67,7 +91,9 @@ class ReportsRemoteDatasource {
     for (final trip in completedTrips) {
       final ts = trip['createdAt'];
       if (ts is Timestamp) {
-        final date = ts.toDate();
+        // Fecha local EC (UTC-5) para que el día agrupado coincida con el del
+        // agregado de la base y con la hora local del conductor.
+        final date = ts.toDate().toUtc().subtract(const Duration(hours: 5));
         final key =
             '${date.day.toString().padLeft(2, '0')}/${date.month.toString().padLeft(2, '0')}';
         dailyRevenue[key] = (dailyRevenue[key] ?? 0) + (trip['fare'] ?? 0.0).toDouble();
@@ -82,10 +108,10 @@ class ReportsRemoteDatasource {
       driverMap.putIfAbsent(dId, () => _DriverAggr());
       driverMap[dId]!.tripCount++;
       driverMap[dId]!.income += (trip['fare'] ?? 0.0).toDouble();
-      // Hora del viaje para calcular hora pico por conductor
+      // Hora del viaje (UTC-5) para calcular hora pico por conductor
       final ts = trip['createdAt'];
       if (ts is Timestamp) {
-        final h = ts.toDate().hour;
+        final h = hourInEc(ts);
         driverMap[dId]!.hourCounts[h] = (driverMap[dId]!.hourCounts[h] ?? 0) + 1;
       }
       // Origen del viaje
@@ -183,6 +209,7 @@ class ReportsRemoteDatasource {
     if (prevFrom != null && prevTo != null) {
       try {
         final prevSnap = await _tripsRef
+            .where('associationId', isEqualTo: associationId)
             .where('createdAt',
                 isGreaterThanOrEqualTo: Timestamp.fromDate(prevFrom))
             .where('createdAt',
@@ -218,6 +245,7 @@ class ReportsRemoteDatasource {
       totalRevenue: totalRevenue,
       averageFare: averageFare,
       activeDriversCount: activeDriverIds.length,
+      estimatedRevenue: estimatedRevenue,
       tripsTrend: tripsTrend,
       revenueTrend: revenueTrend,
       cancelledTrend: cancelledTrend,

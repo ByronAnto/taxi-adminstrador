@@ -164,12 +164,26 @@ service cloud.firestore {
     }
 
     // ===== VIAJES =====
+    // Lectura RESTRINGIDA: una carrera asignada solo la ven admin/operadora
+    // del tenant y el conductor asignado (dueño). El resto de conductores
+    // activos NO ven carreras ajenas.
     match /trips/{tripId} {
-      allow read: if isActive() && sameTenant(resource.data);
+      allow read: if sameTenant(resource.data)
+        && (isOperatorOrAdmin() || isOwner(resource.data.driverId));
       allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
       allow update: if (isOwner(resource.data.driverId) && sameTenant(resource.data))
         || (isOperatorOrAdmin() && sameTenant(resource.data));
       allow delete: if isAdmin() && sameTenant(resource.data);
+
+      // Historial de reasignaciones (auditoría): quién pasó la carrera de un
+      // conductor a otro, cuándo y quién lo hizo. Las reglas NO cascadean a
+      // subcolecciones, por eso se declara explícitamente. Inmutable.
+      match /reassignments/{rid} {
+        allow read: if isActive()
+          && sameTenant(get(/databases/$(database)/documents/trips/$(tripId)).data);
+        allow create: if isOperatorOrAdmin() && sameTenantOnCreate();
+        allow update, delete: if false;
+      }
     }
 
     // ===== PAGOS =====
@@ -441,7 +455,11 @@ service cloud.firestore {
         && data.get('clienteId', '') == request.auth.uid;
     }
     match /tripRequests/{reqId} {
-      allow read: if (isOperatorOrAdmin() && sameTenant(resource.data))
+      // Lectura: dentro del tenant la ven operadora/admin y los conductores
+      // activos (para listar las "por asignar"; el filtro fino lo hace la
+      // app). El cliente dueño SIEMPRE ve la suya (para su "mis-carreras"
+      // web), aunque no sea active.
+      allow read: if (sameTenant(resource.data) && (isOperatorOrAdmin() || isActive()))
         || isClienteOf(resource.data);
       allow create: if (isOperatorOrAdmin() && sameTenantOnCreate())
         || (
@@ -451,12 +469,23 @@ service cloud.firestore {
           && request.resource.data.get('estado', '') == 'pendiente'
         );
       allow update: if (isOperatorOrAdmin() && sameTenant(resource.data))
-        // El cliente solo puede cancelar su propia solicitud.
+        // El cliente dueño solo puede cancelar su propia solicitud.
         || (
           isClienteOf(resource.data)
           && request.resource.data.diff(resource.data)
               .affectedKeys().hasOnly(['estado', 'updatedAt'])
           && request.resource.data.estado == 'cancelada'
+        )
+        // El cliente dueño califica SOLO cuando la carrera ya finalizó, y
+        // solo puede tocar los campos de rating. Rango 1..5.
+        || (
+          isClienteOf(resource.data)
+          && resource.data.estado == 'finalizada'
+          && request.resource.data.diff(resource.data)
+              .affectedKeys().hasOnly(['rating', 'ratingComment', 'ratedAt'])
+          && request.resource.data.rating is int
+          && request.resource.data.rating >= 1
+          && request.resource.data.rating <= 5
         );
       allow delete: if isAdmin() && sameTenant(resource.data);
     }
@@ -494,6 +523,21 @@ service cloud.firestore {
     match /analytics/{analyticsId} {
       allow read: if (isAdmin() || isSuperAdmin()) && sameTenant(resource.data);
       allow write: if isSuperAdmin();
+    }
+
+    // ===== ESTADÍSTICAS DIARIAS DE CARRERAS (agregados por asociación) =====
+    // Doc id = `${associationId}_${YYYY-MM-DD}`. Contiene SOLO agregados
+    // (carreras por hora + estimado monetario), sin datos personales de
+    // otros conductores. Los escribe EXCLUSIVAMENTE una Cloud Function
+    // (Admin SDK, que bypasea estas reglas).
+    // - Lectura: cualquier usuario activo del mismo tenant (incluido el
+    //   conductor) puede leer el agregado de SU asociación, para comparar
+    //   su reporte contra "la base" sin leer carreras ajenas. El doc trae
+    //   `associationId`, por lo que sameTenant(resource.data) aplica.
+    // - Escritura: nadie desde el cliente; solo la Cloud Function.
+    match /tripStatsDaily/{statId} {
+      allow read: if isActive() && sameTenant(resource.data);
+      allow write: if false; // solo Cloud Functions (admin SDK)
     }
 
     // ===== APP CONFIG (versionamiento por plataforma) =====

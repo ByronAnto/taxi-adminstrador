@@ -69,6 +69,65 @@ abstract class VoiceProvider {
   /// engine no está listo y la UI debe usar un fallback (AudioPlayer).
   Future<bool> playLocalEffect(String filePath, {int soundId = 1});
 
+  // ─── Control de audio + grabación + lifecycle (compartido) ───
+  // Añadidos 2026-05-29 al completar Fase 1: la UI del walkie los consume
+  // y ambos providers (Agora/LiveKit) los necesitan. Ver Addendum en la
+  // spec de migración. Funcionalidad puramente Agora-Android (overlay PTT,
+  // quickPtt) sigue fuera del contrato.
+
+  /// Volumen de reproducción del audio remoto. Rango estilo Agora
+  /// (0–400; 100 = original). La UI usa este getter para el slider.
+  int get playbackVolume;
+
+  /// Ajusta el volumen de reproducción del audio remoto.
+  Future<void> setPlaybackVolume(int volume);
+
+  /// Silencia/activa la recepción del audio remoto SIN salir del canal
+  /// (el botón "mute" del walkie). No afecta la publicación del mic.
+  Future<void> setRemoteAudioMuted(bool muted);
+
+  /// Graba localmente el audio del canal a `filePath` (historial de
+  /// audios). Devuelve `false` si el engine no está listo.
+  ///
+  /// [recordMic] indica la dirección a grabar cuando el provider no puede
+  /// mezclar ambas (LiveKit): `true` = mi micrófono (lo que mandé, cuando
+  /// el speaker soy yo), `false` = audio remoto (lo que oí). Agora graba la
+  /// mezcla completa e ignora este flag.
+  Future<bool> startLocalRecording(String filePath, {bool recordMic = false});
+
+  /// Detiene la grabación local iniciada con [startLocalRecording].
+  Future<void> stopLocalRecording();
+
+  /// Pre-trae el token del canal `channelId` para acelerar el primer
+  /// `joinChannel` (optimización de arranque). No bloquea.
+  void prewarmToken(String channelId);
+
+  /// Libera el engine de forma intencional (logout, app kill). A
+  /// diferencia de [destroyEngine], NO guarda el "último canal" para
+  /// auto-reconexión. Internamente suele delegar en [destroyEngine].
+  Future<void> dispose();
+
+  // ─── Overlay PTT flotante (Canal Persistente) ───
+  // Usados por OverlayPttService (botón flotante Android). Compuestos sobre
+  // initialize/join/mute/unmute/destroy — ambos providers los implementan.
+
+  /// Activa el modo overlay: inicializa + se une al canal + mic OFF
+  /// (escuchando). Deja el engine conectado para PTT instantáneo.
+  Future<void> overlayActivate(String channelId);
+
+  /// Desactiva el modo overlay: destruye el engine → mic 100% libre.
+  Future<void> overlayDeactivate();
+
+  /// PTT instantáneo: enciende el mic (reconecta al canal si se perdió).
+  Future<void> quickPttStart(String channelId);
+
+  /// PTT instantáneo: apaga el mic (sigue conectado al canal).
+  Future<void> quickPttStop();
+
+  /// Último canal antes de un [destroyEngine] — para auto-recuperar el
+  /// overlay si el SO mató el engine (Doze mode, background kill).
+  String? get lastChannelBeforeDestroy;
+
   // ─── Estado ───
   bool get isInitialized;
   bool get isInChannel;

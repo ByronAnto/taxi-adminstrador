@@ -2,8 +2,19 @@ import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../domain/entities/report_data.dart';
 import '../bloc/reports_bloc.dart';
+
+/// Obtiene el `associationId` del usuario autenticado.
+///
+/// El reporte general consulta `trips` filtrando por tenant; sin este id la
+/// consulta sería denegada por las reglas de Firestore. Devuelve cadena vacía
+/// si no hay sesión, y el bloc trata ese caso mostrando un mensaje.
+String _currentAssociationId(BuildContext context) {
+  final auth = context.read<AuthBloc>().state;
+  return auth is AuthAuthenticated ? auth.user.associationId : '';
+}
 
 /// Pagina de reportes y analiticas con graficos fl_chart
 class ReportsPage extends StatelessWidget {
@@ -24,9 +35,10 @@ class ReportsPage extends StatelessWidget {
                   final period = state is ReportsLoaded
                       ? state.reportData.period
                       : 'Hoy';
-                  context
-                      .read<ReportsBloc>()
-                      .add(ReportsLoadRequested(period: period));
+                  context.read<ReportsBloc>().add(ReportsLoadRequested(
+                        period: period,
+                        associationId: _currentAssociationId(context),
+                      ));
                 },
               ),
             ],
@@ -51,9 +63,11 @@ class ReportsPage extends StatelessWidget {
             Text(state.message, textAlign: TextAlign.center),
             const SizedBox(height: 16),
             ElevatedButton.icon(
-              onPressed: () => context
-                  .read<ReportsBloc>()
-                  .add(ReportsLoadRequested()),
+              onPressed: () => context.read<ReportsBloc>().add(
+                    ReportsLoadRequested(
+                      associationId: _currentAssociationId(context),
+                    ),
+                  ),
               icon: const Icon(Icons.refresh),
               label: const Text('Reintentar'),
             ),
@@ -125,9 +139,10 @@ class _PeriodSelector extends StatelessWidget {
               selectedColor: AppTheme.primaryColor,
               onSelected: (s) {
                 if (s) {
-                  context
-                      .read<ReportsBloc>()
-                      .add(ReportsLoadRequested(period: period));
+                  context.read<ReportsBloc>().add(ReportsLoadRequested(
+                        period: period,
+                        associationId: _currentAssociationId(context),
+                      ));
                 }
               },
             ),
@@ -191,6 +206,22 @@ class _KPISection extends StatelessWidget {
                 icon: Icons.cancel,
                 color: AppTheme.errorColor,
                 trend: data.cancelledTrend,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 12),
+        // Estimado monetario por tarifa mínima de Quito (UTC-5). Independiente
+        // del ingreso real (`fare`); útil cuando no se registra el cobro.
+        Row(
+          children: [
+            Expanded(
+              child: _KPICard(
+                label: 'Estimado (tarifa mín.)',
+                value: '\$${data.estimatedRevenue.toStringAsFixed(2)}',
+                icon: Icons.calculate_outlined,
+                color: AppTheme.primaryColor,
+                trend: 0,
               ),
             ),
           ],

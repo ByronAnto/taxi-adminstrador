@@ -14,7 +14,7 @@ import { FormEvent, useState } from "react";
 import { useAuth, useRequireAuth } from "@/lib/auth";
 import { getFirebase } from "@/lib/firebase";
 
-// react-leaflet usa `window`, no funciona en SSR. Cargar dinámicamente sin SSR.
+// Google Maps usa `window`, no funciona en SSR. Cargar dinámicamente sin SSR.
 const PickupMap = dynamic(() => import("@/components/PickupMap"), {
   ssr: false,
   loading: () => (
@@ -110,9 +110,12 @@ export default function HomePage() {
       setDestinoTexto("");
       setNotas("");
       setParaCuando("");
+      // Redirigir a "Mis carreras" para que el cliente vea el estado en vivo.
+      // Pequeño delay para que alcance a ver el mensaje verde de confirmación.
+      // Mantenemos `submitting` en true hasta navegar, así no se puede reenviar.
+      setTimeout(() => router.push("/mis-carreras"), 800);
     } catch (e: any) {
       setError(e?.message ?? "Error al enviar el pedido.");
-    } finally {
       setSubmitting(false);
     }
   }

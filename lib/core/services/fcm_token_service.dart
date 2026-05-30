@@ -31,16 +31,25 @@ class FcmTokenService {
         badge: true,
         sound: true,
       );
-      if (settings.authorizationStatus == AuthorizationStatus.denied) {
-        debugPrint('FCM: permiso denegado');
-        return;
-      }
+      debugPrint(
+          'FCM: authorizationStatus=${settings.authorizationStatus}');
 
-      // Token actual
+      // IMPORTANTE: registramos el token SIEMPRE, incluso si el permiso
+      // fue denegado o quedó indeterminado (típico en Xiaomi/MIUI, que
+      // a veces auto-deniega el diálogo). El token FCM es válido aunque
+      // las notifs no se muestren; el permiso sólo controla la
+      // visualización. Si el usuario habilita las notifs después en
+      // Ajustes, los push empiezan a llegar sin re-login.
+      //
+      // El bug anterior salía con `return` cuando el permiso era
+      // `denied` → nunca se registraba el token → _sendFcmToUid no
+      // tenía a quién enviar y fallaba en silencio.
       final token = await _messaging.getToken();
       if (token != null && token.isNotEmpty) {
         await _persist(uid, token);
         debugPrint('FCM: token registrado (len=${token.length})');
+      } else {
+        debugPrint('FCM: getToken devolvió null/vacío — sin token');
       }
 
       // Listener de rotación de token

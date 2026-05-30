@@ -104,13 +104,61 @@ class TripRemoteDatasource {
     });
   }
 
+  /// Finalizar viaje directamente (sin capturar tarifa/monto).
+  ///
+  /// Pone el trip en status 'finalizado' y graba `finalizadoAt` con el
+  /// timestamp del servidor. Los totales (totalTrips) NO se tocan aquí: una
+  /// Cloud Function los incrementa al detectar la transición a 'finalizado'.
+  /// Si el trip nació de un `tripRequests/{id}`, también refleja allí el
+  /// estado 'finalizada' + `finalizadoAt` para que el portal web del cliente
+  /// vea el cierre.
+  Future<void> finalizeTrip(String tripId, {String? tripRequestId}) async {
+    await _tripsRef.doc(tripId).update({
+      'status': TripStatus.finalizado,
+      'finalizadoAt': FieldValue.serverTimestamp(),
+      'endTime': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
+    });
+    if (tripRequestId != null && tripRequestId.isNotEmpty) {
+      await _firestore
+          .collection(AppConstants.tripRequestsCollection)
+          .doc(tripRequestId)
+          .update({
+        'estado': 'finalizada',
+        'finalizadoAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    }
+  }
+
   /// Cancelar viaje
-  Future<void> cancelTrip(String tripId, {String? reason}) async {
+  ///
+  /// Pone el trip en status 'cancelado' y graba `canceladoAt` + `updatedAt`
+  /// con el timestamp del servidor. Si el trip nació de un
+  /// `tripRequests/{id}`, también refleja allí el estado 'cancelada' para que
+  /// el portal web del cliente vea la cancelación (mismo patrón que
+  /// [finalizeTrip]).
+  Future<void> cancelTrip(
+    String tripId, {
+    String? reason,
+    String? tripRequestId,
+  }) async {
     await _tripsRef.doc(tripId).update({
       'status': 'cancelado',
       'notes': reason,
-      'endTime': Timestamp.fromDate(DateTime.now()),
+      'canceladoAt': FieldValue.serverTimestamp(),
+      'endTime': FieldValue.serverTimestamp(),
+      'updatedAt': FieldValue.serverTimestamp(),
     });
+    if (tripRequestId != null && tripRequestId.isNotEmpty) {
+      await _firestore
+          .collection(AppConstants.tripRequestsCollection)
+          .doc(tripRequestId)
+          .update({
+        'estado': 'cancelada',
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+    }
   }
 
   /// Estadísticas de conductor

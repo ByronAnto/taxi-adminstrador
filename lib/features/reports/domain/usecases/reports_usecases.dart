@@ -8,11 +8,13 @@ class GetReportDataUseCase {
   GetReportDataUseCase(this.repository);
 
   Future<ReportData> call({
+    required String associationId,
     required String period,
     required DateTime fromDate,
     required DateTime toDate,
   }) =>
       repository.getReportData(
+        associationId: associationId,
         period: period,
         fromDate: fromDate,
         toDate: toDate,

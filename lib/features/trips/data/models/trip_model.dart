@@ -74,6 +74,11 @@ class TripModel {
   final String? operatorId;
   final String? operatorName;
 
+  /// Enlace al `tripRequests/{id}` que originó este viaje (si vino del
+  /// flujo de solicitudes web/operadora). Permite que la Cloud Function y
+  /// el portal web del cliente correlacionen trip ↔ tripRequest.
+  final String? tripRequestId;
+
   // Datos del cliente final (opcionales: el conductor puede no saberlos).
   final String? clienteNombre;
   final String? clienteTelefono;
@@ -114,6 +119,7 @@ class TripModel {
     this.vehicleId,
     this.operatorId,
     this.operatorName,
+    this.tripRequestId,
     this.clienteNombre,
     this.clienteTelefono,
     required this.pickupLatitude,
@@ -150,6 +156,7 @@ class TripModel {
       vehicleId: data['vehicleId'],
       operatorId: data['operatorId'],
       operatorName: data['operatorName'],
+      tripRequestId: data['tripRequestId'],
       clienteNombre: data['clienteNombre'],
       clienteTelefono: data['clienteTelefono'],
       pickupLatitude: (data['pickupLatitude'] ?? 0.0).toDouble(),
@@ -182,6 +189,7 @@ class TripModel {
       'vehicleId': vehicleId,
       'operatorId': operatorId,
       'operatorName': operatorName,
+      'tripRequestId': tripRequestId,
       'clienteNombre': clienteNombre,
       'clienteTelefono': clienteTelefono,
       'pickupLatitude': pickupLatitude,
@@ -211,6 +219,7 @@ class TripModel {
     String? driverName,
     String? operatorId,
     String? operatorName,
+    String? tripRequestId,
     String? clienteNombre,
     String? clienteTelefono,
     String? status,
@@ -232,6 +241,7 @@ class TripModel {
       vehicleId: vehicleId,
       operatorId: operatorId ?? this.operatorId,
       operatorName: operatorName ?? this.operatorName,
+      tripRequestId: tripRequestId ?? this.tripRequestId,
       clienteNombre: clienteNombre ?? this.clienteNombre,
       clienteTelefono: clienteTelefono ?? this.clienteTelefono,
       pickupLatitude: pickupLatitude,

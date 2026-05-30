@@ -59,6 +59,13 @@ dependencies:
 
   # Audio (Walkie-Talkie) - Agora real-time streaming
   agora_rtc_engine: ^6.5.0
+  # LiveKit self-hosted (migración híbrida; ver docs/.../livekit-hybrid-migration.md)
+  # Fijado <2.6.0: livekit_client 2.6+ exige connectivity_plus ^7 y el proyecto
+  # usa connectivity_plus ^6.1.4 (subirlo rompería connectivity_service).
+  livekit_client: '>=2.5.4 <2.6.0'
+  # Para controlar volumen de playback del audio remoto (Helper.setVolume).
+  # Versión alineada con la que trae livekit_client transitivamente.
+  flutter_webrtc: ^1.2.1
   permission_handler: ^11.4.0
 
   # Background / Foreground Service (Radio en segundo plano)

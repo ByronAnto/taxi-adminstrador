@@ -8,6 +8,8 @@ import 'package:uuid/uuid.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/services/agora_service.dart';
+import '../../../../core/services/voice/voice_provider.dart';
+import '../../../../core/services/voice/voice_provider_factory.dart';
 import '../../../../core/services/connectivity_service.dart';
 import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/services/local_audio_history_service.dart';
@@ -49,7 +51,14 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   Timer? _silenceTimer;
   DateTime? _lastVoiceAt;
 
-  final _agoraService = AgoraService.instance;
+  // Provider de voz activo (Agora o LiveKit) según el feature flag de la
+  // asociación. GETTER (no campo): lee SIEMPRE el provider actual del factory.
+  // Si se cacheara en un `final`, la página podría capturar el provider por
+  // defecto (Agora) ANTES de que el login corriera selectFor()/forceUse() —
+  // race que dejaba el walkie en Agora aunque el flag fuese LiveKit.
+  // Los `AgoraService.playbackVolumeMin/Max` (consts estáticas del slider)
+  // se siguen referenciando directo — son límites de UI, provider-agnósticos.
+  VoiceProvider get _voice => VoiceProviderFactory.current;
   final _radioService = RadioForegroundService.instance;
   final _connectivity = ConnectivityService.instance;
   final _overlayService = OverlayPttService.instance;
@@ -92,6 +101,13 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// update del stream; sin este flag tocaríamos el beep varias veces.
   bool _lastDeniedSeen = false;
 
+  /// Flag para abortar la transmisión si el usuario suelta el PTT
+  /// DURANTE el grace de reconexión (parked). Sin esto, el flow seguía
+  /// hasta unmuteMic aunque el dedo ya no estaba apretando — la otra
+  /// punta recibía audio sin razón y el speaker no sabía que había
+  /// transmitido.
+  bool _pttCancelled = false;
+
 
   /// Estado de la grabación local del audio del canal (historial 24h).
   String? _recordingEntryId;
@@ -127,7 +143,17 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// enviar GPS.
   void _refreshOfflineFlags() {
     final dependsOnGps = _userDependsOnGps();
-    _isDriverOffline = dependsOnGps && !_locationService.isOnline;
+    // Mientras el DriverLocationService NO terminó de inicializar (resolver
+    // el driver doc + goOnline), su `isOnline` todavía vale el `false`
+    // inicial — NO es una señal real de "Desconectado". Tratarlo como
+    // offline en esa ventana es lo que congelaba el banner naranja en el
+    // Pixel con datos móviles lentos: la página se construía antes de que
+    // goOnline() terminara y nunca se "des-bloqueaba" si el init fallaba.
+    // Solo consideramos al conductor desconectado una vez que el servicio
+    // se inicializó y reporta isOnline=false explícitamente.
+    _isDriverOffline = dependsOnGps &&
+        _locationService.isInitialized &&
+        !_locationService.isOnline;
     _isOffline = !_connectivity.isConnected || _isDriverOffline;
   }
 
@@ -138,11 +164,17 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     // Inicializar configuración del foreground task (sólo registro,
     // no arranca el servicio).
     _radioService.init();
-    // Si el radio quedó ON de la sesión anterior, inicializar Agora.
+    // Si el radio quedó ON de la sesión anterior, inicializar el provider.
     // Si quedó OFF, NO se inicializa nada — el mic queda libre para otras apps.
-    if (_radioPower.isOn) {
-      _agoraService.initialize().catchError((e) {
-        debugPrint('Error inicializando Agora: $e');
+    //
+    // CICLO BLOQUEO→REACTIVACIÓN: al bloquear al conductor, main.dart hace
+    // `VoiceProviderFactory.current.dispose()` (engine destruido, room cerrado,
+    // isInitialized=false). Al reactivar, el router remonta esta página y el
+    // provider sigue siendo el MISMO singleton ya dispuesto. Re-inicializarlo
+    // aquí lo deja sano de nuevo. Si quedó a medio inicializar, lo forzamos.
+    if (_radioPower.isOn && !_voice.isInitialized) {
+      _voice.initialize().catchError((e) {
+        debugPrint('Error inicializando provider de voz: $e');
       });
     }
     // Monitorear conectividad
@@ -209,7 +241,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         _recordingStartTime = null;
         // Mute Agora inmediato (no esperar al bloc). Esto llama
         // enableLocalAudio(false) que libera el mic hardware a nivel del SO.
-        _agoraService.muteMic().catchError((e) {
+        _voice.muteMic().catchError((e) {
           debugPrint('Error muteMic al pasar a background: $e');
         });
         final commState = context.read<CommunicationBloc>().state;
@@ -235,7 +267,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       // Sin esto el conductor escucha mudo hasta togglear OFF/ON.
       debugPrint('📱 WalkieTalkie: App resumed → resumeAudioReceive');
       if (_radioPower.isOn) {
-        _agoraService.resumeAudioReceive().catchError((e) {
+        _voice.resumeAudioReceive().catchError((e) {
           debugPrint('Error resumeAudioReceive: $e');
         });
       }
@@ -261,7 +293,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         }
       }
       // Salir de Agora
-      _agoraService.leaveChannel().catchError((_) {});
+      _voice.leaveChannel().catchError((_) {});
       _lastAgoraChannelId = null;
     } else if (!_isOffline && wasOffline) {
       // ── Conexión restaurada ──
@@ -271,7 +303,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       if (currentState is CommunicationLoaded &&
           currentState.activeChannelId != null) {
         _lastAgoraChannelId = currentState.activeChannelId;
-        _agoraService
+        _voice
             .joinChannel(currentState.activeChannelId!)
             .catchError((e) {
           debugPrint('Error Agora rejoin tras reconexión: $e');
@@ -313,12 +345,16 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
 
     // Si hay un nuevo speaker, iniciar grabación local.
     if (speakerId == null || speakerId.isEmpty) return;
-    if (!_radioPower.isOn || !_agoraService.isInChannel) return;
+    if (!_radioPower.isOn || !_voice.isInChannel) return;
     final history = LocalAudioHistoryService.instance;
     final entryId =
         '${DateTime.now().millisecondsSinceEpoch}_${speakerId.substring(0, speakerId.length.clamp(0, 6))}';
     final filePath = await history.reservePath(entryId);
-    final ok = await _agoraService.startLocalRecording(filePath);
+    // Si el que habla soy yo, grabar mi micrófono (lo que mandé); si es otro,
+    // grabar el audio remoto (lo que oí). En Agora este flag se ignora (graba
+    // la mezcla completa). Así el historial cubre ambas direcciones.
+    final isMe = speakerId == _currentUser?.uid;
+    final ok = await _voice.startLocalRecording(filePath, recordMic: isMe);
     if (!ok) return;
     _recordingEntryId = entryId;
     _recordingStartedAt = DateTime.now();
@@ -339,7 +375,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     _recordingEntryId = null;
     _recordingStartedAt = null;
     if (id == null) return;
-    await _agoraService.stopLocalRecording();
+    await _voice.stopLocalRecording();
     final dur = startedAt == null
         ? 0
         : DateTime.now().difference(startedAt).inSeconds;
@@ -361,7 +397,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       if (!_radioPower.isOn) return;
       if (_isOffline) return;
       if (_isRecording) return; // estoy hablando, claramente activo
-      if (!_agoraService.isInChannel) return;
+      if (!_voice.isInChannel) return;
       // Si hay alguien hablando ahora mismo, refrescá la marca y salí.
       final commState = context.read<CommunicationBloc>().state;
       if (commState is CommunicationLoaded && commState.isPttLocked) {
@@ -377,7 +413,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       if (idleSec >= _idleParkAfterSeconds) {
         debugPrint(
             '🅿️ WalkieTalkie: $idleSec s sin speaker → parkChannel()');
-        _agoraService.parkChannel().catchError((e) {
+        _voice.parkChannel().catchError((e) {
           debugPrint('Error parkChannel: $e');
         });
       }
@@ -411,10 +447,10 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         channelName = commState.activeChannel?.name;
       }
       try {
-        await _agoraService.initialize();
+        await _voice.initialize();
         if (channelToJoin != null) {
           _lastAgoraChannelId = channelToJoin;
-          await _agoraService.joinChannel(channelToJoin);
+          await _voice.joinChannel(channelToJoin);
           if (channelName != null && !_radioService.isRunning) {
             await _radioService.startService(channelName);
           }
@@ -436,7 +472,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       // Frenar el monitor de inactividad antes de destruir el engine.
       _disarmIdleTimer();
       // Salir de Agora y destruir engine — libera mic hardware
-      await _agoraService.destroyEngine();
+      await _voice.destroyEngine();
       _lastAgoraChannelId = null;
       // Detener foreground service — libera el "tag" de microphone del SO
       await _radioService.stopService();
@@ -462,7 +498,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           _stopPtt(currentState);
         }
       }
-      _agoraService.leaveChannel().catchError((_) {});
+      _voice.leaveChannel().catchError((_) {});
       _lastAgoraChannelId = null;
     } else if (!_isOffline && wasOffline) {
       // ── Conductor volvió a estar online ──
@@ -473,7 +509,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       if (currentState is CommunicationLoaded &&
           currentState.activeChannelId != null) {
         _lastAgoraChannelId = currentState.activeChannelId;
-        _agoraService
+        _voice
             .joinChannel(currentState.activeChannelId!)
             .catchError((e) {
           debugPrint('Error Agora rejoin tras conductor online: $e');
@@ -527,12 +563,27 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         if (state is CommunicationLoaded &&
             state.activeChannelId != null &&
             !_radioPower.isOn) {
-          _agoraService.prewarmToken(state.activeChannelId!);
+          _voice.prewarmToken(state.activeChannelId!);
         }
-        // El auto-resume del último canal se eliminó intencionalmente:
-        // arrancamos siempre con radio OFF y, cuando el conductor toca
-        // el switch, ahí seleccionamos `lastChannelId`. Así el ON es
-        // siempre interactivo y nunca despierta solo audio en el canal.
+        // === Auto-reconexión al reabrir (comportamiento Zello) ===
+        // Si el radio quedó ENCENDIDO de una sesión previa, al cargar los
+        // canales seleccionamos el último para que el audio reconecte solo.
+        // SEGURIDAD: `isOn` aquí solo es true si `restoreForUser(uid)` lo
+        // restauró para ESTE conductor (no hereda entre usuarios). Por eso ya
+        // no aplica el viejo "arranca siempre OFF": ahora persiste por uid.
+        if (state is CommunicationLoaded &&
+            _radioPower.isOn &&
+            state.activeChannelId == null &&
+            _radioPower.lastChannelId != null &&
+            !_isOffline) {
+          final exists = state.channels
+              .any((c) => c.uid == _radioPower.lastChannelId);
+          if (exists) {
+            context.read<CommunicationBloc>().add(
+                  ChannelSelected(_radioPower.lastChannelId),
+                );
+          }
+        }
         // === Foreground service: mantener radio en segundo plano ===
         // Sólo si el radio está ENCENDIDO. Si está OFF, NO conectamos a
         // Agora ni arrancamos el foreground service "microphone" — eso es
@@ -546,14 +597,14 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             _lastAgoraChannelId = channelId;
             // Persistir el canal para poder reanudar tras kill del isolate.
             _radioPower.setLastChannel(channelId, channelName);
-            _agoraService.joinChannel(channelId).catchError((e) {
+            _voice.joinChannel(channelId).catchError((e) {
               debugPrint('Error Agora joinChannel: $e');
             });
             _armIdleTimer();
           } else if (channelId == null && _lastAgoraChannelId != null) {
             _lastAgoraChannelId = null;
             _disarmIdleTimer();
-            _agoraService.leaveChannel().catchError((e) {
+            _voice.leaveChannel().catchError((e) {
               debugPrint('Error Agora leaveChannel: $e');
             });
           }
@@ -563,8 +614,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           // arrancar a hablar, volvemos a conectar para escucharlo.
           // ~300 ms de delay vs. estar siempre conectado, pero deja de
           // facturar minutos Agora durante los silencios.
-          if (state.isPttLocked && _agoraService.isParked && !_isOffline) {
-            _agoraService.resumeFromPark().catchError((e) {
+          if (state.isPttLocked && _voice.isParked && !_isOffline) {
+            _voice.resumeFromPark().catchError((e) {
               debugPrint('Error resumeFromPark: $e');
               return false;
             });
@@ -755,7 +806,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// El cambio es inmediato sobre el engine Agora y se persiste para
   /// cold-starts futuros.
   Future<void> _showVolumeDialog() async {
-    int current = _agoraService.playbackVolume;
+    int current = _voice.playbackVolume;
     await showDialog<void>(
       context: context,
       builder: (ctx) {
@@ -809,7 +860,12 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                         10,
                     label: '${current ~/ 1}',
                     activeColor: AppTheme.primaryColor,
-                    onChanged: (v) => setLocal(() => current = v.round()),
+                    onChanged: (v) {
+                      setLocal(() => current = v.round());
+                      // Aplicar EN VIVO: si alguien está hablando, el cambio
+                      // de volumen se oye al instante mientras arrastras.
+                      _voice.setPlaybackVolume(current);
+                    },
                   ),
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -844,7 +900,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                   onPressed: () async {
                     final messenger = ScaffoldMessenger.of(context);
                     final navigator = Navigator.of(ctx);
-                    await _agoraService.setPlaybackVolume(current);
+                    await _voice.setPlaybackVolume(current);
                     if (!mounted) return;
                     navigator.pop();
                     messenger.showSnackBar(
@@ -1374,7 +1430,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
               IconButton(
                 onPressed: () {
                   setState(() => _isMuted = !_isMuted);
-                  _agoraService.setRemoteAudioMuted(_isMuted);
+                  _voice.setRemoteAudioMuted(_isMuted);
                 },
                 icon: Icon(
                   _isMuted ? Icons.volume_off : Icons.volume_up,
@@ -1466,10 +1522,10 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       }
       // Re-inicializar engine para uso en esta página
       try {
-        await _agoraService.initialize();
+        await _voice.initialize();
         if (state.activeChannelId != null) {
           _lastAgoraChannelId = state.activeChannelId;
-          await _agoraService.joinChannel(state.activeChannelId!);
+          await _voice.joinChannel(state.activeChannelId!);
         }
       } catch (e) {
         debugPrint('Error re-init Agora tras stop overlay: $e');
@@ -1510,7 +1566,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     }
 
     // Destruir engine actual (el overlay gestiona su propio ciclo)
-    await _agoraService.destroyEngine();
+    await _voice.destroyEngine();
     _lastAgoraChannelId = null;
 
     // Iniciar overlay (conecta Agora al canal automáticamente)
@@ -1532,10 +1588,10 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       // botón nativo NO se mostró (gracias al fix del start). Avisamos al
       // usuario y volvemos a inicializar Agora en la página principal.
       try {
-        await _agoraService.initialize();
+        await _voice.initialize();
         if (state.activeChannelId != null) {
           _lastAgoraChannelId = state.activeChannelId;
-          await _agoraService.joinChannel(state.activeChannelId!);
+          await _voice.joinChannel(state.activeChannelId!);
         }
       } catch (_) {}
       if (mounted) {
@@ -1626,7 +1682,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     if (_isRecording) return; // Prevent double-start
 
     // Verificar permiso de micrófono
-    final hasPermission = await _agoraService.hasMicPermission();
+    final hasPermission = await _voice.hasMicPermission();
     if (!hasPermission) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1639,7 +1695,21 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       return;
     }
 
-    final wasParked = _agoraService.isParked;
+    // Reconectar+grace si estamos parked O si aún no estamos en el canal
+    // (caso típico al reabrir la app: el radio se restauró ON y la sala sigue
+    // conectando — sin esto el primer PTT transmitía a una sala a medio
+    // conectar y se perdía el audio).
+    final wasParked = _voice.isParked || !_voice.isInChannel;
+
+    // ⚡ Feedback INMEDIATO al apretar PTT — antes de cualquier await.
+    // Esto le confirma al usuario que el botón registró el press.
+    // Sin esto, el botón se sentía "muerto" durante los ~2s del grace.
+    HapticFeedback.mediumImpact();
+    setState(() {
+      _isRecording = true;
+      _recordingSeconds = 0;
+      _pttCancelled = false;
+    });
 
     // ── Auto-resume desde park ──
     // Si el canal está parked por inactividad, hay que volver a Agora.
@@ -1648,11 +1718,17 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     // snapshot stream y arrancan su `resumeFromPark()` EN PARALELO con
     // el nuestro. Después agregamos un grace de ~1.2 s para garantizar
     // que cuando soltemos el unmuteMic los oyentes ya estén en canal.
+    //
+    // Si el usuario suelta el dedo mid-grace, _pttCancelled se setea
+    // en _stopPtt y abortamos sin transmitir.
     if (wasParked) {
-      if (!mounted) return;
+      if (!mounted) {
+        _pttCancelled = true;
+        return;
+      }
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Conectando...'),
+          content: Text('Mantené presionado... conectando'),
           duration: Duration(milliseconds: 2000),
         ),
       );
@@ -1668,7 +1744,22 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           );
 
       // 2️⃣ Reconectar nosotros mismos.
-      final ok = await _agoraService.resumeFromPark();
+      final ok = await _voice.resumeFromPark();
+
+      // Si el user soltó el dedo durante la reconexión, abortar.
+      if (_pttCancelled) {
+        if (mounted) {
+          context.read<CommunicationBloc>().add(
+                PttUnlockRequested(
+                  channelId: state.activeChannelId!,
+                  userId: user.uid,
+                ),
+              );
+        }
+        _cleanupRecordingState();
+        return;
+      }
+
       if (!ok && mounted) {
         // Liberar el lock que ya escribimos: si fallamos la reconexión,
         // que otro pueda hablar.
@@ -1678,6 +1769,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                 userId: user.uid,
               ),
             );
+        _cleanupRecordingState();
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('No se pudo reconectar al canal. Intentá de nuevo.'),
@@ -1690,13 +1782,21 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       // 3️⃣ Grace: esperar a que los listeners terminen su reconexión.
       await Future.delayed(
           const Duration(milliseconds: _listenerCatchupMs));
-      if (!mounted) return;
-    }
 
-    setState(() {
-      _isRecording = true;
-      _recordingSeconds = 0;
-    });
+      // De nuevo, chequear cancelación tras el delay.
+      if (_pttCancelled || !mounted) {
+        if (mounted) {
+          context.read<CommunicationBloc>().add(
+                PttUnlockRequested(
+                  channelId: state.activeChannelId!,
+                  userId: user.uid,
+                ),
+              );
+        }
+        _cleanupRecordingState();
+        return;
+      }
+    }
 
     // Contador de duración visible en el botón
     _durationTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
@@ -1722,7 +1822,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     // periódico checa cada segundo y, si pasaron más de
     // `_maxSilenceSeconds` sin voz, fuerza stopPtt para liberar el lock.
     _lastVoiceAt = DateTime.now();
-    _agoraService.onLocalVoiceActivity = (active) {
+    _voice.onLocalVoiceActivity = (active) {
       if (active) _lastVoiceAt = DateTime.now();
     };
     _silenceTimer?.cancel();
@@ -1745,8 +1845,10 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
 
     _recordingStartTime = DateTime.now();
 
-    // 🔔 Feedback háptico + beep tipo Motorola/Zello al iniciar PTT
-    HapticFeedback.mediumImpact();
+    // 🔔 Beep tipo Motorola/Zello al iniciar PTT (talk-permit).
+    // El háptico ya se disparó al inicio de _startPtt como feedback
+    // inmediato del press — acá sólo va el beep, que arranca recién
+    // cuando estamos listos para transmitir.
     PttBeepService.instance.playStart();
 
     // Intentar adquirir el lock PTT en Firestore — sólo si no veníamos
@@ -1765,7 +1867,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
 
     // ── AGORA: Desmutear mic → audio en tiempo real a todos ──
     try {
-      await _agoraService.unmuteMic();
+      await _voice.unmuteMic();
     } catch (e) {
       _recordingTimer?.cancel();
       _durationTimer?.cancel();
@@ -1784,9 +1886,33 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     }
   }
 
+  /// Limpia los timers + el flag de grabación de UI. Usado tanto en
+  /// _stopPtt normal como en abortos durante el grace de reconexión.
+  void _cleanupRecordingState() {
+    _recordingTimer?.cancel();
+    _durationTimer?.cancel();
+    _silenceTimer?.cancel();
+    _silenceTimer = null;
+    _lastVoiceAt = null;
+    _voice.onLocalVoiceActivity = null;
+    if (mounted) {
+      setState(() {
+        _isRecording = false;
+        _recordingSeconds = 0;
+      });
+    } else {
+      _isRecording = false;
+      _recordingSeconds = 0;
+    }
+  }
+
   Future<void> _stopPtt(CommunicationLoaded state) async {
     final user = _currentUser;
     if (user == null || state.activeChannelId == null) return;
+
+    // Si _startPtt está en medio del grace de reconexión, esto le
+    // dice que aborte cuando termine el await.
+    _pttCancelled = true;
 
     // Inmediatamente marcamos como no transmitiendo
     _recordingTimer?.cancel();
@@ -1794,7 +1920,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     _silenceTimer?.cancel();
     _silenceTimer = null;
     _lastVoiceAt = null;
-    _agoraService.onLocalVoiceActivity = null;
+    _voice.onLocalVoiceActivity = null;
     final durationSeconds = _recordingStartTime != null
         ? DateTime.now().difference(_recordingStartTime!).inSeconds
         : 0;
@@ -1805,7 +1931,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
 
     // ── AGORA: Mutear mic → dejar de transmitir ──
     try {
-      await _agoraService.muteMic();
+      await _voice.muteMic();
       // 🔔 Feedback háptico + beep "fin de transmisión" tipo Motorola
       HapticFeedback.lightImpact();
       PttBeepService.instance.playEnd();

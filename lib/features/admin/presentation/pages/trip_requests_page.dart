@@ -3,10 +3,10 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
-import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../trips/data/models/trip_model.dart';
+import '../../../trips/presentation/widgets/active_driver_picker_sheet.dart';
 
 /// Panel de solicitudes de carrera (tripRequests).
 ///
@@ -94,11 +94,27 @@ class TripRequestsPage extends StatelessWidget {
                     ],
                   ),
                   trailing: estado == 'pendiente'
-                      ? FilledButton.tonal(
-                          onPressed: () => _assignRequest(
-                              context, docs[i].reference, r, user.uid,
-                              '${user.name} ${user.lastname}'.trim(), aid),
-                          child: const Text('Asignar'),
+                      ? Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            // Cancelar un pedido que AÚN no tiene trip asignado:
+                            // se opera directamente sobre el tripRequest. Al
+                            // poner estado='cancelada' sale del whereIn
+                            // ['pendiente','asignada'] y desaparece de la lista.
+                            IconButton(
+                              icon: Icon(Icons.cancel_outlined,
+                                  color: AppTheme.errorColor),
+                              tooltip: 'Cancelar solicitud',
+                              onPressed: () => _cancelRequest(
+                                  context, docs[i].reference, r),
+                            ),
+                            FilledButton.tonal(
+                              onPressed: () => _assignRequest(
+                                  context, docs[i].reference, r, user.uid,
+                                  '${user.name} ${user.lastname}'.trim(), aid),
+                              child: const Text('Asignar'),
+                            ),
+                          ],
                         )
                       : Text(estado),
                 ),
@@ -118,25 +134,19 @@ class TripRequestsPage extends StatelessWidget {
     String operatorName,
     String aid,
   ) async {
-    // Reusa el modal de asignación: aquí mostramos un dropdown simple de
-    // conductores online y al confirmar creamos trip + actualizamos el req.
-    final selected = await showModalBottomSheet<String>(
-      context: context,
-      isScrollControlled: true,
-      builder: (_) =>
-          _AssignFromRequestSheet(aid: aid, requestData: reqData),
-    );
-    if (selected == null) return;
+    // Reusa el selector centralizado de conductores activos (mismo stream y
+    // filtro que la reasignación), al confirmar creamos trip + actualizamos
+    // el req.
+    final pick = await showActiveDriverPicker(context, associationId: aid);
+    if (pick == null) return;
     if (!context.mounted) return;
 
-    // selected viene como "driverDocId|userId|driverName"
-    final parts = selected.split('|');
-    if (parts.length != 3) return;
-    final driverUserId = parts[1];
-    final driverName = parts[2];
+    final driverUserId = pick.userId;
+    final driverName = pick.driverName;
 
     final now = DateTime.now();
     final tripId = const Uuid().v4();
+    final reqId = reqRef.id;
     final origen = reqData['origen'] as Map<String, dynamic>?;
     final destino = reqData['destino'] as Map<String, dynamic>?;
 
@@ -147,6 +157,8 @@ class TripRequestsPage extends StatelessWidget {
       driverName: driverName,
       operatorId: operatorId,
       operatorName: operatorName,
+      // Enlace al pedido origen (contrato de datos trip ↔ tripRequest).
+      tripRequestId: reqId,
       clienteNombre: reqData['clienteNombre'],
       clienteTelefono: reqData['clienteTelefono'],
       pickupLatitude: (origen?['lat'] ?? 0.0).toDouble(),
@@ -173,7 +185,17 @@ class TripRequestsPage extends StatelessWidget {
           .doc(tripId)
           .set(trip.toFirestore());
       await reqRef.update({
+        // Campos canónicos del contrato de datos (los lee el portal web del
+        // cliente y la Cloud Function que propaga el estado):
         'estado': 'asignada',
+        'tripId': tripId,
+        'driverId': driverUserId,
+        // Datos denormalizados del conductor para que el portal web del
+        // cliente los lea desde su propio tripRequest (no tiene permiso para
+        // leer la colección `drivers/`).
+        'conductorNombre': pick.driverName,
+        'conductorVehiculo': pick.vehicleNumber,
+        // Campos legacy mantenidos por compatibilidad con docs/lectores previos.
         'asignadoA': driverUserId,
         'asignadoTripId': tripId,
         'asignadoAt': FieldValue.serverTimestamp(),
@@ -195,73 +217,67 @@ class TripRequestsPage extends StatelessWidget {
     }
   }
 
+  /// Cancela una solicitud pendiente que todavía NO tiene trip asignado.
+  ///
+  /// Opera directamente sobre el `tripRequests/{id}` poniendo
+  /// `estado: 'cancelada'`. Como el stream filtra por
+  /// `whereIn ['pendiente','asignada']`, la solicitud cancelada desaparece
+  /// de la lista al instante. (Para carreras YA asignadas, la cancelación se
+  /// hace desde la carrera en TripsPage, que propaga el estado al request.)
+  Future<void> _cancelRequest(
+    BuildContext context,
+    DocumentReference<Map<String, dynamic>> reqRef,
+    Map<String, dynamic> reqData,
+  ) async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('¿Cancelar esta solicitud?'),
+        content: Text(
+          'La solicitud de "${reqData['clienteNombre'] ?? 'cliente'}" '
+          'dejará de aparecer en el listado.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('No'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.errorColor),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Cancelar solicitud'),
+          ),
+        ],
+      ),
+    );
+    if (ok != true) return;
+    if (!context.mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    try {
+      await reqRef.update({
+        'estado': 'cancelada',
+        'canceladoAt': FieldValue.serverTimestamp(),
+        'updatedAt': FieldValue.serverTimestamp(),
+      });
+      messenger.showSnackBar(
+        const SnackBar(content: Text('Solicitud cancelada')),
+      );
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(
+          content: Text('Error: $e'),
+          backgroundColor: AppTheme.errorColor,
+        ),
+      );
+    }
+  }
+
   void _showCreate(BuildContext context, String aid) {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       builder: (_) => _CreateRequestForm(aid: aid),
-    );
-  }
-}
-
-class _AssignFromRequestSheet extends StatelessWidget {
-  final String aid;
-  final Map<String, dynamic> requestData;
-  const _AssignFromRequestSheet(
-      {required this.aid, required this.requestData});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          const Text('Selecciona un conductor en línea',
-              style:
-                  TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 12),
-          StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-            stream: FirebaseFirestore.instance
-                .collection(AppConstants.driversCollection)
-                .where('associationId', isEqualTo: aid)
-                .where('status',
-                    whereNotIn: [AppConstants.statusOffline]).snapshots(),
-            builder: (context, snap) {
-              if (snap.connectionState == ConnectionState.waiting) {
-                return const LinearProgressIndicator();
-              }
-              final docs = snap.data?.docs ?? [];
-              if (docs.isEmpty) {
-                return const Padding(
-                  padding: EdgeInsets.all(16),
-                  child: Text('No hay conductores en línea ahora.'),
-                );
-              }
-              return ListView.builder(
-                shrinkWrap: true,
-                itemCount: docs.length,
-                itemBuilder: (_, i) {
-                  final d = docs[i].data();
-                  final name = d['driverName'] ?? 'Conductor';
-                  final num_ = d['vehicleNumber'] ?? '';
-                  final status = d['status'] ?? '';
-                  final userId = d['userId'] ?? '';
-                  return ListTile(
-                    leading: const Icon(Icons.directions_car),
-                    title: Text(num_.isNotEmpty ? '#$num_ · $name' : name),
-                    subtitle: Text(status),
-                    onTap: () {
-                      Navigator.of(context).pop('${docs[i].id}|$userId|$name');
-                    },
-                  );
-                },
-              );
-            },
-          ),
-        ],
-      ),
     );
   }
 }

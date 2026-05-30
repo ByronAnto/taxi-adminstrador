@@ -1,0 +1,14 @@
+# Reverse proxy TLS para LiveKit (y futuros subdominios de it-services.center).
+# Caddy obtiene y renueva certificados Let's Encrypt automáticamente.
+
+livekit.it-services.center {
+    reverse_proxy 127.0.0.1:7880
+}
+
+# Plantilla para agregar más subdominios (descomentar y ajustar puerto):
+# morochos-guayacos.it-services.center {
+#     reverse_proxy 127.0.0.1:PUERTO
+# }
+# inventory-car.it-services.center {
+#     reverse_proxy 127.0.0.1:PUERTO
+# }

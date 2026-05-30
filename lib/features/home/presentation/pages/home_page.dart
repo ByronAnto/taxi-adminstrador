@@ -3,6 +3,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../auth/data/models/user_model.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../../../core/services/connectivity_service.dart';
 import '../../../../core/services/radio_power_service.dart';
 import '../../../../core/theme/app_theme.dart';
@@ -35,6 +36,35 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   int _currentIndex = -1;
+
+  @override
+  void initState() {
+    super.initState();
+    // En vez de pedir los permisos en ráfaga (silencioso, fallaba por
+    // colisiones de permission_handler y bloqueos de MIUI), comprobamos si
+    // los REQUERIDOS (mic + ubicación en uso + notificaciones) ya están
+    // concedidos. Si NO, mandamos a la página de onboarding de permisos,
+    // donde se piden de a uno con un gesto del usuario.
+    // Tras el primer frame para no chocar con la construcción de la UI.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _gateRequiredPermissions();
+    });
+  }
+
+  /// Si faltan permisos requeridos, navega a /permissions. El chequeo es
+  /// async, por eso vive aquí y NO en el redirect (síncrono) de go_router.
+  Future<void> _gateRequiredPermissions() async {
+    final mic = await Permission.microphone.isGranted;
+    final loc = await Permission.locationWhenInUse.isGranted;
+    final notif = await Permission.notification.isGranted;
+    if (mic && loc && notif) return; // todo concedido, nos quedamos en home.
+
+    if (!mounted) return;
+    // Evita reloops: solo navegamos si seguimos en /home.
+    final location = GoRouterState.of(context).matchedLocation;
+    if (location != '/home') return;
+    context.go('/permissions');
+  }
 
   bool _sendsGps(UserModel user) {
     if (user.role == AppConstants.roleDriver) return true;
@@ -266,6 +296,13 @@ class _HomePageState extends State<HomePage> {
 
     final list = <_ActionTile>[];
     if (canDrive) {
+      // Carreras del conductor: sus asignadas + las pendientes (solo ver).
+      list.add(_ActionTile(
+        title: 'Mis carreras',
+        icon: Icons.local_taxi_outlined,
+        color: AppTheme.primaryColor,
+        onTap: () => context.push('/trips'),
+      ));
       list.add(_ActionTile(
         title: 'Mis pagos',
         icon: Icons.payments_outlined,
@@ -292,6 +329,16 @@ class _HomePageState extends State<HomePage> {
         color: Colors.deepPurple,
         onTap: () => context.push('/trip-requests'),
       ));
+      // Carreras: ver asignadas/activas, reasignar (cambiar conductor) y
+      // cancelar. Estas acciones viven en TripsPage.
+      if (!canDrive) {
+        list.add(_ActionTile(
+          title: 'Carreras',
+          icon: Icons.local_taxi_outlined,
+          color: AppTheme.primaryColor,
+          onTap: () => context.push('/trips'),
+        ));
+      }
     }
     return list;
   }
@@ -304,9 +351,11 @@ class _HomePageState extends State<HomePage> {
     if (!canOperate) return const [];
 
     // La operadora valida pagos y administra paradas. Lo financiero
-    // (Caja y Reportes globales) es 100% del admin del grupo, así que
-    // NO debe verlo. Sí ve un reporte personal con los pagos que ELLA
-    // validó por día/semana/mes.
+    // (Caja) sigue siendo 100% del admin del grupo, así que NO lo ve.
+    // El reporte GENERAL del tenant (carreras del día por hora + estimado $)
+    // SÍ lo ve, porque la operadora gestiona la operación y por reglas ya
+    // puede leer todas las carreras de la asociación. También tiene un
+    // reporte personal con los pagos que ELLA validó por día/semana/mes.
     if (isOperator) {
       return [
         _ActionTile(
@@ -326,6 +375,12 @@ class _HomePageState extends State<HomePage> {
           icon: Icons.assignment_turned_in_outlined,
           color: AppTheme.accentColor,
           onTap: () => context.push('/operator-validations'),
+        ),
+        _ActionTile(
+          title: 'Reportes',
+          icon: Icons.bar_chart_outlined,
+          color: AppTheme.accentColor,
+          onTap: () => context.push('/reports'),
         ),
         _ActionTile(
           title: 'Paradas',
