@@ -17,6 +17,7 @@ import '../../../payments/presentation/widgets/due_date_banner.dart';
 import '../widgets/dashboard_kpis.dart';
 import '../widgets/notifications_bell_button.dart';
 import '../widgets/radio_wave_button.dart';
+import '../widgets/remote_logging_dialog.dart';
 
 /// Página principal con navegación inferior y dashboard por rol.
 ///
@@ -471,6 +472,12 @@ class _HomePageState extends State<HomePage> {
         icon: Icons.location_on_outlined,
         color: Colors.amber.shade800,
         onTap: () => context.push('/stand-location'),
+      ),
+      _ActionTile(
+        title: 'Logs remotos',
+        icon: Icons.bug_report_outlined,
+        color: Colors.blueGrey.shade700,
+        onTap: () => RemoteLoggingDialog.show(context),
       ),
       if (isSuper)
         _ActionTile(

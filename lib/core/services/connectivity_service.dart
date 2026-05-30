@@ -102,31 +102,52 @@ class ConnectivityService extends ChangeNotifier {
     }
   }
 
-  /// Hace el probe HTTP al endpoint canónico de detección de internet con
-  /// fallback. HTTPS porque Android (targetSdk 36) bloquea cleartext por
-  /// defecto. 204/2xx/3xx = internet OK.
+  /// Hace el probe HTTP de internet. Estrategia "fuente de verdad de lo que
+  /// importa": probamos PRIMERO nuestro backend real (LiveKit servido por
+  /// Caddy). Si responde — con CUALQUIER statusCode (200/401/404/etc.) —
+  /// significa que hay salida a internet hacia lo que la app necesita, aunque
+  /// el operador móvil esté bloqueando/ralentizando los endpoints de Google.
+  /// Solo si LiveKit NO responde caemos a un endpoint de Google como fallback.
+  ///
+  /// HTTPS porque Android (targetSdk 36) bloquea cleartext por defecto.
+  /// Timeout corto (4 s) para recuperar rápido tras un falso negativo.
   Future<bool> _probeInternet() async {
-    const endpoints = [
-      'https://connectivitycheck.gstatic.com/generate_204',
-      'https://clients3.google.com/generate_204',
-    ];
-    for (final url in endpoints) {
-      try {
-        final r = await http
-            .get(Uri.parse(url))
-            .timeout(const Duration(seconds: 8));
-        if (r.statusCode >= 200 && r.statusCode < 400) return true;
-      } on SocketException catch (_) {
-        // probar siguiente endpoint
-      } on TimeoutException catch (_) {
-        // probar siguiente endpoint
-      } on http.ClientException catch (_) {
-        // probar siguiente endpoint
-      } catch (_) {
-        // probar siguiente endpoint
-      }
+    // 1️⃣ Backend real: cualquier respuesta HTTP del servidor cuenta como
+    //    "hay internet a lo que importa". No exigimos 2xx/3xx — con que el
+    //    servidor conteste (incluso 401/404) basta: la red llega a LiveKit.
+    if (await _probeReachable('https://livekit.it-services.center',
+        anyStatus: true)) {
+      return true;
+    }
+    // 2️⃣ Fallback secundario: endpoint canónico de Google (generate_204).
+    //    Aquí sí exigimos 2xx/3xx porque es un endpoint de detección clásico.
+    if (await _probeReachable(
+        'https://connectivitycheck.gstatic.com/generate_204')) {
+      return true;
     }
     return false;
+  }
+
+  /// Hace un GET al `url` y decide si cuenta como "internet OK".
+  ///
+  /// - [anyStatus] = true: cualquier statusCode (que el servidor responda)
+  ///   es éxito. Útil para la raíz de LiveKit, que puede devolver 404/401.
+  /// - [anyStatus] = false: solo 2xx/3xx cuenta (endpoints generate_204).
+  Future<bool> _probeReachable(String url, {bool anyStatus = false}) async {
+    try {
+      final r =
+          await http.get(Uri.parse(url)).timeout(const Duration(seconds: 4));
+      if (anyStatus) return true; // respondió el servidor → red OK
+      return r.statusCode >= 200 && r.statusCode < 400;
+    } on SocketException catch (_) {
+      return false;
+    } on TimeoutException catch (_) {
+      return false;
+    } on http.ClientException catch (_) {
+      return false;
+    } catch (_) {
+      return false;
+    }
   }
 
   /// Registra un fallo de probe. Solo declara "sin red" tras 2 fallos

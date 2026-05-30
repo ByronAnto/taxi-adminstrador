@@ -269,11 +269,27 @@ class CommunicationBloc extends Bloc<CommunicationEvent, CommunicationState> {
     final selectedId = event.channelId;
     if (selectedId == null) return;
 
-    // Escuchar mensajes del canal seleccionado
-    _messagesSubscription = watchChannelMessages(selectedId).listen(
-      (messages) => add(ChannelMessagesUpdated(messages)),
-      onError: (_) => add(ChannelMessagesUpdated(const [])),
-    );
+    // Escuchar mensajes del canal seleccionado, de forma resiliente: ante un
+    // error transitorio del listener (reconexión/refresh de token) NO borramos
+    // los mensajes y nos re-suscribimos solos si seguimos en el mismo canal.
+    void subscribeMessages() {
+      _messagesSubscription?.cancel();
+      _messagesSubscription = watchChannelMessages(selectedId).listen(
+        (messages) => add(ChannelMessagesUpdated(messages)),
+        onError: (_) {
+          Future.delayed(const Duration(seconds: 3), () {
+            final s = state;
+            if (!isClosed &&
+                s is CommunicationLoaded &&
+                s.activeChannelId == selectedId) {
+              subscribeMessages();
+            }
+          });
+        },
+      );
+    }
+
+    subscribeMessages();
 
     // Escuchar estado del canal en tiempo real (PTT lock)
     _activeChannelSubscription = watchChannel(selectedId).listen(

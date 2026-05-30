@@ -354,6 +354,55 @@ class DriverLocationService extends ChangeNotifier {
     }
   }
 
+  /// Revive el pipeline de GPS si el SO lo mató en background.
+  ///
+  /// En background, Android (Doze/throttling de FGS) puede cancelar el
+  /// position stream y/o congelar los timers del heartbeat: el conductor
+  /// "desaparece" del mapa de la operadora a los pocos minutos. Este método,
+  /// llamado al volver a foreground (`AppLifecycleState.resumed`), detecta si
+  /// el pipeline murió y lo rearranca.
+  ///
+  /// Idempotente y barato: si el conductor no está online no hace nada; si todo
+  /// el pipeline sigue vivo, tampoco toca nada.
+  Future<void> ensureAlive() async {
+    if (!_isOnline || _driverId == null) return;
+
+    // Re-asegurar el FGS (tipo location) por si el SO lo tumbó. setLocationTracking
+    // es idempotente (no relanza si ya está activo) y la guarda anti-crash vive
+    // dentro del FGS.
+    await RadioForegroundService.instance.setLocationTracking(true);
+
+    if (_isStationary) {
+      // En modo estacionario solo hay un heartbeat (el stream está cancelado a
+      // propósito). Si Doze mató ese timer, el conductor deja de reportar incluso
+      // su pulso → lo rearmamos. No reactivamos el stream completo aquí (eso lo
+      // hará _onFix si detecta movimiento); rearmamos el heartbeat estacionario y
+      // forzamos un pulso inmediato para refrescar `updatedAt`.
+      if (_heartbeatTimer == null || !_heartbeatTimer!.isActive) {
+        debugPrint('📍 [LocationService] ensureAlive: heartbeat estacionario '
+            'muerto → rearmando');
+        _heartbeatTimer = Timer.periodic(_stationaryHeartbeatInterval, (_) {
+          _doStationaryHeartbeat();
+        });
+      }
+      // Pulso inmediato al volver de background (no esperar al próximo tick).
+      unawaited(_doStationaryHeartbeat());
+      return;
+    }
+
+    // Modo ACTIVE: el stream o el heartbeat pueden haber muerto. Si cualquiera
+    // de los dos no está vivo, rearrancamos TODO el pipeline (_startGps cancela
+    // y recrea ambos + pide un fix inmediato).
+    final streamDead = _positionSub == null;
+    final heartbeatDead = _heartbeatTimer == null || !_heartbeatTimer!.isActive;
+    if (streamDead || heartbeatDead) {
+      debugPrint('📍 [LocationService] ensureAlive: pipeline GPS muerto '
+          '(stream=${streamDead ? "muerto" : "vivo"}, '
+          'heartbeat=${heartbeatDead ? "muerto" : "vivo"}) → rearrancando');
+      _startGps();
+    }
+  }
+
   // ─── GPS interno ─────────────────────────────────────────
 
   Future<void> _requestPermissionAndStartGps() async {

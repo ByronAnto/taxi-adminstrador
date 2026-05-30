@@ -547,6 +547,14 @@ service cloud.firestore {
     // - Lectura: cualquier autenticado (la necesita el VersionGateService
     //   en el boot, ANTES de saber el rol del usuario).
     // - Escritura: solo super-admin (publica nuevas versiones).
+    // Flag de logging remoto (diagnóstico): lo lee cualquier autenticado
+    // (gate del envío de logs) y lo activa/desactiva el ADMIN desde el toggle
+    // de la app. Match específico ANTES del general para no aflojar el resto
+    // de app_config (versiones), que sigue siendo solo super-admin.
+    match /app_config/remoteLogging {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() || isSuperAdmin();
+    }
     match /app_config/{platform} {
       allow read: if isAuthenticated();
       allow write: if isSuperAdmin();

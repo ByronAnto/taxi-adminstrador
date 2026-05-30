@@ -1,0 +1,9 @@
+{
+  "name": "log-ingest",
+  "version": "1.0.0",
+  "description": "Recibe lotes de logs de la app (HTTP) y los guarda en disco por usuario/día. Retención 7 días. Para depurar pruebas de campo sin USB.",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "dependencies": { "express": "^4.21.2" }
+}

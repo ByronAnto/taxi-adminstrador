@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui' show PlatformDispatcher;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -24,6 +25,7 @@ import 'core/services/radio_power_service.dart';
 import 'core/services/radio_foreground_service.dart';
 import 'core/services/claims_refresh_service.dart';
 import 'core/services/queue_alert_service.dart';
+import 'core/services/remote_log_service.dart';
 import 'core/services/single_session_service.dart';
 import 'core/services/version_gate_service.dart';
 import 'core/services/voice/voice_provider_factory.dart';
@@ -40,8 +42,46 @@ import 'features/map/presentation/bloc/map_bloc.dart';
 import 'features/users/presentation/bloc/user_management_bloc.dart';
 import 'features/emergency/presentation/bloc/emergency_bloc.dart';
 
-void main() async {
+void main() {
+  // Logging remoto: envolvemos TODO el arranque en una zona que intercepta
+  // `print`/`debugPrint`/el paquete `logger` y los reenvía al
+  // RemoteLogService, además de capturar los errores no atrapados. Tanto
+  // `WidgetsFlutterBinding.ensureInitialized()` como la inicialización de
+  // Firebase quedan DENTRO de la zona (requerido por runZonedGuarded).
+  runZonedGuarded<Future<void>>(
+    () => _bootstrap(),
+    (error, stack) {
+      RemoteLogService.instance.captureError(error, stack);
+    },
+    zoneSpecification: ZoneSpecification(
+      print: (self, parent, zone, line) {
+        RemoteLogService.instance.capture(line);
+        parent.print(zone, line);
+      },
+    ),
+  );
+}
+
+/// Arranque real de la app. Vive DENTRO de la zona de `runZonedGuarded`.
+Future<void> _bootstrap() async {
   final widgetsBinding = WidgetsFlutterBinding.ensureInitialized();
+
+  // Logging remoto: enganchar los errores del framework y los errores async
+  // que escapan de la zona, y arrancar el timer de envío en lotes. NUNCA
+  // debe romper el arranque si Oracle no responde (init es fire-and-forget
+  // del POST; sólo arranca el timer).
+  FlutterError.onError = (FlutterErrorDetails details) {
+    RemoteLogService.instance.capture(
+        'FlutterError: ${details.exceptionAsString()}\n${details.stack}');
+    FlutterError.presentError(details);
+  };
+  PlatformDispatcher.instance.onError = (error, stack) {
+    RemoteLogService.instance.captureError(error, stack);
+    return false;
+  };
+  // Arranca el timer periódico de flush. No await crítico: si falla, se
+  // ignora para no bloquear el arranque.
+  unawaited(RemoteLogService.instance.init());
 
   // Preservar splash screen mientras inicializa
   FlutterNativeSplash.preserve(widgetsBinding: widgetsBinding);
@@ -174,9 +214,16 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
       // background.
       debugPrint('📱 [GLOBAL] App $state → engine vivo (audio entrante OK)');
       DriverLocationService.instance.setAppBackgrounded(true);
+      // Logging remoto: vaciar el buffer al ir a background/cerrar para no
+      // perder los últimos logs (fire-and-forget).
+      unawaited(RemoteLogService.instance.flush());
     } else if (state == AppLifecycleState.resumed) {
       debugPrint('📱 [GLOBAL] App resumed');
       DriverLocationService.instance.setAppBackgrounded(false);
+      // Revivir el pipeline GPS si el SO lo mató en background (Doze/throttling
+      // del FGS): sin esto el conductor desaparecía del mapa de la operadora a
+      // los ~6 min. ensureAlive() es idempotente y solo actúa si está online.
+      DriverLocationService.instance.ensureAlive();
     }
   }
 
@@ -232,6 +279,8 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                   associationId: user.associationId,
                   role: user.role,
                 );
+                // Logging remoto: etiquetar los logs con uid/rol reales.
+                RemoteLogService.instance.setUser(user.uid, user.role);
                 // 🚫 Usuario suspendido/bloqueado: el bloqueo debe ser
                 // FUNCIONAL, no solo visual. Cortar voz + radio + FGS + overlay
                 // + ubicación, sin depender del desmontaje del walkie (que vive
@@ -261,18 +310,32 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                 // para probar LiveKit en un dispositivo sin migrar la coop.
                 const voiceOverride =
                     String.fromEnvironment('VOICE_PROVIDER');
+                // Restaurar el radio PTT si ESTE conductor lo dejó encendido
+                // (comportamiento Zello). Scoped por uid → no hereda entre
+                // conductores. Si queda ON, el walkie une el último canal.
+                //
+                // ⚠️ ORDEN CRÍTICO: el radio se enciende (restoreForUser, que
+                // dispara el join del canal) SOLO DESPUÉS de seleccionar el
+                // provider correcto. `selectFor` lee el flag en Firestore y es
+                // ASYNC; si encendiéramos el radio antes, el walkie se uniría
+                // con el provider por defecto (Agora) y, al cambiar a LiveKit,
+                // la Room quedaba SIN unir → al arrancar en frío el PTT no
+                // agarraba el mic (había que togglear el radio). Por eso
+                // esperamos a que el provider quede fijado y recién ahí
+                // restauramos el radio.
+                void restoreRadio() =>
+                    RadioPowerService.instance.restoreForUser(user.uid);
                 if (voiceOverride == 'livekit' || voiceOverride == 'agora') {
                   debugPrint(
                       '🎙️ [Main] VOICE_PROVIDER override → $voiceOverride');
-                  VoiceProviderFactory.forceUse(voiceOverride);
+                  VoiceProviderFactory.forceUse(voiceOverride); // síncrono
+                  restoreRadio();
                 } else {
-                  VoiceProviderFactory.selectFor(user.associationId);
+                  // selectFor es async (lee Firestore): restauramos el radio
+                  // al COMPLETAR, con el provider ya fijado.
+                  VoiceProviderFactory.selectFor(user.associationId)
+                      .whenComplete(restoreRadio);
                 }
-                // Restaurar el radio PTT si ESTE conductor lo dejó encendido
-                // (comportamiento Zello). Scoped por uid → no hereda entre
-                // conductores. Si queda ON, el walkie reconecta al último
-                // canal al cargar.
-                RadioPowerService.instance.restoreForUser(user.uid);
                 // Garantizar 1 sola sesión activa: este login GANA, los
                 // demás dispositivos verán el mismatch y se cerrarán.
                 SingleSessionService.instance.bind(user.uid);
@@ -317,6 +380,8 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                 }
               } else if (state is AuthUnauthenticated) {
                 CurrentUserContext.instance.clear();
+                // Logging remoto: volver a "anon" tras cerrar sesión.
+                RemoteLogService.instance.clearUser();
                 // BUG 1 — al cerrar sesión, resetear la sesión de voz:
                 // desconectar la Room viva e invalidar el token cacheado (que
                 // embebe la identidad/uid del usuario saliente). Sin esto, al

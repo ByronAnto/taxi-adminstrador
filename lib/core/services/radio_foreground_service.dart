@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:logger/logger.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'connectivity_service.dart';
 
@@ -152,6 +153,31 @@ class RadioForegroundService {
     _isStarting = true;
 
     try {
+      // ─── GUARDA ANTI-CRASH (Android 14+) ───
+      // El FGS está declarado con foregroundServiceType="location|mediaPlayback".
+      // Arrancar un FGS de tipo `location` SIN el permiso de ubicación concedido
+      // lanza SecurityException → crashea la app (fue el bug que nos pasó). Por
+      // eso NO arrancamos el servicio si la ubicación no está concedida: logueamos
+      // y omitimos. La pantalla de onboarding exige ubicación, así que en la
+      // práctica ya estará concedida cuando el conductor llegue acá; esta guarda
+      // solo cubre el caso límite (permiso revocado en Ajustes con la app viva).
+      try {
+        final locationGranted =
+            await Permission.locationWhenInUse.isGranted;
+        if (!locationGranted) {
+          _logger.w('FGS-location NO arrancado: permiso de ubicación no '
+              'concedido (se evita crash en Android 14+). '
+              'radio=$_radioActive, location=$_locationActive');
+          return;
+        }
+      } catch (e) {
+        // Si no podemos verificar el permiso, mejor NO arrancar que arriesgar
+        // el crash del FGS-location.
+        _logger.w('No se pudo verificar permiso de ubicación, se omite '
+            'arranque del FGS por seguridad: $e');
+        return;
+      }
+
       // ─── Permiso 1: POST_NOTIFICATIONS (Android 13+) ───
       try {
         var notifPerm =

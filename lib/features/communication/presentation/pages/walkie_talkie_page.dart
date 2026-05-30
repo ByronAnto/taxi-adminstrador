@@ -4,6 +4,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
@@ -67,8 +68,20 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// true cuando no hay internet O el conductor está en modo Desconectado
   bool _isOffline = false;
 
+  /// true cuando falta el permiso de micrófono. Es el bloqueo REAL para
+  /// transmitir por PTT, así que su banner tiene prioridad sobre el de
+  /// "Sin conexión". Se chequea en initState y al volver de Ajustes
+  /// (didChangeAppLifecycleState.resumed).
+  bool _micPermissionMissing = false;
+
   /// true solo cuando el conductor está en modo Desconectado (estado manual)
   bool _isDriverOffline = false;
+
+  /// true cuando hay red del SO pero la Room está reconectándose (la
+  /// auto-reconexión de LiveKit está en curso). NO es "sin conexión": el
+  /// radio se resuelve solo, así que mostramos "Reconectando…" en vez de
+  /// "Sin red" y no bloqueamos agresivamente el PTT.
+  bool _isRadioReconnecting = false;
 
   /// Último channelId al que nos unimos en Agora (para detectar cambios)
   String? _lastAgoraChannelId;
@@ -153,13 +166,48 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     _isDriverOffline = dependsOnGps &&
         _locationService.isInitialized &&
         !_locationService.isOnline;
+    // "Sin conexión" REAL solo cuando NO hay red del SO (o modo Desconectado
+    // manual). La fuente de verdad de la red la da ConnectivityService, que
+    // ahora prueba nuestro backend LiveKit primero (B1) — si LiveKit es
+    // alcanzable nunca marcamos offline aunque Google esté bloqueado.
     _isOffline = !_connectivity.isConnected || _isDriverOffline;
+    // Estado "Reconectando…": hay red del SO y no estamos en modo
+    // Desconectado, pero la Room está reestableciéndose (auto-reconexión
+    // LiveKit). Distinto de offline: el radio se resuelve solo. Agora siempre
+    // devuelve isReconnecting=false, así que esto solo aplica a LiveKit.
+    _isRadioReconnecting = !_isOffline &&
+        _radioPower.isOn &&
+        _voice.isReconnecting &&
+        !_voice.isInChannel;
+  }
+
+  /// Relee el estado del permiso de micrófono y actualiza `_micPermissionMissing`.
+  Future<void> _refreshMicPermission() async {
+    final granted = await Permission.microphone.isGranted;
+    if (!mounted) return;
+    if (_micPermissionMissing == !granted) return; // sin cambios
+    setState(() => _micPermissionMissing = !granted);
+  }
+
+  /// Pide el permiso de micrófono. Si quedó denegado permanentemente, abre
+  /// los Ajustes del sistema (el sistema ya no muestra el diálogo). El refresh
+  /// real ocurre al volver a la app (didChangeAppLifecycleState.resumed).
+  Future<void> _requestMicPermission() async {
+    final status = await Permission.microphone.status;
+    if (status.isPermanentlyDenied) {
+      await openAppSettings();
+      return;
+    }
+    await Permission.microphone.request();
+    await _refreshMicPermission();
   }
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    // Estado inicial del permiso de micrófono (banner + gating del PTT).
+    _refreshMicPermission();
     // Inicializar configuración del foreground task (sólo registro,
     // no arranca el servicio).
     _radioService.init();
@@ -265,10 +313,38 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       // Sin esto el conductor escucha mudo hasta togglear OFF/ON.
       debugPrint('📱 WalkieTalkie: App resumed → resumeAudioReceive');
       if (_radioPower.isOn) {
-        _voice.resumeAudioReceive().catchError((e) {
-          debugPrint('Error resumeAudioReceive: $e');
-        });
+        // Si el SO tumbó la Room en background (Doze/throttling), `resumeAudioReceive`
+        // operaría sobre una sala muerta y el conductor quedaría sin radio hasta
+        // togglear OFF/ON. Primero RECONECTAMOS si ya no estamos en el canal, y
+        // solo después restauramos audio/mic sobre una Room viva.
+        if (!_voice.isInChannel) {
+          debugPrint(
+              '📱 WalkieTalkie: Room caída en background → reconectando');
+          _voice.resumeFromPark().then((_) {
+            _voice.resumeAudioReceive().catchError((e) {
+              debugPrint('Error resumeAudioReceive (post-reconnect): $e');
+            });
+            _voice.ensureMicReady().catchError((e) {
+              debugPrint('Error ensureMicReady (post-reconnect): $e');
+            });
+          }).catchError((e) {
+            debugPrint('Error reconectando Room en resumed: $e');
+          });
+        } else {
+          // La Room sigue viva: solo restaurar audio focus + mic.
+          _voice.resumeAudioReceive().catchError((e) {
+            debugPrint('Error resumeAudioReceive: $e');
+          });
+          // Si el usuario acaba de conceder el permiso de mic en Ajustes y el
+          // engine había entrado al canal SIN mic, re-inicializarlo proactivamente
+          // para que el primer PTT ya transmita (sin reiniciar la app).
+          _voice.ensureMicReady().catchError((e) {
+            debugPrint('Error ensureMicReady (resumed): $e');
+          });
+        }
       }
+      // Reflejar el permiso recién cambiado en Ajustes (banner + gating PTT).
+      _refreshMicPermission();
       if (mounted) setState(() {});
     }
   }
@@ -282,21 +358,27 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     setState(() {});
 
     if (_isOffline && !wasOffline) {
-      // ── Se perdió la conexión ──
-      // Si estaba grabando PTT, detenerlo
+      // ── Se perdió la red del SO ──
+      // NO derribamos la Room: LiveKit se auto-reconecta solo con backoff
+      // (Parte A). Un `leaveChannel()` por un flap de red mataba una sala
+      // sana y obligaba a togglear OFF/ON. Aquí solo soltamos la UI local.
+      //
+      // Si había PTT en curso, NO dependemos de una escritura de unlock a
+      // Firestore (no completará sin red y dejaría el lock colgado para
+      // todos): liberamos la UI localmente y dejamos que el lock expire
+      // solo (auto-expire ~35 s). _releasePttLocalOnly() hace muteMic +
+      // limpia el estado de grabación SIN escribir a Firestore.
       if (_isRecording) {
-        final currentState = context.read<CommunicationBloc>().state;
-        if (currentState is CommunicationLoaded) {
-          _stopPtt(currentState);
-        }
+        _releasePttLocalOnly();
       }
-      // Salir de Agora
-      _voice.leaveChannel().catchError((_) {});
-      _lastAgoraChannelId = null;
+      // (Sin teardown de Room ni reset de _lastAgoraChannelId.)
     } else if (!_isOffline && wasOffline) {
-      // ── Conexión restaurada ──
-      // Reconectar Agora al canal activo SOLO si el radio está ON.
+      // ── Red del SO restaurada ──
+      // La Room ya se auto-reconectó (o lo está haciendo). Solo aseguramos
+      // el canal si por alguna razón ya no estamos en él, sin forzar un
+      // re-join agresivo que pelee con la auto-reconexión interna.
       if (!_radioPower.isOn) return;
+      if (_voice.isInChannel || _voice.isReconnecting) return;
       final currentState = context.read<CommunicationBloc>().state;
       if (currentState is CommunicationLoaded &&
           currentState.activeChannelId != null) {
@@ -304,10 +386,20 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         _voice
             .joinChannel(currentState.activeChannelId!)
             .catchError((e) {
-          debugPrint('Error Agora rejoin tras reconexión: $e');
+          debugPrint('Error rejoin tras reconexión: $e');
         });
       }
     }
+  }
+
+  /// Libera el PTT SOLO localmente (mute mic + limpia timers/UI) sin escribir
+  /// el unlock a Firestore. Se usa cuando la red se cae con PTT en curso: una
+  /// escritura de unlock no completaría sin red y dejaría el canal bloqueado
+  /// para todos. El lock de Firestore expira solo (~35 s) sin bloquear a nadie.
+  void _releasePttLocalOnly() {
+    _pttCancelled = true;
+    _voice.muteMic().catchError((_) {});
+    _cleanupRecordingState();
   }
 
   /// Detecta cambios en el speaker del canal y graba/cierra el audio local
@@ -389,6 +481,11 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// radio ON — el `parkChannel()` requiere ambos.
   void _armIdleTimer() {
     if (_idleParkTimer != null) return;
+    // El "park" por inactividad solo tiene sentido en proveedores que cobran
+    // por minuto (Agora). En LiveKit (self-hosted, conexión persistente)
+    // parkChannel es no-op → el timer solo generaba spam cada 5s y gastaba
+    // datos de logs. No lo armamos si el proveedor no soporta park.
+    if (!_voice.supportsPark) return;
     _lastChannelActivityAt ??= DateTime.now();
     _idleParkTimer = Timer.periodic(const Duration(seconds: 5), (_) {
       if (!mounted) return;
@@ -607,12 +704,17 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             });
           }
 
-          // === Auto-resume desde park ===
-          // Si el canal estaba parked por inactividad y alguien acaba de
-          // arrancar a hablar, volvemos a conectar para escucharlo.
-          // ~300 ms de delay vs. estar siempre conectado, pero deja de
-          // facturar minutos Agora durante los silencios.
-          if (state.isPttLocked && _voice.isParked && !_isOffline) {
+          // === Auto-resume desde park / reconexión ===
+          // Dos casos en que necesitamos reconectar antes de poder escuchar a
+          // quien empezó a hablar:
+          //  - Agora: el canal estaba "parked" por inactividad (isParked=true).
+          //  - LiveKit: park es no-op (isParked SIEMPRE false), pero el SO pudo
+          //    tumbar la Room en background → !isInChannel. Sin incluir este
+          //    caso, el conductor no oía la transmisión hasta togglear OFF/ON.
+          // resumeFromPark() es idempotente y reconecta al último canal conocido.
+          if (state.isPttLocked &&
+              (_voice.isParked || !_voice.isInChannel) &&
+              !_isOffline) {
             _voice.resumeFromPark().catchError((e) {
               debugPrint('Error resumeFromPark: $e');
               return false;
@@ -666,16 +768,41 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           );
         }
 
+        // Recalcular en cada rebuild el estado "Reconectando…" leyendo los
+        // getters LIVE del provider (isReconnecting/isInChannel). El bloc
+        // reconstruye con frecuencia (snapshots Firestore), así el banner y el
+        // label del PTT reflejan la auto-reconexión sin un listener extra.
+        // Asignación simple (sin setState) — seguro durante build.
+        _isRadioReconnecting = !_isOffline &&
+            _radioPower.isOn &&
+            _voice.isReconnecting &&
+            !_voice.isInChannel;
+
         return Column(
           children: [
+            // Banner de permiso de micrófono — PRIORIDAD sobre "Sin conexión":
+            // sin mic no se puede transmitir, es el bloqueo real para hablar.
+            if (_micPermissionMissing)
+              _buildMicPermissionBanner()
             // Banner de sin conexión dentro del walkie-talkie
-            if (_isOffline) _buildOfflineBanner(),
+            else if (_isOffline)
+              _buildOfflineBanner()
+            // Reconectando: hay red del SO pero la Room se está
+            // reestableciendo (auto-reconexión LiveKit). Distinto de "Sin
+            // red" — no bloquea, solo informa.
+            else if (_isRadioReconnecting)
+              _buildReconnectingBanner(),
             _buildPowerToggle(state),
             _buildChannelSelector(state),
             // Cola de unidades cerca de la parada — clave para coordinar
             // despacho estilo cooperativa.
             const StandQueueBar(),
-            if (state.isPttLocked && _radioPower.isOn) _buildSpeakerBanner(state),
+            // Banner "Estás hablando…" / "X está hablando…". Para MÍ se ata a
+            // _isRecording (estado local) — así no queda colgado si el unlock
+            // a Firestore no completa sin red (el lock expira solo ~35 s).
+            // Para OTROS speakers seguimos con el lock de Firestore (bloc).
+            if (_radioPower.isOn && _shouldShowSpeakerBanner(state))
+              _buildSpeakerBanner(state),
             // El botón PTT ocupa todo el espacio disponible. El historial
             // vive en el tab "Chat".
             Expanded(child: _buildAudioControls(state)),
@@ -919,6 +1046,38 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     );
   }
 
+  /// Banner accionable cuando falta el permiso de micrófono. Tiene prioridad
+  /// visual sobre el banner de "Sin conexión" porque el mic es el bloqueo real
+  /// para hablar. Al tocar → pide el permiso (o abre Ajustes si está denegado
+  /// permanentemente). Reusa el estilo del banner offline.
+  Widget _buildMicPermissionBanner() {
+    return GestureDetector(
+      onTap: _requestMicPermission,
+      child: Container(
+        width: double.infinity,
+        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+        color: Colors.red.shade800,
+        child: Row(
+          children: [
+            const Icon(Icons.mic_off_rounded, color: Colors.white, size: 20),
+            const SizedBox(width: 10),
+            const Expanded(
+              child: Text(
+                'Falta permiso de micrófono · toca para conceder',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 13,
+                ),
+              ),
+            ),
+            const Icon(Icons.chevron_right, color: Colors.white70, size: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
   /// Banner de sin conexión / modo desconectado en el walkie-talkie.
   Widget _buildOfflineBanner() {
     final bool noInternet = !_connectivity.isConnected;
@@ -959,10 +1118,60 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     );
   }
 
+  /// Banner "Reconectando…" — hay red del SO pero la Room LiveKit se está
+  /// reestableciendo sola (backoff interno). NO es "sin conexión": no
+  /// deshabilitamos el radio, solo informamos que se resuelve solo.
+  Widget _buildReconnectingBanner() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+      color: Colors.blueGrey.shade700,
+      child: Row(
+        children: [
+          const SizedBox(
+            width: 16,
+            height: 16,
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
+            ),
+          ),
+          const SizedBox(width: 12),
+          const Expanded(
+            child: Text(
+              'Reconectando al canal…',
+              style: TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w600,
+                fontSize: 13,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Decide si mostrar el banner de "alguien está hablando".
+  ///
+  /// - Si YO estoy transmitiendo (_isRecording local), mostrar siempre —
+  ///   independiente del lock de Firestore (que puede no haberse escrito aún
+  ///   o no haberse liberado por falta de red).
+  /// - Si OTRO tiene el lock en Firestore, mostrar (estado del bloc).
+  bool _shouldShowSpeakerBanner(CommunicationLoaded state) {
+    if (_isRecording) return true;
+    final user = _currentUser;
+    final lockedByOther = state.isPttLocked && state.pttSpeakerId != user?.uid;
+    return lockedByOther;
+  }
+
   /// Banner que muestra quién está hablando (estilo Zello)
   Widget _buildSpeakerBanner(CommunicationLoaded state) {
     final user = _currentUser;
-    final isMe = state.pttSpeakerId == user?.uid;
+    // "Soy yo el hablante" se decide por el estado LOCAL de grabación, no por
+    // el lock de Firestore — así el banner verde aparece/desaparece con mi PTT
+    // real y no queda pegado si el unlock no llegó a Firestore (sin red).
+    final isMe = _isRecording || state.pttSpeakerId == user?.uid;
     final isModerator = user != null &&
         (user.role == AppConstants.roleAdmin ||
             user.role == AppConstants.roleOperator);
@@ -1262,11 +1471,18 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     final isOn = _radioPower.isOn;
     final isLockedByOther = state.isPttLocked &&
         state.pttSpeakerId != user?.uid;
-    // Bloquear PTT completamente si no hay internet, overlay activo, o radio OFF
+    // Radio usable = hay red del SO (no _isOffline) Y la Room está conectada
+    // (isInChannel) O reconectándose (isReconnecting). Permitimos PTT durante
+    // la reconexión porque _startPtt ya tiene el camino de resume+grace
+    // (espera a estar en canal antes de soltar el unmuteMic) — no bloqueamos
+    // agresivamente; la auto-reconexión de LiveKit resuelve. Agora devuelve
+    // isInChannel=true/isReconnecting=false → su comportamiento no cambia.
+    final radioReachable = _voice.isInChannel || _voice.isReconnecting;
     final canPtt = isOn &&
         hasChannel &&
         !isLockedByOther &&
         !_isOffline &&
+        radioReachable &&
         !_overlayService.isActive;
 
     return Container(
@@ -1310,7 +1526,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                     ? (_) => _turnOnFromBigButton()
                     : _isOffline
                         ? (_) => _showOfflineWarning()
-                        : null,
+                        : _isRadioReconnecting
+                            ? (_) => _showReconnectingWarning()
+                            : null,
             onPointerUp: hasChannel
                 ? (_) => _stopPttSafe(state)
                 : null,
@@ -1389,6 +1607,11 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                     const Text(
                       'Sin red',
                       style: TextStyle(color: Colors.white54, fontSize: 11),
+                    )
+                  else if (_isRadioReconnecting && !_isRecording)
+                    const Text(
+                      'Reconectando…',
+                      style: TextStyle(color: Colors.white, fontSize: 11),
                     )
                   else if (isLockedByOther)
                     const Text(
@@ -1668,6 +1891,20 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     HapticFeedback.heavyImpact();
   }
 
+  /// Aviso cuando el radio está reconectándose (auto-reconexión LiveKit en
+  /// curso). No es "sin red": pedimos paciencia, no bloqueamos para siempre.
+  void _showReconnectingWarning() {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Reconectando al canal… intenta de nuevo en un momento.'),
+        backgroundColor: Colors.blueGrey,
+        duration: Duration(seconds: 2),
+      ),
+    );
+    HapticFeedback.selectionClick();
+  }
+
   /// Safe wrapper that guards against calling stop when not recording
   void _stopPttSafe(CommunicationLoaded state) {
     if (!_isRecording) return;
@@ -1683,15 +1920,28 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     final hasPermission = await _voice.hasMicPermission();
     if (!hasPermission) {
       if (mounted) {
+        // Marca el banner y ofrece una acción directa para conceder el permiso.
+        setState(() => _micPermissionMissing = true);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Se requiere permiso de micrófono para hablar'),
+          SnackBar(
+            content: const Text('Se requiere permiso de micrófono para hablar'),
             backgroundColor: Colors.orange,
+            action: SnackBarAction(
+              label: 'Conceder',
+              textColor: Colors.white,
+              onPressed: _requestMicPermission,
+            ),
           ),
         );
       }
       return;
     }
+
+    // El permiso ya está concedido. Si la app había entrado al canal SIN mic
+    // (permiso concedido recién), re-inicializamos el engine para que tome el
+    // micrófono ahora — sin reiniciar la app. La primera vez tras conceder el
+    // permiso esto agrega un pequeño retardo; después es no-op rápido.
+    await _voice.ensureMicReady();
 
     // Reconectar+grace si estamos parked O si aún no estamos en el canal
     // (caso típico al reabrir la app: el radio se restauró ON y la sala sigue

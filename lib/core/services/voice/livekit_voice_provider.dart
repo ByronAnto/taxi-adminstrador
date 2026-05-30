@@ -41,6 +41,23 @@ class LiveKitVoiceProvider implements VoiceProvider {
   bool _isInitialized = false;
   bool _isInChannel = false;
   bool _isMicPublishing = false;
+  // True mientras LiveKit está reconectando la Room (evento RoomReconnecting) o
+  // mientras nuestro backoff de re-join está corriendo tras un RoomDisconnected
+  // no intencional. La UI lo lee vía [isReconnecting].
+  bool _isReconnecting = false;
+  // Salida INTENCIONAL en curso (leaveChannel/destroyEngine/dispose/cambio de
+  // cuenta). Mientras esté en true, un RoomDisconnectedEvent NO dispara la
+  // auto-reconexión con backoff (no queremos resucitar una sesión que cerramos
+  // a propósito).
+  bool _intentionalDisconnect = false;
+  // Reconexión con backoff en curso (la cancelamos si el usuario sale a propósito).
+  Timer? _reconnectTimer;
+  int _reconnectAttempt = 0;
+  static const List<Duration> _reconnectBackoff = [
+    Duration(seconds: 2),
+    Duration(seconds: 5),
+    Duration(seconds: 10),
+  ];
   // Estado de mic DESEADO (último press/release gana) + cadena que serializa
   // los setMicrophoneEnabled. Toques rápidos de PTT (las llamadas son async
   // ~100-300ms) se solapaban y el mic quedaba PEGADO en ON. La cadena aplica
@@ -68,6 +85,12 @@ class LiveKitVoiceProvider implements VoiceProvider {
   String? _currentChannelId;
   String? _parkedChannelId;
   String? _lastChannelBeforeDestroy;
+
+  // BUG mic — true si entramos al canal SIN poder pre-publicar el mic (permiso
+  // no concedido en ese momento). El engine WebRTC quedó "sin micrófono"; un
+  // unmuteMic posterior no lo re-adquiere. Cuando el permiso se concede después,
+  // [ensureMicReady] re-inicializa el engine para tomarlo (sin reiniciar la app).
+  bool _joinedWithoutMic = false;
 
   // Token cacheado por canal (url + jwt + expiry).
   final Map<String, _LiveKitToken> _tokenCache = {};
@@ -211,6 +234,10 @@ class LiveKitVoiceProvider implements VoiceProvider {
   }
 
   Future<void> _doJoin(String channelId) async {
+    // Vamos a conectar (o reconectar) a propósito: limpiamos la bandera de
+    // salida intencional para que un eventual RoomDisconnected futuro sí dispare
+    // la auto-reconexión.
+    _intentionalDisconnect = false;
     try {
       await _ensureSdkInit(); // bypassVoiceProcessing ANTES de conectar
       final t = await _fetchToken(channelId);
@@ -245,12 +272,40 @@ class LiveKitVoiceProvider implements VoiceProvider {
 
       final listener = room.createListener();
       listener
+        ..on<lk.RoomReconnectingEvent>((e) {
+          // El SDK detectó pérdida de conexión y está reconectando solo
+          // (ICE/transport). No tocamos la Room; solo exponemos el estado.
+          _isReconnecting = true;
+          _log('RoomReconnecting (SDK auto-reconnect en curso)');
+        })
+        ..on<lk.RoomReconnectedEvent>((e) {
+          // El SDK recuperó la conexión por su cuenta. Re-forzamos altavoz y
+          // volumen (el SO pudo soltar el audio focus) y limpiamos el estado.
+          _isReconnecting = false;
+          _isInChannel = true;
+          _log('RoomReconnected (recuperado por el SDK)');
+          unawaited(() async {
+            try {
+              await lk.Hardware.instance.setSpeakerphoneOn(true);
+            } catch (_) {}
+            await _applyVolumeAll();
+          }());
+        })
         ..on<lk.RoomDisconnectedEvent>((e) {
           _isInChannel = false;
           _isMicPublishing = false;
           // Permite re-join: limpia el target salvo que sea un cierre limpio.
           if (_targetChannelId == channelId) _targetChannelId = null;
           _log('RoomDisconnected: ${e.reason}');
+          // Si la salida fue INTENCIONAL (leave/destroy/dispose/cambio de
+          // cuenta) no resucitamos nada. Si NO lo fue y el radio debería seguir
+          // conectado, lanzamos la reconexión con backoff (el SDK ya intentó su
+          // auto-reconnect y se rindió → RoomDisconnected es definitivo).
+          if (_intentionalDisconnect) {
+            _isReconnecting = false;
+          } else {
+            _scheduleReconnect(channelId);
+          }
         })
         ..on<lk.ActiveSpeakersChangedEvent>((e) {
           final lp = room.localParticipant;
@@ -304,6 +359,8 @@ class LiveKitVoiceProvider implements VoiceProvider {
 
   @override
   Future<void> leaveChannel() async {
+    _intentionalDisconnect = true; // salida a propósito → no auto-reconectar
+    _cancelReconnect();
     _targetChannelId = null;
     await _teardownRoom();
     _currentChannelId = null;
@@ -346,6 +403,8 @@ class LiveKitVoiceProvider implements VoiceProvider {
 
   @override
   Future<void> destroyEngine() async {
+    _intentionalDisconnect = true; // teardown a propósito → no auto-reconectar
+    _cancelReconnect();
     _lastChannelBeforeDestroy = _currentChannelId ?? _parkedChannelId;
     _targetChannelId = null;
     await _teardownRoom();
@@ -385,6 +444,8 @@ class LiveKitVoiceProvider implements VoiceProvider {
   /// purga tokens + identidad. No marca `_lastChannelBeforeDestroy` para evitar
   /// que el auto-resume reconecte con la identidad anterior.
   Future<void> _resetIdentityState() async {
+    _intentionalDisconnect = true; // cambio de cuenta → no auto-reconectar
+    _cancelReconnect();
     _targetChannelId = null;
     await _teardownRoom();
     _currentChannelId = null;
@@ -393,6 +454,7 @@ class LiveKitVoiceProvider implements VoiceProvider {
     _isInChannel = false;
     _isMicPublishing = false;
     _micWanted = false;
+    _joinedWithoutMic = false;
     _tokenCache.clear();
     _identityUid = null;
   }
@@ -431,6 +493,57 @@ class LiveKitVoiceProvider implements VoiceProvider {
     await muteMic();
   }
 
+  /// Programa un intento de reconexión con backoff (2s, 5s, 10s; luego se
+  /// queda en 10s) tras un RoomDisconnected NO intencional. Idempotente: si ya
+  /// hay un timer pendiente, no encola otro. Se cancela en cuanto el usuario
+  /// sale a propósito ([_cancelReconnect]).
+  void _scheduleReconnect(String channelId) {
+    if (_intentionalDisconnect) return;
+    if (_reconnectTimer != null && _reconnectTimer!.isActive) return;
+    _isReconnecting = true;
+    final delay = _reconnectAttempt < _reconnectBackoff.length
+        ? _reconnectBackoff[_reconnectAttempt]
+        : _reconnectBackoff.last;
+    _log('Reconexión programada en ${delay.inSeconds}s '
+        '(intento ${_reconnectAttempt + 1}) → canal $channelId');
+    _reconnectTimer = Timer(delay, () async {
+      _reconnectTimer = null;
+      // El usuario pudo salir mientras esperábamos, o ya nos reconectamos.
+      if (_intentionalDisconnect || _isInChannel) {
+        _isReconnecting = false;
+        return;
+      }
+      _reconnectAttempt++;
+      try {
+        _log('Reintentando join a $channelId…');
+        await joinChannel(channelId);
+        if (_isInChannel) {
+          _reconnectAttempt = 0;
+          _isReconnecting = false;
+          _log('Reconexión OK a $channelId');
+          return;
+        }
+      } catch (e) {
+        _log('Reintento de reconexión falló: $e');
+      }
+      // Sigue caído → reprogramar (a menos que el usuario haya salido).
+      if (!_intentionalDisconnect && !_isInChannel) {
+        _scheduleReconnect(channelId);
+      } else {
+        _isReconnecting = false;
+      }
+    });
+  }
+
+  /// Cancela cualquier reconexión pendiente y resetea el contador de backoff.
+  /// Llamar en toda salida intencional para no resucitar la sesión.
+  void _cancelReconnect() {
+    _reconnectTimer?.cancel();
+    _reconnectTimer = null;
+    _reconnectAttempt = 0;
+    _isReconnecting = false;
+  }
+
   Future<void> _teardownRoom() async {
     try {
       await _listener?.dispose();
@@ -461,12 +574,16 @@ class LiveKitVoiceProvider implements VoiceProvider {
       await lp.setMicrophoneEnabled(false); // mute → stop captura → mic libre
       _isMicPublishing = false;
       _micWanted = false;
+      _joinedWithoutMic = false; // mic adquirido OK
       _log('mic pre-publicado y muteado (PTT instantáneo, mic libre OK)');
     } catch (e) {
       // Si falla (p.ej. permiso aún no concedido), no rompemos el join: el mic
       // se publicará perezosamente en el primer unmuteMic (vuelve al camino
-      // viejo, solo con el retardo de la primera vez).
+      // viejo, solo con el retardo de la primera vez). Marcamos que entramos
+      // SIN mic para que [ensureMicReady] re-inicialice el engine cuando el
+      // permiso se conceda después (sin reiniciar la app).
       _isMicPublishing = false;
+      _joinedWithoutMic = true;
       _log('pre-publicación de mic falló (se publicará en el 1er PTT): $e');
     }
   }
@@ -592,6 +709,29 @@ class LiveKitVoiceProvider implements VoiceProvider {
     return status.isGranted;
   }
 
+  @override
+  Future<void> ensureMicReady() async {
+    // Solo actuamos si entramos al canal sin mic Y el permiso YA está concedido.
+    // En cualquier otro caso es un no-op rápido (no toca el engine sano).
+    if (!_joinedWithoutMic) return;
+    if (!await hasMicPermission()) return;
+
+    _log('ensureMicReady — re-inicializando engine para tomar el mic concedido');
+    final ch = _currentChannelId ?? _targetChannelId ?? _lastChannelBeforeDestroy;
+    try {
+      await destroyEngine();
+      await initialize(channelHint: ch);
+      if (ch != null && ch.isNotEmpty) {
+        await joinChannel(ch);
+      }
+      _joinedWithoutMic = false;
+      _log('ensureMicReady OK — engine re-creado con mic disponible (canal=$ch)');
+    } catch (e) {
+      // Si falla, dejamos el flag para reintentar en el próximo PTT/resume.
+      _log('❌ ensureMicReady: $e');
+    }
+  }
+
   // ─────────────────── Estado ───────────────────
 
   @override
@@ -601,10 +741,18 @@ class LiveKitVoiceProvider implements VoiceProvider {
   bool get isInChannel => _isInChannel;
 
   @override
+  bool get isReconnecting => _isReconnecting;
+
+  @override
   bool get isMicMuted => !_isMicPublishing;
 
   @override
   bool get isParked => _parkedChannelId != null;
+
+  // LiveKit self-hosted: conexión persistente, sin facturación por minuto.
+  // parkChannel es no-op → no usamos el timer de park (evita spam cada 5s).
+  @override
+  bool get supportsPark => false;
 
   @override
   String? get currentChannelId => _currentChannelId;

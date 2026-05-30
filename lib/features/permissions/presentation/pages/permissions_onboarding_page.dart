@@ -69,6 +69,10 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
     // Al volver de Ajustes (o de cualquier pausa) refrescamos para reflejar
     // lo que el usuario haya cambiado fuera de la app.
     if (state == AppLifecycleState.resumed) {
+      // Red de seguridad: al volver del diálogo limpiamos el flag sí o sí, así
+      // los botones nunca quedan muertos aunque un Future de request se haya
+      // perdido (bug de permission_handler) y el `finally` no haya corrido.
+      _requesting = false;
       _refreshAll();
     }
   }
@@ -128,29 +132,57 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
         return; // El refresh real ocurre en resumed.
       }
 
+      // Cada request lleva un .timeout: permission_handler tiene un bug conocido
+      // donde el Future del diálogo queda colgado si el diálogo se interrumpe
+      // (cambio de app, ROM agresiva, etc.). Sin el timeout el `finally` nunca
+      // corre → `_requesting` queda en true → todos los botones mueren ("se
+      // cachea, toca reiniciar"). El onTimeout devuelve un valor por defecto
+      // para que el await SIEMPRE termine; el estado real se relee igual en
+      // resumed.
+      const reqTimeout = Duration(seconds: 30);
       switch (id) {
         case _PermId.microphone:
-          await Permission.microphone.request();
+          await Permission.microphone.request().timeout(
+                reqTimeout,
+                onTimeout: () => PermissionStatus.denied,
+              );
           break;
         case _PermId.location:
-          final loc = await Permission.locationWhenInUse.request();
+          final loc = await Permission.locationWhenInUse.request().timeout(
+                reqTimeout,
+                onTimeout: () => PermissionStatus.denied,
+              );
           // Solo si concedió "en uso" pedimos el background (Android lo
           // exige en ese orden). No bloquea el Continuar si lo rechaza.
           if (loc.isGranted) {
-            await Permission.locationAlways.request();
+            await Permission.locationAlways.request().timeout(
+                  reqTimeout,
+                  onTimeout: () => PermissionStatus.denied,
+                );
           }
           break;
         case _PermId.notification:
-          await Permission.notification.request();
+          await Permission.notification.request().timeout(
+                reqTimeout,
+                onTimeout: () => PermissionStatus.denied,
+              );
           break;
         case _PermId.battery:
-          await FlutterForegroundTask.requestIgnoreBatteryOptimization();
+          // Devuelve bool → el valor por defecto en timeout es false.
+          await FlutterForegroundTask.requestIgnoreBatteryOptimization()
+              .timeout(reqTimeout, onTimeout: () => false);
           break;
         case _PermId.overlay:
-          await Permission.systemAlertWindow.request();
+          await Permission.systemAlertWindow.request().timeout(
+                reqTimeout,
+                onTimeout: () => PermissionStatus.denied,
+              );
           break;
         case _PermId.bluetooth:
-          await Permission.bluetoothConnect.request();
+          await Permission.bluetoothConnect.request().timeout(
+                reqTimeout,
+                onTimeout: () => PermissionStatus.denied,
+              );
           break;
       }
 
@@ -300,6 +332,12 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
 
   Widget _buildFooter() {
     final canContinue = _requiredGranted;
+    // La batería es OPCIONAL para el gate (no bloquea), pero sin ella el Doze de
+    // Android mata el GPS y el radio en segundo plano → el conductor desaparece
+    // del mapa y deja de oír. Por eso, si los requeridos ya están pero la batería
+    // NO, mostramos una advertencia fuerte y visible antes de dejar continuar.
+    final batteryMissing =
+        _states[_PermId.battery] != _PermState.granted;
     return Container(
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
       decoration: BoxDecoration(
@@ -317,6 +355,7 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (batteryMissing) _buildBatteryWarning(),
             SizedBox(
               width: double.infinity,
               child: ElevatedButton(
@@ -348,6 +387,69 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
             ),
           ],
         ),
+      ),
+    );
+  }
+
+  /// Aviso fuerte (no bloqueante) cuando la batería sin restricciones no está
+  /// concedida: sin ella, en segundo plano el conductor desaparece del mapa y
+  /// deja de oír el radio. Ofrece un botón directo para concederla.
+  Widget _buildBatteryWarning() {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 12),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: AppTheme.warningColor.withValues(alpha: 0.10),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(
+          color: AppTheme.warningColor.withValues(alpha: 0.4),
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Icon(Icons.warning_amber_rounded,
+              color: AppTheme.warningColor, size: 22),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'Muy recomendado: batería sin restricciones',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 2),
+                const Text(
+                  'Sin este permiso, el celular puede cortar tu ubicación y el '
+                  'radio en segundo plano: desaparecerás del mapa de la operadora '
+                  'y dejarás de escuchar.',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppTheme.textSecondary,
+                    height: 1.25,
+                  ),
+                ),
+                const SizedBox(height: 6),
+                GestureDetector(
+                  onTap: () => _request(_PermId.battery),
+                  child: const Text(
+                    'Conceder ahora',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w800,
+                      color: AppTheme.primaryColor,
+                      decoration: TextDecoration.underline,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ),
     );
   }

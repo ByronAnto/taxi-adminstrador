@@ -166,10 +166,23 @@ class MapBloc extends Bloc<MapEvent, MapState> {
     Emitter<MapState> emit,
   ) async {
     emit(MapLoading());
-    await _driversSubscription?.cancel();
+    _subscribeDrivers();
+  }
+
+  /// Suscribe (o re-suscribe) el stream de conductores activos de forma
+  /// resiliente: ante un error transitorio del listener (reconexión de
+  /// Firestore, refresh de token, blip de red) NO borramos la lista actual
+  /// —para que el mapa no quede sin unidades— y nos re-suscribimos tras un
+  /// breve retardo, recuperando solos sin tener que reiniciar la app.
+  void _subscribeDrivers() {
+    _driversSubscription?.cancel();
     _driversSubscription = watchActiveDrivers().listen(
       (drivers) => add(MapDriversUpdated(drivers)),
-      onError: (_) => add(MapDriversUpdated(const [])),
+      onError: (_) {
+        Future.delayed(const Duration(seconds: 3), () {
+          if (!isClosed) _subscribeDrivers();
+        });
+      },
     );
   }
 
@@ -241,10 +254,20 @@ class MapBloc extends Bloc<MapEvent, MapState> {
     MapTaxiStandsWatchStarted event,
     Emitter<MapState> emit,
   ) async {
-    await _standsSubscription?.cancel();
+    _subscribeStands();
+  }
+
+  /// Igual que [_subscribeDrivers]: resiliente a errores transitorios del
+  /// listener (no borra las paradas; se re-suscribe solo).
+  void _subscribeStands() {
+    _standsSubscription?.cancel();
     _standsSubscription = watchTaxiStands().listen(
       (stands) => add(MapTaxiStandsUpdated(stands)),
-      onError: (_) => add(MapTaxiStandsUpdated(const [])),
+      onError: (_) {
+        Future.delayed(const Duration(seconds: 3), () {
+          if (!isClosed) _subscribeStands();
+        });
+      },
     );
   }
 

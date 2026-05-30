@@ -59,6 +59,18 @@ abstract class VoiceProvider {
   /// Verifica el permiso `RECORD_AUDIO` (Android) / mic (iOS).
   Future<bool> hasMicPermission();
 
+  /// Asegura que el engine quedó con el micrófono disponible para transmitir.
+  ///
+  /// Caso de uso: la app entró al canal SIN permiso de mic (se concedió
+  /// después). El motor nativo WebRTC quedó inicializado "sin micrófono" y un
+  /// simple `unmuteMic` no lo re-adquiere → no transmite hasta reiniciar. Este
+  /// método detecta esa situación y re-inicializa el engine para que tome el
+  /// permiso recién concedido, sin necesidad de reiniciar la app.
+  ///
+  /// Es barato y seguro de llamar siempre: si el mic ya estaba disponible (o el
+  /// provider no sufre el problema) es un no-op rápido.
+  Future<void> ensureMicReady();
+
   /// Reproduce un efecto de sonido local (beep PTT, kerchunk, etc.)
   /// mezclándolo dentro del pipeline del provider — bypassa el
   /// AudioFocus de Android y los filtros OEM (MIUI, EMUI).
@@ -131,8 +143,22 @@ abstract class VoiceProvider {
   // ─── Estado ───
   bool get isInitialized;
   bool get isInChannel;
+
+  /// True mientras el provider está intentando reconectar la sesión (la red se
+  /// cayó / el SO tumbó el socket en background y se está reestableciendo).
+  /// LiveKit lo deriva de los eventos `RoomReconnecting`/`RoomReconnected` y de
+  /// su backoff interno de re-join; Agora no expone este estado → siempre false.
+  /// La UI del walkie puede usarlo para mostrar "Reconectando…".
+  bool get isReconnecting;
+
   bool get isMicMuted;
   bool get isParked;
+
+  /// ¿El proveedor usa "park" por inactividad? Solo aplica a proveedores que
+  /// cobran por minuto (Agora). LiveKit self-hosted = conexión persistente,
+  /// `parkChannel` es no-op → false (la UI evita armar el timer de park).
+  bool get supportsPark;
+
   String? get currentChannelId;
   String? get parkedChannelId;
 

@@ -89,6 +89,10 @@ class AgoraService implements VoiceProvider {
   @override
   bool get isInChannel => _isInChannel;
   @override
+  // Agora no expone el estado de reconexión por esta interfaz (su SDK reconecta
+  // solo y el walkie no lo necesita en este provider): siempre false.
+  bool get isReconnecting => false;
+  @override
   bool get isMicMuted => !_isMicPublishing;
   bool get isRemoteAudioMuted => _isRemoteAudioMuted;
   @override
@@ -98,6 +102,9 @@ class AgoraService implements VoiceProvider {
   /// canal Agora por inactividad. Listo para `resumeFromPark()` instantáneo.
   @override
   bool get isParked => _parkedChannelId != null;
+  // Agora cobra por minuto → sí usamos park por inactividad.
+  @override
+  bool get supportsPark => true;
   @override
   String? get parkedChannelId => _parkedChannelId;
 
@@ -968,6 +975,13 @@ class AgoraService implements VoiceProvider {
   @override
   Future<bool> hasMicPermission() async {
     return await Permission.microphone.isGranted;
+  }
+
+  @override
+  Future<void> ensureMicReady() async {
+    // No-op: Agora no sufre el problema de "engine inicializado sin micrófono".
+    // `unmuteMic` (enableLocalAudio(true)) re-adquiere el mic en caliente aunque
+    // el permiso se haya concedido después del join, sin re-crear el engine.
   }
 
   // ─────────────────── Limpieza ───────────────────
