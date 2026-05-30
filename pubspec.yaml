@@ -66,7 +66,7 @@ dependencies:
   # Para controlar volumen de playback del audio remoto (Helper.setVolume).
   # Versión alineada con la que trae livekit_client transitivamente.
   flutter_webrtc: ^1.2.1
-  permission_handler: ^11.4.0
+  permission_handler: ^12.0.2
 
   # Background / Foreground Service (Radio en segundo plano)
   flutter_foreground_task: ^8.10.0
