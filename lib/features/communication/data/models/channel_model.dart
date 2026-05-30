@@ -154,6 +154,13 @@ class MessageModel {
   final String? text;
   final String? audioBase64; // audio codificado en base64 para PTT cortos
   final int? durationSeconds; // para mensajes de voz
+
+  /// URL del audio respaldado (.wav) servido por el bot grabador server-side
+  /// (https://livekit.it-services.center/rec/...). Cuando está presente, el
+  /// mensaje de voz se puede REPRODUCIR en el chat del canal. Los mensajes
+  /// viejos (solo metadatos) tienen este campo en null.
+  final String? audioUrl;
+
   final DateTime createdAt;
 
   const MessageModel({
@@ -166,6 +173,7 @@ class MessageModel {
     this.text,
     this.audioBase64,
     this.durationSeconds,
+    this.audioUrl,
     required this.createdAt,
   });
 
@@ -181,6 +189,7 @@ class MessageModel {
       text: data['text'],
       audioBase64: data['audioBase64'],
       durationSeconds: data['durationSeconds'],
+      audioUrl: data['audioUrl'],
       createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
     );
   }
@@ -195,6 +204,7 @@ class MessageModel {
       'text': text,
       'audioBase64': audioBase64,
       'durationSeconds': durationSeconds,
+      'audioUrl': audioUrl,
       'createdAt': Timestamp.fromDate(createdAt),
     };
   }

@@ -3321,6 +3321,49 @@ exports.purgeOldChatMessages = onSchedule(
   }
 );
 
+// ───────────────────────────────────────────────────────────────────
+//  purgeOldChannelMessages — cron cada hora.
+//  Borra los mensajes del CANAL (colección top-level `messages`, chat del
+//  walkie-talkie) con más de 24h por `createdAt`. Incluye los mensajes de
+//  voz del respaldo de radio (type:'voz' con audioUrl). Mantiene el chat del
+//  canal efímero (24h) y evita docs huérfanos cuyo .wav ya borró el bot.
+//  Los .wav en Oracle los borra el propio bot grabador (retención 24h).
+// ───────────────────────────────────────────────────────────────────
+async function _runPurgeOldChannelMessages() {
+  const cutoff = Timestamp.fromMillis(Date.now() - 24 * 60 * 60 * 1000);
+  let deleted = 0;
+  // Borrado por lotes hasta agotar los expirados.
+  for (let i = 0; i < 50; i++) {
+    const snap = await db
+      .collection("messages")
+      .where("createdAt", "<=", cutoff)
+      .limit(300)
+      .get();
+    if (snap.empty) break;
+    const batch = db.batch();
+    snap.docs.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+    deleted += snap.size;
+    if (snap.size < 300) break;
+  }
+  return { deleted };
+}
+
+exports.purgeOldChannelMessages = onSchedule(
+  {
+    schedule: "20 * * * *", // cada hora en el minuto 20 (desfasado del otro purge)
+    timeZone: "America/Guayaquil",
+    timeoutSeconds: 540,
+    memory: "256MiB",
+    retryCount: 1,
+  },
+  async () => {
+    const summary = await _runPurgeOldChannelMessages();
+    console.log("purgeOldChannelMessages:", JSON.stringify(summary));
+    return summary;
+  }
+);
+
 exports.purgeOldChatMessagesNow = onCall({}, async (request) => {
   requireSuperAdmin(request);
   return await _runPurgeOldChatMessages();

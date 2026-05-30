@@ -39,7 +39,6 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     with WidgetsBindingObserver {
   bool _isRecording = false;
   bool _isMuted = false;
-  DateTime? _recordingStartTime;
   Timer? _recordingTimer;
   Timer? _durationTimer;
   int _recordingSeconds = 0;
@@ -238,7 +237,6 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         _durationTimer?.cancel();
         _isRecording = false;
         _recordingSeconds = 0;
-        _recordingStartTime = null;
         // Mute Agora inmediato (no esperar al bloc). Esto llama
         // enableLocalAudio(false) que libera el mic hardware a nivel del SO.
         _voice.muteMic().catchError((e) {
@@ -1843,8 +1841,6 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       }
     });
 
-    _recordingStartTime = DateTime.now();
-
     // 🔔 Beep tipo Motorola/Zello al iniciar PTT (talk-permit).
     // El háptico ya se disparó al inicio de _startPtt como feedback
     // inmediato del press — acá sólo va el beep, que arranca recién
@@ -1921,9 +1917,6 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     _silenceTimer = null;
     _lastVoiceAt = null;
     _voice.onLocalVoiceActivity = null;
-    final durationSeconds = _recordingStartTime != null
-        ? DateTime.now().difference(_recordingStartTime!).inSeconds
-        : 0;
     setState(() {
       _isRecording = false;
       _recordingSeconds = 0;
@@ -1939,26 +1932,10 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       // Silenciar error — ya dejamos de grabar en la UI
     }
 
-    // Enviar mensaje ligero a Firestore (solo metadatos, sin audio base64)
-    // para que quede registro en el historial del canal.
-    if (durationSeconds >= 1 && mounted) {
-      context.read<CommunicationBloc>().add(
-            ChannelMessageSendRequested(
-              MessageModel(
-                uid: const Uuid().v4(),
-                associationId: user.associationId,
-                channelId: state.activeChannelId!,
-                senderId: user.uid,
-                senderName: '${user.name} ${user.lastname}',
-                type: 'voz',
-                durationSeconds: durationSeconds,
-                createdAt: DateTime.now(),
-              ),
-            ),
-          );
-    }
-
-    _recordingStartTime = null;
+    // NOTA: ya NO creamos aquí el mensaje de voz "solo metadatos".
+    // El respaldo del audio del canal lo crea el bot grabador server-side,
+    // que graba cada PTT y publica el MessageModel (type:'voz') CON su
+    // `audioUrl` (.wav). Crearlo también acá duplicaría el mensaje en el chat.
 
     // Liberar el lock del canal en Firestore
     if (mounted) {
@@ -1971,9 +1948,10 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     }
   }
 
-  /// Con Agora, el audio de voz se transmite en tiempo real.
-  /// Los mensajes de voz en el historial son solo metadatos (duración).
-  /// Los mensajes antiguos con audioBase64 ya no se reproducen.
+  /// El audio de voz se transmite en tiempo real por el canal de voz.
+  /// El respaldo re-escuchable del canal lo crea el bot grabador
+  /// server-side: publica cada PTT como MessageModel (type:'voz') con su
+  /// `audioUrl` (.wav), que el chat del canal reproduce desde la URL.
 
   /// Bottom sheet con opciones de manejo del canal (long-press en el chip).
   /// Solo visible para admin/operadora.

@@ -7,6 +7,7 @@ import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/models/channel_model.dart';
 import '../bloc/communication_bloc.dart';
 import 'audio_history_tile.dart';
+import 'channel_voice_bubble.dart';
 
 /// Vista del historial del canal del walkie-talkie:
 /// - Audios locales (24h, guardados en este celular).
@@ -55,11 +56,14 @@ class _RadioHistoryViewState extends State<RadioHistoryView> {
 
         final audios = LocalAudioHistoryService.instance
             .entriesForChannel(state.activeChannelId!);
-        final texts = state.activeMessages
-            .where((m) => m.type == 'texto')
+        // Mensajes del canal en Firestore: texto + respaldos de voz (estos
+        // últimos los publica el bot grabador server-side con su audioUrl).
+        // Visible para TODOS los roles, sin filtrar por rol.
+        final msgs = state.activeMessages
+            .where((m) => m.type == 'texto' || m.type == 'voz')
             .toList();
 
-        if (audios.isEmpty && texts.isEmpty) {
+        if (audios.isEmpty && msgs.isEmpty) {
           return Center(
             child: Column(
               mainAxisAlignment: MainAxisAlignment.center,
@@ -80,10 +84,11 @@ class _RadioHistoryViewState extends State<RadioHistoryView> {
           );
         }
 
-        // Combinar audios + textos ordenados por fecha desc.
+        // Combinar audios locales + mensajes Firestore (texto/voz),
+        // ordenados por fecha desc.
         final items = <_HistoryItem>[
           ...audios.map((a) => _HistoryItem.audio(a)),
-          ...texts.map((t) => _HistoryItem.text(t)),
+          ...msgs.map((m) => _HistoryItem.message(m)),
         ]..sort((a, b) => b.at.compareTo(a.at));
 
         final myUid = _currentUserId();
@@ -105,7 +110,21 @@ class _RadioHistoryViewState extends State<RadioHistoryView> {
                 },
               );
             }
-            return _buildTextTile(item.text!, myUid);
+            final msg = item.message!;
+            final isMe = msg.senderId == myUid;
+            // Mensaje de voz con respaldo de audio → burbuja reproducible.
+            if (msg.type == 'voz' &&
+                msg.audioUrl != null &&
+                msg.audioUrl!.isNotEmpty) {
+              return ChannelVoiceBubble(message: msg, isMe: isMe);
+            }
+            // Mensaje de voz viejo (solo metadatos, sin audioUrl) → resumen
+            // sin botón de reproducción, para no romper el historial.
+            if (msg.type == 'voz') {
+              return _buildLegacyVoiceTile(msg, isMe);
+            }
+            // Mensaje de texto.
+            return _buildTextTile(msg, myUid);
           },
         );
       },
@@ -151,15 +170,49 @@ class _RadioHistoryViewState extends State<RadioHistoryView> {
       ),
     );
   }
+
+  /// Mensaje de voz viejo SIN audioUrl: solo se muestra como resumen
+  /// "🎙️ {senderName} · {duración}", sin botón de reproducción.
+  Widget _buildLegacyVoiceTile(MessageModel msg, bool isMe) {
+    final dur = msg.durationSeconds ?? 0;
+    return Card(
+      margin: const EdgeInsets.only(bottom: 8),
+      color: isMe ? AppTheme.primaryColor.withValues(alpha: 0.08) : null,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            Icon(Icons.mic,
+                size: 16,
+                color: isMe
+                    ? AppTheme.primaryColor
+                    : AppTheme.secondaryColor),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                '🎙️ ${isMe ? 'Tú' : msg.senderName} · ${dur}s',
+                style: const TextStyle(fontSize: 14),
+              ),
+            ),
+            Text(
+              DateFormat('HH:mm').format(msg.createdAt),
+              style: const TextStyle(
+                  color: AppTheme.textSecondary, fontSize: 12),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _HistoryItem {
   final AudioHistoryEntry? audio;
-  final MessageModel? text;
+  final MessageModel? message;
   final DateTime at;
-  _HistoryItem._({this.audio, this.text, required this.at});
+  _HistoryItem._({this.audio, this.message, required this.at});
   factory _HistoryItem.audio(AudioHistoryEntry e) =>
       _HistoryItem._(audio: e, at: e.startedAt);
-  factory _HistoryItem.text(MessageModel m) =>
-      _HistoryItem._(text: m, at: m.createdAt);
+  factory _HistoryItem.message(MessageModel m) =>
+      _HistoryItem._(message: m, at: m.createdAt);
 }

@@ -1,0 +1,15 @@
+{
+  "name": "radio-recorder",
+  "version": "1.0.0",
+  "description": "Bot que se une a los canales LiveKit, graba cada PTT (segmentado por mute/unmute) y publica el clip como mensaje de voz en el chat del canal (Firestore). Respaldo de radio 24h.",
+  "type": "commonjs",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "@livekit/rtc-node": "^0.13.11",
+    "livekit-server-sdk": "^2.9.7",
+    "firebase-admin": "^12.7.0"
+  }
+}
