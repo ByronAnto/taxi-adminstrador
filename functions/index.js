@@ -2942,11 +2942,35 @@ exports.checkSubscriptionsNow = onCall({}, async (request) => {
 async function _fetchEventsFromGemini(apiKey, dateLabel) {
   const prompt = `Eres un asistente para conductores de taxi en Quito, Ecuador.
 Usa búsqueda en tiempo real para encontrar TODOS los eventos públicos
-previstos para HOY (${dateLabel}) en Quito y el Distrito Metropolitano que
+previstos para HOY (${dateLabel}, zona horaria America/Guayaquil) en Quito,
+el Distrito Metropolitano y los valles (Cumbayá, Tumbaco, Los Chillos) que
 puedan generar aglomeración de gente, demanda de taxis o tráfico.
 
+OBJETIVO CRÍTICO: NO se te puede pasar ningún concierto, recital, obra de
+teatro, ballet, ópera, stand-up o espectáculo masivo que ocurra HOY. En el
+pasado se devolvió una lista vacía aunque SÍ había conciertos y ballet en
+cartelera; eso es un error grave. Sé exhaustivo y prefiere incluir de más.
+
+REVISA Y CONTRASTA OBLIGATORIAMENTE estas fuentes de cartelera de Quito
+(busca cada una para la fecha de HOY y cruza la información):
+- Plataformas de venta de entradas: TicketShow (ticketshow.com.ec),
+  Conciertos Ecuador, Quito Eventos, PrimeBox / primeboxtickets,
+  Ticketmaster Ecuador, Eventbrite Quito, Feria Ticket, Joinnus.
+- Agendas culturales: agenda del Municipio de Quito / Quito Cultura,
+  Fundación Teatro Nacional Sucre, Casa de la Cultura Ecuatoriana,
+  carteleras de prensa local (El Comercio, El Universo, Metro Ecuador,
+  Primicias) y redes sociales de los recintos.
+- Recintos típicos donde mirar la cartelera del día: Plaza de Toros /
+  Plaza de Toros Quito (Belmonte/Iñaquito), Teatro Nacional Sucre,
+  Teatro San Gabriel, Teatro Bolívar, Teatro México, Ágora Casa de la
+  Cultura, Teatro Nacional CCE, Coliseo General Rumiñahui, Estadio
+  Olímpico Atahualpa, Estadio Rodrigo Paz Delgado (Casa Blanca, LDU),
+  Centro de Convenciones Metropolitano / Quorum (Cumbayá).
+
 Cubre AMPLIAMENTE estas categorías y venues (la lista NO es exhaustiva, si
-encuentras otros eventos relevantes inclúyelos):
+encuentras otros eventos relevantes inclúyelos). Incluye SIEMPRE conciertos,
+teatro, ballet, ópera, danza, ferias y eventos masivos del día en Quito y
+los valles:
 
 - Deportes: Estadio Olímpico Atahualpa, Estadio Casa Blanca (LDU), Coliseo
   General Rumiñahui, Coliseo Julio César Hidalgo, Plaza de Toros Quito,
@@ -2999,11 +3023,20 @@ explicación:
 {"events":[ ... ]}
 
 Reglas:
-- NO inventes datos. Si no estás seguro de un campo, usa null.
+- NO inventes eventos que no existan. Pero si un campo concreto (hora exacta,
+  coordenadas, etc.) no lo sabes con certeza, usa null en ESE campo; no
+  descartes el evento entero por un dato faltante.
+- Si encuentras un evento real pero NO estás 100% seguro de que sea HOY
+  (la fuente no precisa la fecha o hay varias funciones), inclúyelo igual
+  usando en startTime la fecha de HOY (${dateLabel}) como tu mejor estimación.
+  Es mejor listar un evento con fecha aproximada que perderlo.
 - Si un evento es recurrente (ciclopaseo dominical, ferias semanales),
   inclúyelo solo si HOY corresponde.
-- Prefiere eventos confirmados con fuente verificable.
-- Si no encuentras NINGÚN evento confirmado, devuelve {"events":[]}.
+- Prefiere eventos confirmados con fuente verificable, pero NO exijas
+  confirmación absoluta para listarlos.
+- Devuelve SIEMPRE el JSON pedido. Aunque solo encuentres 1 evento,
+  devuélvelo. Usa {"events":[]} SOLO si tras revisar todas las fuentes
+  anteriores realmente no hay absolutamente nada para HOY.
 - Devuelve hasta 25 eventos máximo, priorizados por taxiDemand alta.`;
 
   // Body con Google Search grounding: el modelo busca en tiempo real
