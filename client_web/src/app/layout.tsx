@@ -3,9 +3,9 @@ import "./globals.css";
 import { AuthProvider } from "@/lib/auth";
 
 export const metadata: Metadata = {
-  title: "Taxis App — Pide tu taxi",
+  title: "Taxi Seguro Ecuador — taxi seguro en Quito",
   description:
-    "Solicita tu taxi a tu asociación de confianza. Rápido y seguro.",
+    "Pide tu taxi seguro: taxi convencional, legal y confiable en Quito y sus valles. Conductores verificados, seguimiento en tiempo real y botón de emergencia.",
 };
 
 export default function RootLayout({
