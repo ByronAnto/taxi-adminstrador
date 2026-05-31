@@ -8,6 +8,7 @@ const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestor
 const { getStorage } = require("firebase-admin/storage");
 const { RtcTokenBuilder, RtcRole } = require("agora-token");
 const { buildLiveKitToken } = require("./lib/livekitToken");
+const { buildNotification, tokensForAssociation } = require("./lib/groupChat");
 const {
   isTransitionToFinalized,
   isFirstRating,
@@ -4565,6 +4566,90 @@ exports.onTripRequestCreated = onDocumentCreated(
         `[onTripRequestCreated] error enviando push: ${e.message}`,
       );
     }
+  },
+);
+
+// ───────────────────────────────────────────────────────────────────
+//  onGroupMessageCreated — push FCM a TODOS los miembros activos de la
+//  asociación (menos el emisor) cuando entra un mensaje al chat grupal.
+//
+//  Trigger: create de associationChats/{aid}/groupMessages/{msgId}.
+//  Reusa la lógica pura testeada (buildNotification / tokensForAssociation)
+//  y el helper _sendMulticastAndPrune (envía en lotes de 500 + borra tokens
+//  muertos). Para poder podar tokens muertos construimos `entries`
+//  (token+ref) en el trigger con la MISMA lógica de filtrado que
+//  tokensForAssociation; esa función pura se mantiene intacta para el test.
+// ───────────────────────────────────────────────────────────────────
+// Cache simple de nombres de asociación (como en el bot recorder).
+const _assocNames = new Map();
+async function _getAssociationName(aid) {
+  if (_assocNames.has(aid)) return _assocNames.get(aid);
+  let name = aid;
+  try {
+    const snap = await db.collection("associations").doc(aid).get();
+    if (snap.exists) name = snap.data().name || aid;
+  } catch (_) { /* noop */ }
+  _assocNames.set(aid, name);
+  return name;
+}
+
+exports.onGroupMessageCreated = onDocumentCreated(
+  { document: "associationChats/{aid}/groupMessages/{msgId}", region: "us-central1" },
+  async (event) => {
+    const msg = event.data?.data();
+    if (!msg) return;
+    const aid = event.params.aid;
+    const senderId = msg.senderId;
+
+    // Usuarios activos de la asociación (con uid del doc).
+    const snap = await db
+      .collection("users")
+      .where("associationId", "==", aid)
+      .where("status", "==", "active")
+      .get();
+
+    // Construimos entries {token, ref} aplicando la misma regla que
+    // tokensForAssociation (activos, con token no vacío, sin el emisor).
+    // tokensForAssociation se usa como guard rápido para abortar temprano.
+    const userDocs = snap.docs.map((d) => ({ uid: d.id, ...d.data() }));
+    const tokens = tokensForAssociation(userDocs, aid, senderId);
+    if (tokens.length === 0) return;
+
+    const entries = [];
+    for (const d of snap.docs) {
+      if (d.id === senderId) continue;
+      const t = d.data().fcmToken;
+      if (typeof t === "string" && t.length > 0) {
+        entries.push({ token: t, ref: d.ref });
+      }
+    }
+    if (entries.length === 0) return;
+
+    const associationName = await _getAssociationName(aid);
+    const { title, body } = buildNotification({
+      senderName: msg.senderName,
+      text: msg.text,
+      associationName,
+    });
+
+    const data = { type: "group_chat", associationId: aid };
+    const { sent, pruned } = await _sendMulticastAndPrune(entries, {
+      notification: { title, body },
+      data,
+      android: {
+        priority: "high",
+        notification: {
+          sound: "default",
+          channelId: "taxi_default",
+          defaultSound: true,
+          defaultVibrateTimings: true,
+        },
+      },
+      apns: { payload: { aps: { sound: "default" } } },
+    });
+    console.log(
+      `[group-chat] push aid=${aid} tokens=${entries.length} sent=${sent} pruned=${pruned}`,
+    );
   },
 );
 
