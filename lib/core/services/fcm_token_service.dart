@@ -23,9 +23,37 @@ class FcmTokenService {
   // reintentar en vez de quedar bloqueado por la guarda de uid.
   bool _tokenPersisted = false;
 
+  /// Topics de rol a los que el server (eventos de Quito) envía push.
+  /// DEBE coincidir con la convención del backend: `role_<rol>`.
+  static const List<String> _roleTopics = [
+    'role_conductor',
+    'role_admin',
+    'role_operadora',
+  ];
+
+  /// Normaliza el rol al string que el server espera (`conductor`, `admin`,
+  /// `operadora`). Devuelve '' si no reconoce el rol (no se suscribe).
+  String _normalizeRole(String? role) {
+    final r = (role ?? '').trim().toLowerCase();
+    switch (r) {
+      case 'conductor':
+      case 'admin':
+      case 'operadora':
+        return r;
+      default:
+        return '';
+    }
+  }
+
   /// Llamar tras login para suscribir el dispositivo a tokens FCM y
-  /// persistirlos en `users/{uid}`.
-  Future<void> bind(String uid) async {
+  /// persistirlos en `users/{uid}`. `role` se usa para suscribir el
+  /// dispositivo al topic `role_<rol>` (eventos por topic del server).
+  Future<void> bind(String uid, {String? role}) async {
+    // La suscripción al topic es independiente del registro de token: se
+    // intenta SIEMPRE (también si el bind se cortocircuita por token ya
+    // persistido), por si una sesión previa no llegó a suscribir.
+    await _subscribeRoleTopic(role);
+
     // Solo cortocircuitamos si YA enlazamos Y persistimos un token para
     // este user. Si antes falló getToken (token aún no persistido), dejamos
     // que el reintento corra: era la causa de "usuarios sin fcmToken".
@@ -84,6 +112,24 @@ class FcmTokenService {
     }
   }
 
+  /// Suscribe el dispositivo al topic `role_<rol>` del usuario. Una falla
+  /// NO debe romper el login: se atrapa y se loguea. Si el rol no se
+  /// reconoce, no se suscribe.
+  Future<void> _subscribeRoleTopic(String? role) async {
+    final normalized = _normalizeRole(role);
+    if (normalized.isEmpty) {
+      debugPrint('FCM: rol no reconocido ("$role") — sin suscripción a topic');
+      return;
+    }
+    final topic = 'role_$normalized';
+    try {
+      await _messaging.subscribeToTopic(topic);
+      debugPrint('FCM: suscrito al topic $topic');
+    } catch (e) {
+      debugPrint('FCM: error al suscribir a $topic: $e');
+    }
+  }
+
   /// getToken con reintentos cortos para tolerar fallos transitorios al
   /// arrancar en frío (Play Services no listo / sin red). Devuelve null si
   /// tras los intentos sigue sin haber token (se reintentará en el próximo
@@ -116,6 +162,21 @@ class FcmTokenService {
     _tokenPersisted = false;
     await _refreshSub?.cancel();
     _refreshSub = null;
+
+    // Desuscribir de TODOS los topics de rol. Como en `unbind` no siempre
+    // tenemos el rol a mano (y un dispositivo compartido pudo loguear roles
+    // distintos), desuscribimos de los 3 por seguridad: así nadie sigue
+    // recibiendo push de un rol ajeno tras cerrar sesión. Cada falla se
+    // atrapa de forma independiente para no bloquear las demás ni el logout.
+    for (final topic in _roleTopics) {
+      try {
+        await _messaging.unsubscribeFromTopic(topic);
+        debugPrint('FCM: desuscrito del topic $topic');
+      } catch (e) {
+        debugPrint('FCM: error al desuscribir de $topic: $e');
+      }
+    }
+
     if (uid == null) return;
     try {
       await _firestore.collection('users').doc(uid).update({

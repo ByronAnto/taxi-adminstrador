@@ -359,7 +359,7 @@ class _TaxiJipijapaAppState extends State<TaxiJipijapaApp>
                 );
                 // Registrar el token FCM en users/{uid} para recibir
                 // notificaciones del cron dispatchScheduledNotifications.
-                FcmTokenService.instance.bind(user.uid);
+                FcmTokenService.instance.bind(user.uid, role: user.role);
                 // Cargar theme custom de la asociación (logo + colores).
                 AssociationThemeService.instance.loadFor(user.associationId);
                 // (La selección del provider de voz se hace arriba, con
