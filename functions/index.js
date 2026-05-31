@@ -4425,7 +4425,12 @@ exports.markStaleDriversOfflineNow = onCall({}, async (request) => {
 //  Diario 00:45 EC. Idempotente (sobrescribe).
 // ───────────────────────────────────────────────────────────────────
 async function _runComputeDriverPercentiles() {
-  const snap = await db.collection("drivers").get();
+  // .select() recorta egress/RAM: los driver docs traen posición, historial,
+  // etc. — aquí solo necesitamos estos 4 campos.
+  const snap = await db
+    .collection("drivers")
+    .select("totalTrips", "associationId", "archivedAt", "deletedAt")
+    .get();
   // Agrupar por asociación.
   const byAssoc = {};
   for (const d of snap.docs) {
@@ -4444,8 +4449,13 @@ async function _runComputeDriverPercentiles() {
     // Orden descendente por carreras (más carreras = rank 1).
     list.sort((a, b) => b.trips - a.trips);
     const total = list.length;
-    const batch = db.batch();
-    list.forEach((item, i) => {
+    // Trocear cada 450 escrituras: un batch de Firestore admite máx 500
+    // operaciones, así que una asociación con >500 conductores reventaría
+    // el commit sin esto (bug latente a escala).
+    let batch = db.batch();
+    let n = 0;
+    for (let i = 0; i < list.length; i++) {
+      const item = list[i];
       const rank = i + 1;
       const topPercent = Math.max(1, Math.ceil((rank / total) * 100));
       batch.set(
@@ -4459,8 +4469,13 @@ async function _runComputeDriverPercentiles() {
         { merge: true },
       );
       writes++;
-    });
-    await batch.commit();
+      if (++n === 450) {
+        await batch.commit();
+        batch = db.batch();
+        n = 0;
+      }
+    }
+    if (n > 0) await batch.commit();
   }
   return { ok: true, associations: Object.keys(byAssoc).length, writes };
 }
