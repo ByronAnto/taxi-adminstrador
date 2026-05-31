@@ -3060,8 +3060,8 @@ Reglas:
   };
 
   // Lista de modelos a probar en orden. Si gemini-2.5-flash está
-  // saturado (503), caemos a 1.5-flash que suele tener menos demanda.
-  const models = ["gemini-2.5-flash", "gemini-1.5-flash"];
+  // saturado (503), caemos a 2.0-flash que suele tener menos demanda.
+  const models = ["gemini-2.5-flash", "gemini-2.0-flash"];
   // Cada modelo se intenta primero con grounding, luego sin grounding.
   const variants = [
     { body: bodyGrounded, label: "grounded" },
