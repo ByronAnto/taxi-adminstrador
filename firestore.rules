@@ -372,6 +372,18 @@ service cloud.firestore {
       }
     }
 
+    // ===== ASSOCIATION GROUP CHAT =====
+    match /associationChats/{aid}/groupMessages/{msgId} {
+      allow read: if isAuthenticated() && myAssociationId() == aid;
+      allow create: if isAuthenticated()
+        && myAssociationId() == aid
+        && request.resource.data.senderId == request.auth.uid
+        && request.resource.data.text is string
+        && request.resource.data.text.size() > 0
+        && request.resource.data.text.size() <= 2000;
+      allow update, delete: if false; // inmutable; purga por Admin SDK
+    }
+
     // ===== EMERGENCIAS =====
     match /emergencies/{emergencyId} {
       allow read: if isActive() && sameTenant(resource.data);

@@ -364,6 +364,13 @@
         { "fieldPath": "associationId", "order": "ASCENDING" },
         { "fieldPath": "dateTs", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "groupMessages",
+      "queryScope": "COLLECTION_GROUP",
+      "fields": [
+        { "fieldPath": "createdAt", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []
