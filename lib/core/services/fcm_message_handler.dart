@@ -1,10 +1,12 @@
 import 'dart:async';
-import 'dart:ui';
 
 import 'package:firebase_messaging/firebase_messaging.dart';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:go_router/go_router.dart';
+
+import '../../config/router/app_router.dart';
+import '../../features/chat/presentation/pages/chat_list_page.dart';
 
 /// Maneja la entrega de mensajes FCM en runtime.
 ///
@@ -113,7 +115,16 @@ class FcmMessageHandler {
   void _handleTap(String? type) {
     final router = _router;
     if (router == null) return;
-    // Por ahora todos los push administrativos van a /notifications.
+    // Push del chat de grupo → abrir la pantalla Mensajes. Tras el
+    // reordenamiento de tabs (Grupo index 0 | Radio index 1), ChatListPage
+    // arranca en la tab Grupo por defecto, así que basta con abrirla.
+    if (type == 'group_chat') {
+      final nav = rootNavigatorKey.currentState;
+      if (nav == null) return;
+      nav.push(MaterialPageRoute(builder: (_) => const ChatListPage()));
+      return;
+    }
+    // Por ahora el resto de push administrativos van a /notifications.
     // Si querés ramificar por type ('payment_validated' → /my-payments,
     // 'queue_alert' → /home, etc.) este es el lugar.
     router.push('/notifications');
