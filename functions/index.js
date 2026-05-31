@@ -3133,26 +3133,42 @@ exports.checkSubscriptionsNow = onCall({}, async (request) => {
 
 const DUES_ENFORCEMENT_FLAG = { collection: "app_config", doc: "duesEnforcement" };
 
-/// Lee el modo de la bandera. Default "shadow" (seguro: nunca escribe status)
-/// si el doc no existe o la lectura falla.
-async function _readDuesEnforcementMode() {
+/// Lee la bandera completa: { mode, canaryAssociationIds }.
+/// Default { mode:"shadow", canaryAssociationIds:[] } (seguro: nunca escribe
+/// status) si el doc no existe o la lectura falla.
+///
+/// `canaryAssociationIds` (array de associationId): si NO está vacío, en modo
+/// "live" SOLO se aplican escrituras a usuarios/asociaciones de esa lista; el
+/// resto se trata como shadow (se loguea, no se escribe). Permite cutover
+/// gradual. Vacío/ausente → live global.
+async function _readDuesEnforcementFlag() {
   try {
     const snap = await db
       .collection(DUES_ENFORCEMENT_FLAG.collection)
       .doc(DUES_ENFORCEMENT_FLAG.doc)
       .get();
-    if (!snap.exists) return "shadow";
-    const mode = snap.data()?.mode;
-    if (mode === "off" || mode === "shadow" || mode === "live") return mode;
-    return "shadow";
+    if (!snap.exists) return { mode: "shadow", canaryAssociationIds: [] };
+    const data = snap.data() || {};
+    const rawMode = data.mode;
+    const mode =
+      rawMode === "off" || rawMode === "shadow" || rawMode === "live"
+        ? rawMode
+        : "shadow";
+    const canary = Array.isArray(data.canaryAssociationIds)
+      ? data.canaryAssociationIds.filter((x) => typeof x === "string" && x.length > 0)
+      : [];
+    return { mode, canaryAssociationIds: canary };
   } catch (e) {
     console.error("[enforceMembershipDues] flag read failed, default shadow", e);
-    return "shadow";
+    return { mode: "shadow", canaryAssociationIds: [] };
   }
 }
 
-/// Módulo conductores en modo read-only: calcula qué uids se BLOQUEARÍAN y
-/// cuáles se REACTIVARÍAN, sin escribir nada. Devuelve { wouldBlock, wouldReactivate }.
+/// Módulo conductores en modo read-only: calcula qué candidatos se
+/// BLOQUEARÍAN y cuáles se REACTIVARÍAN, sin escribir nada.
+/// Devuelve { wouldBlock, wouldReactivate } donde cada elemento es
+/// { uid, associationId } (associationId se usa para el filtro canary y para
+/// las escrituras en modo live; puede ser undefined en docs legacy).
 /// Usa la decisión pura `decideDuesAction` para cada candidato.
 async function _computeDriverDuesShadow(now) {
   const wouldBlock = [];
@@ -3181,7 +3197,9 @@ async function _computeDriverDuesShadow(now) {
       now,
       hasPermit,
     });
-    if (action === "WOULD_BLOCK") wouldBlock.push(uDoc.id);
+    if (action === "WOULD_BLOCK") {
+      wouldBlock.push({ uid: uDoc.id, associationId: u.associationId });
+    }
   }
 
   // ── Candidatos a REACTIVAR: bloqueados por cuota con vencimiento futuro ──
@@ -3190,7 +3208,7 @@ async function _computeDriverDuesShadow(now) {
     .where("status", "==", "paymentBlocked")
     .where("blockReason", "==", "cuota_vencida")
     .where("nextDueAt", ">", now)
-    .select("nextDueAt", "role")
+    .select("nextDueAt", "role", "associationId")
     .get();
 
   for (const uDoc of reactSnap.docs) {
@@ -3202,7 +3220,9 @@ async function _computeDriverDuesShadow(now) {
       nextDueAt: u.nextDueAt,
       now,
     });
-    if (action === "WOULD_REACTIVATE") wouldReactivate.push(uDoc.id);
+    if (action === "WOULD_REACTIVATE") {
+      wouldReactivate.push({ uid: uDoc.id, associationId: u.associationId });
+    }
   }
 
   return { wouldBlock, wouldReactivate };
@@ -3236,14 +3256,158 @@ async function _computeSubscriptionsShadow() {
   return { wouldExpire, wouldReactivate };
 }
 
-/// Núcleo del cron: lee modo, calcula shadow y persiste el resumen en
-/// `duesShadowLog/{YYYY-MM-DD}`. NO escribe status en ningún caso por ahora.
+/// Devuelve true si un associationId entra en el alcance de escritura live.
+/// Si `canaryIds` está vacío → live global (todo entra). Si trae ids → solo
+/// los de la lista entran (cutover gradual); el resto se trata como shadow.
+function _inCanaryScope(associationId, canaryIds) {
+  if (!canaryIds || canaryIds.length === 0) return true; // live global
+  return canaryIds.includes(associationId);
+}
+
+/// Módulo conductores en modo LIVE: escribe el status real replicando
+/// EXACTAMENTE los Pases B y C de `enforcePayments`.
+///
+///  - WOULD_BLOCK → status:"paymentBlocked", blockReason:"cuota_vencida",
+///    blockedAt:now, updatedAt:now + FCM (mismo título/cuerpo que Pase B).
+///  - WOULD_REACTIVATE → status:"active", blockedAt/blockReason borrados
+///    (FieldValue.delete()), updatedAt:now + FCM (mismo texto que Pase C).
+///
+/// El permiso activo (`_hasActivePermit`) ya fue evaluado por
+/// `_computeDriverDuesShadow` antes de producir WOULD_BLOCK; aquí no se
+/// re-evalúa (la decisión ya está tomada). Sólo se aplica a candidatos cuyo
+/// associationId está en el alcance canary. Escribe en batches de 450.
+/// El FCM se envía tras commitear el batch (no es transaccional con el write,
+/// igual que en enforcePayments). Devuelve { blocked: [uids], reactivated: [uids] }.
+async function _applyDriverDuesLive(now, drivers, canaryIds) {
+  const BATCH_LIMIT = 450;
+  const blocked = [];
+  const reactivated = [];
+
+  const inScopeBlock = drivers.wouldBlock.filter((c) =>
+    _inCanaryScope(c.associationId, canaryIds),
+  );
+  const inScopeReact = drivers.wouldReactivate.filter((c) =>
+    _inCanaryScope(c.associationId, canaryIds),
+  );
+
+  // ── Bloqueos (Pase B) ──
+  for (let i = 0; i < inScopeBlock.length; i += BATCH_LIMIT) {
+    const chunk = inScopeBlock.slice(i, i + BATCH_LIMIT);
+    const batch = db.batch();
+    for (const c of chunk) {
+      batch.update(db.collection("users").doc(c.uid), {
+        status: "paymentBlocked",
+        blockedAt: now,
+        blockReason: "cuota_vencida",
+        updatedAt: now,
+      });
+    }
+    await batch.commit();
+    for (const c of chunk) blocked.push(c.uid);
+  }
+  // FCM de bloqueo — mismo título/cuerpo EXACTO que enforcePayments Pase B.
+  await Promise.all(
+    blocked.map((uid) =>
+      _sendFcmToUid(uid, {
+        title: "Tu cuenta fue bloqueada",
+        body: "Sube tu comprobante de pago para reactivarte.",
+      }).catch(() => {}),
+    ),
+  );
+
+  // ── Reactivaciones (Pase C) ──
+  for (let i = 0; i < inScopeReact.length; i += BATCH_LIMIT) {
+    const chunk = inScopeReact.slice(i, i + BATCH_LIMIT);
+    const batch = db.batch();
+    for (const c of chunk) {
+      batch.update(db.collection("users").doc(c.uid), {
+        status: "active",
+        blockedAt: FieldValue.delete(),
+        blockReason: FieldValue.delete(),
+        updatedAt: now,
+      });
+    }
+    await batch.commit();
+    for (const c of chunk) reactivated.push(c.uid);
+  }
+  // FCM de reactivación — mismo texto EXACTO que enforcePayments Pase C.
+  await Promise.all(
+    reactivated.map((uid) =>
+      _sendFcmToUid(uid, {
+        title: "Cuenta reactivada",
+        body: "Tu cuenta fue reactivada. Bienvenido de vuelta.",
+      }).catch(() => {}),
+    ),
+  );
+
+  return { blocked, reactivated };
+}
+
+/// Módulo de suspensión de asociaciones en modo LIVE: replica EXACTAMENTE el
+/// Pase A de `enforcePayments` (suspende asociaciones con paidUntil/trialEndsAt
+/// vencido → status:"suspended", suspendedAt, suspendedReason + FCM a admins
+/// activos). Este comportamiento NO lo cubre el módulo SaaS (que escribe
+/// status:"expired", no "suspended", y no avisa a admins): por eso se replica
+/// aquí para no perderlo al apagar enforcePayments.
+///
+/// Respeta canary: sólo suspende asociaciones dentro del alcance.
+/// Devuelve [associationIds suspendidas].
+async function _applyAssociationSuspensionLive(now, canaryIds) {
+  const suspended = [];
+  const assocSnap = await db
+    .collection("associations")
+    .where("status", "in", ["active", "trial"])
+    .get();
+
+  for (const doc of assocSnap.docs) {
+    if (!_inCanaryScope(doc.id, canaryIds)) continue; // fuera de canary → shadow
+    const a = doc.data();
+    const isTrial = a.status === "trial";
+    const expiry = isTrial ? a.trialEndsAt : a.paidUntil;
+    if (!expiry) continue;
+    const expiryDate = expiry.toDate ? expiry.toDate() : new Date(expiry);
+    if (expiryDate.getTime() > now.toMillis()) continue;
+
+    await doc.ref.update({
+      status: "suspended",
+      suspendedAt: now,
+      suspendedReason: isTrial ? "expired_trial" : "expired_paid_until",
+      updatedAt: now,
+    });
+    suspended.push(doc.id);
+    console.log(`[enforceMembershipDues] suspended assoc ${doc.id} (${a.name || ""})`);
+
+    // FCM a TODOS los admins activos de la asoc (mismo texto que Pase A).
+    const adminsSnap = await db
+      .collection("users")
+      .where("associationId", "==", doc.id)
+      .where("role", "==", "admin")
+      .where("status", "==", "active")
+      .get();
+    await Promise.all(
+      adminsSnap.docs.map((aDoc) =>
+        _sendFcmToUid(aDoc.id, {
+          title: "Cooperativa suspendida",
+          body: `Tu cooperativa ${a.name || ""} fue suspendida por mora. Paga la membresía para reactivarla.`,
+        }).catch((e) => console.error("FCM error admin", e)),
+      ),
+    );
+  }
+  return suspended;
+}
+
+/// Núcleo del cron: lee bandera (modo + canary), calcula shadow, y —en modo
+/// live— ESCRIBE el status real (bloqueo/reactivación de conductores +
+/// suspensión y expired/active de asociaciones), respetando canary. En todos
+/// los modos persiste el resumen en `duesShadowLog/{YYYY-MM-DD}` para auditoría.
 async function _runEnforceMembershipDues() {
   const now = Timestamp.now();
-  const mode = await _readDuesEnforcementMode();
+  const { mode, canaryAssociationIds } = await _readDuesEnforcementFlag();
   const dateKey = now.toDate().toISOString().substring(0, 10); // YYYY-MM-DD (UTC)
 
-  console.log(`[enforceMembershipDues] start mode=${mode} ${now.toDate().toISOString()}`);
+  console.log(
+    `[enforceMembershipDues] start mode=${mode} canary=${canaryAssociationIds.length} ${now.toDate().toISOString()}`,
+  );
 
   if (mode === "off") {
     console.log("[enforceMembershipDues] mode=off, no-op");
@@ -3256,29 +3420,70 @@ async function _runEnforceMembershipDues() {
     };
   }
 
-  if (mode === "live") {
-    // Branch preparado. El cutover real a escritura de status es un paso
-    // posterior con revisión del dueño: por ahora se comporta como shadow.
-    console.warn("[enforceMembershipDues] live mode not yet enabled — running as shadow");
-  }
-
   const drivers = await _computeDriverDuesShadow(now);
   const subscriptions = await _computeSubscriptionsShadow();
+
+  // Aplanar a uids para el log/auditoría (compat con el shape previo).
+  const wouldBlockIds = drivers.wouldBlock.map((c) => c.uid);
+  const wouldReactivateIds = drivers.wouldReactivate.map((c) => c.uid);
 
   const summary = {
     runAt: now,
     mode,
-    wouldBlock: drivers.wouldBlock,
-    wouldReactivate: drivers.wouldReactivate,
+    canaryAssociationIds,
+    wouldBlock: wouldBlockIds,
+    wouldReactivate: wouldReactivateIds,
     counts: {
-      wouldBlock: drivers.wouldBlock.length,
-      wouldReactivate: drivers.wouldReactivate.length,
+      wouldBlock: wouldBlockIds.length,
+      wouldReactivate: wouldReactivateIds.length,
     },
     subscriptions: {
       wouldExpire: subscriptions.wouldExpire,
       wouldReactivate: subscriptions.wouldReactivate,
     },
   };
+
+  if (mode === "live") {
+    // ── 1) Conductores: bloqueo / reactivación reales (Pases B y C). ──
+    const driverApplied = await _applyDriverDuesLive(now, drivers, canaryAssociationIds);
+
+    // ── 2) Suspensión de asociaciones (Pase A) — único, no cubierto por SaaS. ──
+    const suspendedAssocs = await _applyAssociationSuspensionLive(now, canaryAssociationIds);
+
+    // ── 3) SaaS de asociaciones (expired/active + cascada de users con gracia
+    //       3d): reutilizamos `_runSubscriptionCheck()` tal cual para preservar
+    //       EXACTAMENTE el comportamiento actual de checkSubscriptions.
+    //       NOTA: `_runSubscriptionCheck` recorre TODAS las asociaciones y NO
+    //       acepta filtro canary; en canary parcial se ejecuta global (ver
+    //       reporte). Con canary vacío (live global) es el comportamiento
+    //       deseado y equivalente al cron viejo. ──
+    let subsApplied = null;
+    if (canaryAssociationIds.length === 0) {
+      subsApplied = await _runSubscriptionCheck();
+    } else {
+      console.warn(
+        "[enforceMembershipDues] canary activo: módulo SaaS (_runSubscriptionCheck) NO se ejecuta para no escribir fuera del canary; checkSubscriptions viejo sigue cubriéndolo hasta live global",
+      );
+    }
+
+    summary.applied = {
+      blocked: driverApplied.blocked,
+      reactivated: driverApplied.reactivated,
+      suspendedAssociations: suspendedAssocs,
+      subscriptions: subsApplied,
+      canaryScoped: canaryAssociationIds.length > 0,
+    };
+    console.log(
+      "[enforceMembershipDues] LIVE applied",
+      JSON.stringify({
+        blocked: driverApplied.blocked.length,
+        reactivated: driverApplied.reactivated.length,
+        suspendedAssociations: suspendedAssocs.length,
+        subscriptions: subsApplied,
+        canaryScoped: canaryAssociationIds.length > 0,
+      }),
+    );
+  }
 
   // Persistir el resumen para comparar contra lo que hicieron los crones viejos.
   await db
