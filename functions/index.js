@@ -2941,15 +2941,30 @@ exports.checkSubscriptionsNow = onCall({}, async (request) => {
 
 async function _fetchEventsFromGemini(apiKey, dateLabel) {
   const prompt = `Eres un asistente para conductores de taxi en Quito, Ecuador.
-Usa búsqueda en tiempo real para encontrar TODOS los eventos públicos
-previstos para HOY (${dateLabel}, zona horaria America/Guayaquil) en Quito,
-el Distrito Metropolitano y los valles (Cumbayá, Tumbaco, Los Chillos) que
-puedan generar aglomeración de gente, demanda de taxis o tráfico.
+Usa búsqueda en tiempo real para encontrar los eventos públicos previstos
+para HOY (${dateLabel}, zona horaria America/Guayaquil) en Quito, el Distrito
+Metropolitano, los valles (Cumbayá, Tumbaco, Los Chillos) y Sangolquí que
+CONCENTREN PÚBLICO MASIVO y por tanto generen demanda real de taxis.
 
-OBJETIVO CRÍTICO: NO se te puede pasar ningún concierto, recital, obra de
-teatro, ballet, ópera, stand-up o espectáculo masivo que ocurra HOY. En el
-pasado se devolvió una lista vacía aunque SÍ había conciertos y ballet en
-cartelera; eso es un error grave. Sé exhaustivo y prefiere incluir de más.
+OBJETIVO: ayudar al taxista a saber dónde habrá aglomeración de gente para
+conseguir más carreras. Solo importan eventos que concentran público (=
+demanda de taxi). Si HOY no hay eventos de ese tipo (p. ej. un día tranquilo),
+la respuesta correcta es vacío: devolver {"events":[]} es válido y PREFERIBLE
+a inventar o forzar un evento. NUNCA fabriques ni fuerces eventos; un vacío
+honesto vale más que un evento falso.
+
+QUÉ INCLUIR (eventos con aglomeración / demanda de taxi):
+conciertos, recitales, espectáculos musicales, teatro, ballet, ópera, danza,
+stand-up, eventos deportivos masivos, ferias y festivales grandes. En recintos
+como Coliseo General Rumiñahui, Plaza de Toros, Teatro Nacional Sucre, Teatro
+Bolívar, Teatro México, Teatro San Gabriel, Ágora de la Casa de la Cultura,
+estadios y centros de eventos grandes.
+
+QUÉ EXCLUIR (sin público masivo, NO sirven al taxista):
+eventos administrativos o municipales, reuniones, sesiones, ruedas de prensa,
+trámites, actos protocolarios y cualquier cosa SIN público masivo. Ejemplo:
+"un evento del municipio para administrativos" NO sirve; "un concierto en el
+Coliseo Rumiñahui" SÍ sirve.
 
 REVISA Y CONTRASTA OBLIGATORIAMENTE estas fuentes de cartelera de Quito
 (busca cada una para la fecha de HOY y cruza la información):
@@ -2967,10 +2982,9 @@ REVISA Y CONTRASTA OBLIGATORIAMENTE estas fuentes de cartelera de Quito
   Olímpico Atahualpa, Estadio Rodrigo Paz Delgado (Casa Blanca, LDU),
   Centro de Convenciones Metropolitano / Quorum (Cumbayá).
 
-Cubre AMPLIAMENTE estas categorías y venues (la lista NO es exhaustiva, si
-encuentras otros eventos relevantes inclúyelos). Incluye SIEMPRE conciertos,
-teatro, ballet, ópera, danza, ferias y eventos masivos del día en Quito y
-los valles:
+Estas categorías y venues son referencia (la lista NO es exhaustiva). Incluye
+un evento solo si concentra público masivo y genera demanda de taxi; descarta
+lo administrativo o sin aglomeración aunque ocurra en estos lugares:
 
 - Deportes: Estadio Olímpico Atahualpa, Estadio Casa Blanca (LDU), Coliseo
   General Rumiñahui, Coliseo Julio César Hidalgo, Plaza de Toros Quito,
@@ -3023,20 +3037,19 @@ explicación:
 {"events":[ ... ]}
 
 Reglas:
-- NO inventes eventos que no existan. Pero si un campo concreto (hora exacta,
-  coordenadas, etc.) no lo sabes con certeza, usa null en ESE campo; no
-  descartes el evento entero por un dato faltante.
-- Si encuentras un evento real pero NO estás 100% seguro de que sea HOY
-  (la fuente no precisa la fecha o hay varias funciones), inclúyelo igual
-  usando en startTime la fecha de HOY (${dateLabel}) como tu mejor estimación.
-  Es mejor listar un evento con fecha aproximada que perderlo.
-- Si un evento es recurrente (ciclopaseo dominical, ferias semanales),
-  inclúyelo solo si HOY corresponde.
-- Prefiere eventos confirmados con fuente verificable, pero NO exijas
-  confirmación absoluta para listarlos.
-- Devuelve SIEMPRE el JSON pedido. Aunque solo encuentres 1 evento,
-  devuélvelo. Usa {"events":[]} SOLO si tras revisar todas las fuentes
-  anteriores realmente no hay absolutamente nada para HOY.
+- NO inventes ni fuerces eventos. Incluye SOLO eventos reales y confirmables
+  para la fecha indicada (HOY, ${dateLabel}). Si no puedes confirmar que el
+  evento es HOY, NO lo incluyas: no uses la fecha de HOY como estimación para
+  eventos de fecha dudosa.
+- Si un campo concreto (hora exacta, coordenadas, etc.) no lo sabes con
+  certeza, usa null en ESE campo; no descartes un evento real y confirmado
+  para HOY solo por un dato faltante.
+- Si un evento es recurrente (ferias semanales, etc.), inclúyelo solo si HOY
+  corresponde y concentra público masivo.
+- Incluye solo eventos confirmados con fuente verificable.
+- Es válido y PREFERIBLE devolver {"events":[]} cuando HOY no hay eventos de
+  aglomeración. No rellenes la lista con eventos administrativos, sin público
+  masivo o de fecha dudosa con tal de no devolver vacío.
 - Devuelve hasta 25 eventos máximo, priorizados por taxiDemand alta.`;
 
   // Body con Google Search grounding: el modelo busca en tiempo real
