@@ -1,14 +1,12 @@
-import 'dart:io';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
-import 'package:image_picker/image_picker.dart';
 import '../bloc/auth_bloc.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/constants/app_constants.dart';
-import '../../../../core/services/image_upload_service.dart';
+import '../../../../core/widgets/app_scaffold.dart';
 
 /// Página de registro de nuevo usuario con campos completos de conductor
 class RegisterPage extends StatefulWidget {
@@ -42,13 +40,6 @@ class _RegisterPageState extends State<RegisterPage> {
   /// Si es null, el usuario aún no validó su código y no se le permite registrarse.
   Map<String, dynamic>? _validatedAssociation;
   bool _validatingCode = false;
-
-  // Fotos
-  File? _fotoVehiculo;
-  File? _fotoLicenciaFrontal;
-  File? _fotoLicenciaTrasera;
-
-  final _imageService = ImageUploadService();
 
   @override
   void dispose() {
@@ -118,47 +109,6 @@ class _RegisterPageState extends State<RegisterPage> {
     }
   }
 
-  Future<void> _pickImage(String tipo) async {
-    final source = await showModalBottomSheet<ImageSource>(
-      context: context,
-      builder: (ctx) => SafeArea(
-        child: Wrap(
-          children: [
-            ListTile(
-              leading: const Icon(Icons.camera_alt, color: AppTheme.primaryColor),
-              title: const Text('Cámara'),
-              onTap: () => Navigator.pop(ctx, ImageSource.camera),
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_library, color: AppTheme.primaryColor),
-              title: const Text('Galería'),
-              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
-            ),
-          ],
-        ),
-      ),
-    );
-
-    if (source == null) return;
-
-    final file = await _imageService.pickImage(source: source);
-    if (file != null) {
-      setState(() {
-        switch (tipo) {
-          case 'vehiculo':
-            _fotoVehiculo = file;
-            break;
-          case 'licencia_frontal':
-            _fotoLicenciaFrontal = file;
-            break;
-          case 'licencia_trasera':
-            _fotoLicenciaTrasera = file;
-            break;
-        }
-      });
-    }
-  }
-
   Future<void> _submitForm() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -221,10 +171,10 @@ class _RegisterPageState extends State<RegisterPage> {
 
   @override
   Widget build(BuildContext context) {
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Crear Cuenta'),
-      ),
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    return AppScaffold(
+      title: 'Crear Cuenta',
       body: BlocListener<AuthBloc, AuthState>(
         listener: (context, state) {
           if (state is AuthError) {
@@ -235,43 +185,42 @@ class _RegisterPageState extends State<RegisterPage> {
           }
         },
         child: SingleChildScrollView(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(AppSpacing.xl),
           child: Form(
             key: _formKey,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 // Icono
-                const CircleAvatar(
+                CircleAvatar(
                   radius: 40,
-                  backgroundColor: AppTheme.primaryColor,
+                  backgroundColor: colorScheme.primary,
                   child: Icon(
                     Icons.person_add,
                     size: 40,
-                    color: AppTheme.secondaryColor,
+                    color: colorScheme.secondary,
                   ),
                 ),
-                const SizedBox(height: 8),
-                const Text(
+                const SizedBox(height: AppSpacing.sm),
+                Text(
                   'Registro de Conductor / Operadora',
                   textAlign: TextAlign.center,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w600,
-                    color: AppTheme.primaryColor,
+                  style: textTheme.titleMedium?.copyWith(
+                    color: colorScheme.secondary,
                   ),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: AppSpacing.xl),
 
                 // ============ SECCIÓN: ASOCIACIÓN ============
-                _buildSectionHeader('Tu Asociación'),
-                const SizedBox(height: 8),
-                const Text(
+                _buildSectionHeader(context, 'Tu Asociación'),
+                const SizedBox(height: AppSpacing.sm),
+                Text(
                   'Pídele a tu administrador el código de la asociación '
                   '(ej. JIPI, ROLD).',
-                  style: TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                  style: textTheme.bodySmall
+                      ?.copyWith(color: AppTheme.textSecondary),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -308,11 +257,12 @@ class _RegisterPageState extends State<RegisterPage> {
                               onPressed:
                                   _validatingCode ? null : _verifyAssociationCode,
                               child: _validatingCode
-                                  ? const SizedBox(
+                                  ? SizedBox(
                                       width: 18,
                                       height: 18,
                                       child: CircularProgressIndicator(
-                                          strokeWidth: 2, color: Colors.white),
+                                          strokeWidth: 2,
+                                          color: colorScheme.onPrimary),
                                     )
                                   : const Text('Verificar'),
                             )
@@ -330,10 +280,10 @@ class _RegisterPageState extends State<RegisterPage> {
                   ],
                 ),
                 if (_validatedAssociation != null) ...[
-                  const SizedBox(height: 12),
+                  const SizedBox(height: AppSpacing.md),
                   Container(
                     width: double.infinity,
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(AppSpacing.md),
                     decoration: BoxDecoration(
                       color: AppTheme.successColor.withValues(alpha: 0.1),
                       borderRadius: BorderRadius.circular(8),
@@ -344,29 +294,26 @@ class _RegisterPageState extends State<RegisterPage> {
                       children: [
                         const Icon(Icons.check_circle,
                             color: AppTheme.successColor),
-                        const SizedBox(width: 12),
+                        const SizedBox(width: AppSpacing.md),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
                                 _validatedAssociation!['name'] ?? '',
-                                style: const TextStyle(
-                                    fontWeight: FontWeight.bold),
+                                style: textTheme.titleMedium,
                               ),
                               Text(
                                 '${_validatedAssociation!['city'] ?? ''} · '
                                 'código ${_validatedAssociation!['code'] ?? ''}',
-                                style: const TextStyle(
-                                    fontSize: 12,
-                                    color: AppTheme.textSecondary),
+                                style: textTheme.bodySmall
+                                    ?.copyWith(color: AppTheme.textSecondary),
                               ),
-                              const SizedBox(height: 4),
-                              const Text(
+                              const SizedBox(height: AppSpacing.xs),
+                              Text(
                                 'Tu cuenta quedará pendiente hasta que el '
                                 'administrador la apruebe.',
-                                style: TextStyle(
-                                    fontSize: 11,
+                                style: textTheme.labelSmall?.copyWith(
                                     fontStyle: FontStyle.italic,
                                     color: AppTheme.textSecondary),
                               ),
@@ -377,11 +324,11 @@ class _RegisterPageState extends State<RegisterPage> {
                     ),
                   ),
                 ],
-                const SizedBox(height: 24),
+                const SizedBox(height: AppSpacing.xl),
 
                 // ============ SECCIÓN: DATOS PERSONALES ============
-                _buildSectionHeader('Datos Personales'),
-                const SizedBox(height: 12),
+                _buildSectionHeader(context, 'Datos Personales'),
+                const SizedBox(height: AppSpacing.md),
 
                 // Nombres completos
                 TextFormField(
@@ -398,7 +345,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: AppSpacing.lg),
 
                 // Apellidos
                 TextFormField(
@@ -415,7 +362,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: AppSpacing.lg),
 
                 // Cédula
                 TextFormField(
@@ -437,7 +384,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: AppSpacing.lg),
 
                 // Email
                 TextFormField(
@@ -457,7 +404,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: AppSpacing.lg),
 
                 // Teléfono
                 TextFormField(
@@ -476,11 +423,11 @@ class _RegisterPageState extends State<RegisterPage> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: AppSpacing.lg),
 
                 // Rol
                 DropdownButtonFormField<String>(
-                  value: _selectedRole,
+                  initialValue: _selectedRole,
                   decoration: const InputDecoration(
                     labelText: 'Tipo de cuenta *',
                     prefixIcon: Icon(Icons.work_outlined),
@@ -507,23 +454,20 @@ class _RegisterPageState extends State<RegisterPage> {
                           _codigoCooperativaController.clear();
                           _placaController.clear();
                           _numeroVehiculoController.clear();
-                          _fotoVehiculo = null;
-                          _fotoLicenciaFrontal = null;
-                          _fotoLicenciaTrasera = null;
                         }
                       });
                     }
                   },
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: AppSpacing.xl),
 
                 // Las secciones de Cooperativa, Vehículo y Fotos solo
                 // aplican a conductores. Las operadoras no manejan
                 // vehículo, así que se ocultan completamente.
                 if (_selectedRole == AppConstants.roleDriver) ...[
                 // ============ SECCIÓN: DATOS DE COOPERATIVA ============
-                _buildSectionHeader('Datos de Cooperativa y Vehículo'),
-                const SizedBox(height: 12),
+                _buildSectionHeader(context, 'Datos de Cooperativa y Vehículo'),
+                const SizedBox(height: AppSpacing.md),
 
                 // Cooperativa
                 TextFormField(
@@ -541,7 +485,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: AppSpacing.lg),
 
                 // Código de cooperativa
                 TextFormField(
@@ -559,7 +503,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: AppSpacing.lg),
 
                 // Placa
                 TextFormField(
@@ -577,7 +521,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: AppSpacing.lg),
 
                 // Número de vehículo en la red de Jipijapa
                 TextFormField(
@@ -595,39 +539,40 @@ class _RegisterPageState extends State<RegisterPage> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: AppSpacing.xl),
 
                 // Aviso: las fotos del vehículo y licencia se piden DESPUÉS
                 // de crear la cuenta, en la pantalla "Completar registro".
                 Container(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(AppSpacing.md),
                   decoration: BoxDecoration(
-                    color: Colors.blue.shade50,
+                    color: AppTheme.infoColor.withValues(alpha: 0.10),
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.blue.shade200),
+                    border: Border.all(
+                        color: AppTheme.infoColor.withValues(alpha: 0.35)),
                   ),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Icon(Icons.info_outline,
-                          color: Colors.blue.shade700, size: 20),
-                      const SizedBox(width: 8),
-                      const Expanded(
+                      const Icon(Icons.info_outline,
+                          color: AppTheme.infoColor, size: 20),
+                      const SizedBox(width: AppSpacing.sm),
+                      Expanded(
                         child: Text(
                           'Después de crear tu cuenta te pediremos las fotos '
                           'del vehículo y de tu licencia.',
-                          style: TextStyle(fontSize: 12),
+                          style: textTheme.bodySmall,
                         ),
                       ),
                     ],
                   ),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: AppSpacing.xl),
                 ], // fin de la sección solo para conductores
 
                 // ============ SECCIÓN: CONTRASEÑA ============
-                _buildSectionHeader('Credenciales de Acceso'),
-                const SizedBox(height: 12),
+                _buildSectionHeader(context, 'Credenciales de Acceso'),
+                const SizedBox(height: AppSpacing.md),
 
                 // Contraseña
                 TextFormField(
@@ -659,7 +604,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 14),
+                const SizedBox(height: AppSpacing.lg),
 
                 // Confirmar contraseña
                 TextFormField(
@@ -688,7 +633,7 @@ class _RegisterPageState extends State<RegisterPage> {
                     return null;
                   },
                 ),
-                const SizedBox(height: 32),
+                const SizedBox(height: AppSpacing.xxl),
 
                 // ============ BOTÓN CREAR CUENTA ============
                 BlocBuilder<AuthBloc, AuthState>(
@@ -705,18 +650,18 @@ class _RegisterPageState extends State<RegisterPage> {
                             ? Row(
                                 mainAxisAlignment: MainAxisAlignment.center,
                                 children: [
-                                  const SizedBox(
+                                  SizedBox(
                                     height: 22,
                                     width: 22,
                                     child: CircularProgressIndicator(
                                       strokeWidth: 2,
-                                      color: Colors.black,
+                                      color: colorScheme.onPrimary,
                                     ),
                                   ),
-                                  const SizedBox(width: 12),
+                                  const SizedBox(width: AppSpacing.md),
                                   Text(
                                     _isUploading ? 'Subiendo fotos...' : 'Creando cuenta...',
-                                    style: const TextStyle(fontSize: 14),
+                                    style: textTheme.bodyMedium,
                                   ),
                                 ],
                               )
@@ -725,24 +670,24 @@ class _RegisterPageState extends State<RegisterPage> {
                     );
                   },
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: AppSpacing.lg),
                 Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
                     const Text('¿Ya tienes cuenta? '),
                     TextButton(
                       onPressed: () => context.pop(),
-                      child: const Text(
+                      child: Text(
                         'Iniciar sesión',
                         style: TextStyle(
                           fontWeight: FontWeight.bold,
-                          color: AppTheme.secondaryColor,
+                          color: colorScheme.secondary,
                         ),
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: AppSpacing.xl),
               ],
             ),
           ),
@@ -751,129 +696,24 @@ class _RegisterPageState extends State<RegisterPage> {
     );
   }
 
-  Widget _buildSectionHeader(String title) {
+  Widget _buildSectionHeader(BuildContext context, String title) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: AppTheme.primaryColor.withValues(alpha: 0.1),
+        color: colorScheme.secondary.withValues(alpha: 0.08),
         borderRadius: BorderRadius.circular(8),
         border: Border(
-          left: BorderSide(color: AppTheme.primaryColor, width: 3),
+          left: BorderSide(color: colorScheme.secondary, width: 3),
         ),
       ),
       child: Text(
         title,
-        style: const TextStyle(
-          fontSize: 15,
+        style: textTheme.titleMedium?.copyWith(
           fontWeight: FontWeight.bold,
-          color: AppTheme.primaryColor,
+          color: colorScheme.secondary,
         ),
-      ),
-    );
-  }
-
-  Widget _buildPhotoPicker({
-    required String label,
-    required IconData icon,
-    required File? file,
-    required VoidCallback onTap,
-  }) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        height: file != null ? 200 : 100,
-        decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: file != null ? AppTheme.successColor : Colors.grey[400]!,
-            width: file != null ? 2 : 1,
-          ),
-          color: file != null ? null : Colors.grey[50],
-        ),
-        child: file != null
-            ? Stack(
-                fit: StackFit.expand,
-                children: [
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(11),
-                    child: Image.file(
-                      file,
-                      fit: BoxFit.cover,
-                    ),
-                  ),
-                  Positioned(
-                    top: 8,
-                    right: 8,
-                    child: Container(
-                      padding: const EdgeInsets.all(4),
-                      decoration: BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.circular(20),
-                      ),
-                      child: const Icon(
-                        Icons.check_circle,
-                        color: Colors.greenAccent,
-                        size: 22,
-                      ),
-                    ),
-                  ),
-                  Positioned(
-                    bottom: 0,
-                    left: 0,
-                    right: 0,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(
-                          vertical: 6, horizontal: 12),
-                      decoration: const BoxDecoration(
-                        color: Colors.black54,
-                        borderRadius: BorderRadius.only(
-                          bottomLeft: Radius.circular(11),
-                          bottomRight: Radius.circular(11),
-                        ),
-                      ),
-                      child: Text(
-                        '$label  ✓  Toca para cambiar',
-                        style: const TextStyle(
-                          color: Colors.white,
-                          fontSize: 12,
-                        ),
-                      ),
-                    ),
-                  ),
-                ],
-              )
-            : Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(icon, size: 32, color: Colors.grey[500]),
-                  const SizedBox(width: 12),
-                  Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        label,
-                        style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: Colors.grey[700],
-                        ),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        'Toca para tomar o seleccionar foto',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.grey[500],
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(width: 12),
-                  Icon(Icons.add_a_photo, size: 24, color: AppTheme.primaryColor),
-                ],
-              ),
       ),
     );
   }

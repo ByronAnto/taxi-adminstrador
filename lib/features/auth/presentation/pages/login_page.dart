@@ -28,6 +28,8 @@ class _LoginPageState extends State<LoginPage> {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
     return Scaffold(
       body: BlocListener<AuthBloc, AuthState>(
         listener: (context, state) {
@@ -59,34 +61,34 @@ class _LoginPageState extends State<LoginPage> {
                   width: 120,
                   height: 120,
                   decoration: BoxDecoration(
-                    color: AppTheme.primaryColor,
+                    color: colorScheme.primary,
                     borderRadius: BorderRadius.circular(30),
                     boxShadow: [
                       BoxShadow(
-                        color: AppTheme.primaryColor.withValues(alpha: 0.3),
+                        color: colorScheme.primary.withValues(alpha: 0.3),
                         blurRadius: 20,
                         offset: const Offset(0, 10),
                       ),
                     ],
                   ),
-                  child: const Icon(
+                  child: Icon(
                     Icons.local_taxi,
                     size: 60,
-                    color: AppTheme.secondaryColor,
+                    color: colorScheme.secondary,
                   ),
                 ),
                 const SizedBox(height: 24),
                 Text(
                   AppConstants.appName,
-                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                  style: textTheme.headlineMedium?.copyWith(
                         fontWeight: FontWeight.bold,
-                        color: AppTheme.secondaryColor,
+                        color: colorScheme.secondary,
                       ),
                 ),
                 const SizedBox(height: 8),
                 Text(
                   'Estación Metro de Quito',
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                  style: textTheme.bodyMedium?.copyWith(
                         color: AppTheme.textSecondary,
                       ),
                 ),
@@ -148,9 +150,9 @@ class _LoginPageState extends State<LoginPage> {
                         alignment: Alignment.centerRight,
                         child: TextButton(
                           onPressed: _showResetPasswordDialog,
-                          child: const Text(
+                          child: Text(
                             '¿Olvidaste tu contraseña?',
-                            style: TextStyle(color: AppTheme.secondaryColor),
+                            style: TextStyle(color: colorScheme.secondary),
                           ),
                         ),
                       ),
@@ -174,12 +176,12 @@ class _LoginPageState extends State<LoginPage> {
                                       }
                                     },
                               child: state is AuthLoading
-                                  ? const SizedBox(
+                                  ? SizedBox(
                                       height: 24,
                                       width: 24,
                                       child: CircularProgressIndicator(
                                         strokeWidth: 2,
-                                        color: Colors.black,
+                                        color: colorScheme.onPrimary,
                                       ),
                                     )
                                   : const Text('INICIAR SESIÓN'),
@@ -196,11 +198,11 @@ class _LoginPageState extends State<LoginPage> {
                             onPressed: () {
                               context.push('/register');
                             },
-                            child: const Text(
+                            child: Text(
                               'Regístrate',
                               style: TextStyle(
                                 fontWeight: FontWeight.bold,
-                                color: AppTheme.secondaryColor,
+                                color: colorScheme.secondary,
                               ),
                             ),
                           ),

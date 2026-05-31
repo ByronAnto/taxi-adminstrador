@@ -3,6 +3,8 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:go_router/go_router.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../../../../core/services/radio_power_service.dart';
+import '../../../../core/services/voice/voice_provider_factory.dart';
 import '../../../../core/theme/app_theme.dart';
 
 /// Página de onboarding de permisos estilo inDriver.
@@ -208,6 +210,37 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
 
   void _continue() {
     if (!_requiredGranted) return;
+    _goHome();
+  }
+
+  /// Navega a Home y, si el micrófono quedó concedido y el radio está
+  /// encendido, re-inicializa el engine de voz para que tome el mic recién
+  /// otorgado.
+  ///
+  /// MOTIVO: en instalación nueva los permisos se piden de cero. El radio se
+  /// restaura al autenticarse (main.dart) y puede UNIRSE al canal ANTES de que
+  /// el usuario conceda el micrófono acá → el provider queda "unido SIN mic"
+  /// (`_joinedWithoutMic=true`). El recovery `ensureMicReady()` solo se
+  /// disparaba en `AppLifecycleState.resumed`, que NO ocurre al volver del
+  /// onboarding a Home por navegación in-app → el PTT quedaba muerto hasta
+  /// cerrar/reabrir la app o togglear el radio. Disparándolo aquí, al COMPLETAR
+  /// el onboarding, el engine queda mic-ready sin que el usuario tenga que
+  /// reiniciar nada.
+  ///
+  /// `ensureMicReady()` es idempotente y conservador: es no-op rápido si el
+  /// engine ya tiene mic (`_joinedWithoutMic=false`) o si el permiso aún no
+  /// está concedido, y NO deja el mic capturando en reposo (re-publica el track
+  /// muteado). Solo lo llamamos si el radio está ON; si está OFF, no hay engine
+  /// que arreglar y el mic queda libre para otras apps.
+  void _goHome() {
+    if (_states[_PermId.microphone] == _PermState.granted &&
+        RadioPowerService.instance.isOn) {
+      // Fire-and-forget: no bloquea la navegación. El factory devuelve el
+      // provider activo (Agora/LiveKit); en Agora ensureMicReady es no-op.
+      VoiceProviderFactory.current.ensureMicReady().catchError((Object e) {
+        debugPrint('PermissionsOnboarding: ensureMicReady falló: $e');
+      });
+    }
     context.go('/home');
   }
 
@@ -267,8 +300,10 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
       ),
     ];
 
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
     return Scaffold(
-      backgroundColor: AppTheme.backgroundColor,
+      backgroundColor: AppTheme.neutralBg,
       body: SafeArea(
         child: Column(
           children: [
@@ -279,8 +314,8 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
               decoration: BoxDecoration(
                 gradient: LinearGradient(
                   colors: [
-                    AppTheme.primaryColor,
-                    AppTheme.primaryColor.withValues(alpha: 0.8),
+                    colorScheme.primary,
+                    colorScheme.primary.withValues(alpha: 0.8),
                   ],
                   begin: Alignment.topLeft,
                   end: Alignment.bottomRight,
@@ -289,25 +324,21 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  const Icon(Icons.verified_user,
-                      size: 40, color: AppTheme.onPrimaryColor),
-                  const SizedBox(height: 12),
-                  const Text(
+                  Icon(Icons.verified_user,
+                      size: 40, color: colorScheme.onPrimary),
+                  const SizedBox(height: AppSpacing.md),
+                  Text(
                     'Permisos necesarios',
-                    style: TextStyle(
-                      fontSize: 22,
-                      fontWeight: FontWeight.w800,
-                      color: AppTheme.onPrimaryColor,
-                    ),
+                    style: textTheme.headlineMedium
+                        ?.copyWith(color: colorScheme.onPrimary),
                   ),
                   const SizedBox(height: 6),
                   Text(
                     'Para que el radio y la ubicación funcionen, concede los '
                     'permisos de abajo. Los marcados como requeridos son '
                     'indispensables.',
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: AppTheme.onPrimaryColor.withValues(alpha: 0.8),
+                    style: textTheme.bodyMedium?.copyWith(
+                      color: colorScheme.onPrimary.withValues(alpha: 0.85),
                     ),
                   ),
                 ],
@@ -331,6 +362,7 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
   }
 
   Widget _buildFooter() {
+    final colorScheme = Theme.of(context).colorScheme;
     final canContinue = _requiredGranted;
     // La batería es OPCIONAL para el gate (no bloquea), pero sin ella el Doze de
     // Android mata el GPS y el radio en segundo plano → el conductor desaparece
@@ -361,8 +393,8 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
               child: ElevatedButton(
                 onPressed: canContinue ? _continue : null,
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: AppTheme.primaryColor,
-                  foregroundColor: AppTheme.onPrimaryColor,
+                  backgroundColor: colorScheme.primary,
+                  foregroundColor: colorScheme.onPrimary,
                   padding: const EdgeInsets.symmetric(vertical: 16),
                   disabledBackgroundColor: Colors.grey.shade300,
                 ),
@@ -379,7 +411,7 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
             ),
             const SizedBox(height: 4),
             TextButton(
-              onPressed: () => context.go('/home'),
+              onPressed: _goHome,
               child: const Text(
                 'Omitir por ahora',
                 style: TextStyle(color: AppTheme.textSecondary),
@@ -436,12 +468,12 @@ class _PermissionsOnboardingPageState extends State<PermissionsOnboardingPage>
                 const SizedBox(height: 6),
                 GestureDetector(
                   onTap: () => _request(_PermId.battery),
-                  child: const Text(
+                  child: Text(
                     'Conceder ahora',
                     style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w800,
-                      color: AppTheme.primaryColor,
+                      color: Theme.of(context).colorScheme.secondary,
                       decoration: TextDecoration.underline,
                     ),
                   ),
@@ -476,6 +508,7 @@ class _PermissionCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
     final granted = state == _PermState.granted;
     final permanentlyDenied = state == _PermState.permanentlyDenied;
 
@@ -492,13 +525,13 @@ class _PermissionCard extends StatelessWidget {
               width: 46,
               height: 46,
               decoration: BoxDecoration(
-                color: (granted ? AppTheme.successColor : AppTheme.secondaryColor)
+                color: (granted ? AppTheme.successColor : colorScheme.secondary)
                     .withValues(alpha: 0.12),
                 borderRadius: BorderRadius.circular(12),
               ),
               child: Icon(
                 icon,
-                color: granted ? AppTheme.successColor : AppTheme.secondaryColor,
+                color: granted ? AppTheme.successColor : colorScheme.secondary,
                 size: 24,
               ),
             ),
@@ -554,8 +587,8 @@ class _PermissionCard extends StatelessWidget {
                 child: ElevatedButton(
                   onPressed: onRequest,
                   style: ElevatedButton.styleFrom(
-                    backgroundColor: AppTheme.primaryColor,
-                    foregroundColor: AppTheme.onPrimaryColor,
+                    backgroundColor: colorScheme.primary,
+                    foregroundColor: colorScheme.onPrimary,
                     padding: const EdgeInsets.symmetric(
                         horizontal: 12, vertical: 10),
                     textStyle: const TextStyle(

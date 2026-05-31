@@ -11,10 +11,18 @@ import 'voice/voice_provider_factory.dart';
 ///
 /// Comunica con el nativo Android OverlayPttService vía MethodChannel.
 /// Estrategia "Canal Persistente" — PTT instantáneo (0ms):
-/// - Al activar overlay: init Agora + join canal + mic OFF (escuchando)
+/// - Al activar overlay: init + join canal + mic OFF (escuchando)
 /// - Al presionar PTT: solo unmuteMic → instantáneo
 /// - Al soltar PTT: solo muteMic → instantáneo
-/// - Al desactivar overlay: destroyEngine → mic 100% libre
+/// - Al desactivar overlay:
+///     • Provider con conexión persistente (LiveKit): NO destruye el engine —
+///       reusa la Room ya conectada (el radio de la app sigue vivo). El mic
+///       queda muteado (hardware libre en reposo). overlayActivate también
+///       reusa la conexión existente → activación instantánea sin rejoin.
+///     • Provider efímero (Agora): destroyEngine → mic 100% libre, y al
+///       reactivar se reúne al canal desde cero (comportamiento clásico).
+///   La distinción la hace `VoiceProvider.hasPersistentConnection`; la lógica
+///   concreta vive en `overlayActivate`/`overlayDeactivate` de cada provider.
 class OverlayPttService {
   OverlayPttService._();
   static final OverlayPttService instance = OverlayPttService._();
@@ -88,10 +96,12 @@ class OverlayPttService {
   // ─────────────────── Start / Stop ───────────────────
 
   /// Inicia el botón PTT flotante sobre todas las apps.
-  /// Conecta Agora al canal de forma persistente (escuchando, mic OFF).
+  /// Conecta el provider al canal de forma persistente (escuchando, mic OFF).
+  /// Para providers con conexión persistente (LiveKit), `overlayActivate`
+  /// reusa la Room ya conectada → instantáneo, sin rejoin.
   ///
   /// IMPORTANTE: hacemos overlayActivate ANTES de mostrar el botón nativo.
-  /// Si Agora falla al unirse al canal, NO mostramos el botón flotante
+  /// Si el provider falla al unirse al canal, NO mostramos el botón flotante
   /// (antes lo dejábamos visible pero inerte → Byron reportó "el botón
   /// aparece flotante pero al presionar no envía audio").
   Future<bool> start(String channelId) async {
@@ -108,7 +118,8 @@ class OverlayPttService {
       // Inmediatamente verde — ya está conectado al canal.
       await _updateButtonState('idle');
 
-      _log('Overlay iniciado + Agora conectado a canal: $channelId');
+      _log('Overlay iniciado + canal conectado: $channelId '
+          '(persistente=${_agoraService.hasPersistentConnection})');
       return true;
     } catch (e) {
       _log('Error iniciando overlay: $e');
@@ -127,20 +138,23 @@ class OverlayPttService {
     }
   }
 
-  /// Detiene el botón PTT flotante y destruye engine Agora.
+  /// Detiene el botón PTT flotante y desactiva el modo overlay del provider.
+  /// Para Agora destruye el engine (mic 100% libre); para LiveKit reusa la
+  /// Room (overlayDeactivate solo mutea el mic, el radio de la app sigue).
   Future<void> stop() async {
     try {
       await _channel.invokeMethod('stopOverlay');
     } catch (e) {
       _log('Error deteniendo overlay: $e');
     }
-    // Destruir engine → mic 100% libre a nivel del SO
+    // overlayDeactivate respeta hasPersistentConnection: Agora=destroyEngine
+    // (mic libre), LiveKit=mantener Room + mic OFF.
     await _agoraService.overlayDeactivate();
     _isActive = false;
     _activeChannelId = null;
     _isPttActive = false;
     onStateChanged?.call();
-    _log('Overlay detenido + Agora destruido');
+    _log('Overlay detenido (persistente=${_agoraService.hasPersistentConnection})');
   }
 
   // ─────────────────── PTT Handlers ───────────────────
@@ -207,15 +221,16 @@ class OverlayPttService {
   }
 
   /// Maneja el cierre del overlay (desde nativo, ej: notificación "Cerrar").
-  /// Destruye engine completamente → mic 100% libre.
+  /// Desactiva el modo overlay del provider (Agora: destruye engine → mic
+  /// libre; LiveKit: mantiene Room + mic OFF). onStateChanged sincroniza la
+  /// UI Dart para que NO quede el botón verde visible con estado "cerrado".
   void _handleOverlayClosed() {
     _isActive = false;
     _activeChannelId = null;
     _isPttActive = false;
-    // Destruir engine → mic libre a nivel del SO
     _agoraService.overlayDeactivate().catchError((_) {});
     onStateChanged?.call();
-    _log('Overlay cerrado — engine destruido, mic libre');
+    _log('Overlay cerrado — modo overlay desactivado en provider');
   }
 
   // ─────────────────── UI Bridge ───────────────────

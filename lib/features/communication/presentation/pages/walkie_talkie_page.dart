@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:uuid/uuid.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../../core/services/agora_service.dart';
 import '../../../../core/services/voice/voice_provider.dart';
 import '../../../../core/services/voice/voice_provider_factory.dart';
@@ -640,7 +641,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                 content: Text(
                   '${state.pttSpeakerName ?? "Alguien"} está hablando. Espera tu turno.',
                 ),
-                backgroundColor: Colors.orange,
+                backgroundColor: AppTheme.warningColor,
                 duration: const Duration(seconds: 2),
               ),
             );
@@ -749,22 +750,13 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       },
       builder: (context, state) {
         if (state is CommunicationLoading) {
-          return const Center(child: CircularProgressIndicator());
+          return const LoadingState(message: 'Conectando al radio...');
         }
 
         if (state is! CommunicationLoaded) {
-          return Center(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Icon(Icons.wifi_off, size: 64, color: Colors.grey[300]),
-                const SizedBox(height: 16),
-                Text(
-                  'Conectando al radio...',
-                  style: TextStyle(color: Colors.grey[500], fontSize: 16),
-                ),
-              ],
-            ),
+          return const EmptyState(
+            icon: Icons.wifi_off,
+            title: 'Conectando al radio...',
           );
         }
 
@@ -821,17 +813,20 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     final hasChannel = state.activeChannelId != null;
     final channelName = state.activeChannel?.name;
 
+    final primary = Theme.of(context).colorScheme.primary;
+    final textTheme = Theme.of(context).textTheme;
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.lg, vertical: AppSpacing.md),
       decoration: BoxDecoration(
         color: isOn
-            ? AppTheme.primaryColor.withValues(alpha: 0.08)
+            ? primary.withValues(alpha: 0.08)
             : Colors.grey.shade100,
         border: Border(
           bottom: BorderSide(
             color: isOn
-                ? AppTheme.primaryColor.withValues(alpha: 0.3)
+                ? primary.withValues(alpha: 0.3)
                 : Colors.grey.shade300,
             width: 1,
           ),
@@ -841,10 +836,10 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         children: [
           Icon(
             isOn ? Icons.radio : Icons.power_settings_new,
-            color: isOn ? AppTheme.primaryColor : Colors.grey.shade500,
+            color: isOn ? primary : Colors.grey.shade500,
             size: 28,
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: AppSpacing.md),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -852,10 +847,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
               children: [
                 Text(
                   isOn ? 'Radio encendido' : 'Radio apagado',
-                  style: TextStyle(
+                  style: textTheme.bodyLarge?.copyWith(
                     fontWeight: FontWeight.w700,
-                    fontSize: 15,
-                    color: isOn ? AppTheme.primaryColor : Colors.grey.shade700,
+                    color: isOn ? primary : Colors.grey.shade700,
                   ),
                 ),
                 const SizedBox(height: 2),
@@ -865,8 +859,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                           ? 'Conectado a: ${channelName ?? "..."}'
                           : 'Selecciona un canal abajo')
                       : 'Micrófono libre — otras apps pueden usarlo',
-                  style: TextStyle(
-                    fontSize: 12,
+                  style: textTheme.bodySmall?.copyWith(
                     color: Colors.grey.shade600,
                   ),
                 ),
@@ -877,13 +870,13 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             tooltip: 'Volumen del radio',
             icon: Icon(
               Icons.volume_up,
-              color: isOn ? AppTheme.primaryColor : Colors.grey.shade500,
+              color: isOn ? primary : Colors.grey.shade500,
             ),
             onPressed: _showVolumeDialog,
           ),
           Switch.adaptive(
             value: isOn,
-            activeThumbColor: AppTheme.primaryColor,
+            activeThumbColor: primary,
             onChanged: _isOffline && !isOn
                 ? null
                 : (v) async {
@@ -942,12 +935,14 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                         AgoraService.playbackVolumeMin) *
                     100)
                 .round();
+            final primary = Theme.of(ctx).colorScheme.primary;
+            final textTheme = Theme.of(ctx).textTheme;
             return AlertDialog(
-              title: const Row(
+              title: Row(
                 children: [
-                  Icon(Icons.volume_up, color: AppTheme.primaryColor),
-                  SizedBox(width: 8),
-                  Text('Volumen del radio'),
+                  Icon(Icons.volume_up, color: primary),
+                  const SizedBox(width: AppSpacing.sm),
+                  const Text('Volumen del radio'),
                 ],
               ),
               content: Column(
@@ -956,12 +951,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                 children: [
                   Text(
                     'Ganancia: ${(current / 100).toStringAsFixed(1)}x  ·  $pct%',
-                    style: const TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 16,
-                    ),
+                    style: textTheme.titleMedium,
                   ),
-                  const SizedBox(height: 4),
+                  const SizedBox(height: AppSpacing.xs),
                   Text(
                     current <= 100
                         ? 'Volumen normal'
@@ -970,12 +962,11 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                             : current <= 300
                                 ? 'Amplificado fuerte'
                                 : 'Amplificado al máximo',
-                    style: TextStyle(
-                      fontSize: 12,
+                    style: textTheme.bodySmall?.copyWith(
                       color: Colors.grey.shade600,
                     ),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: AppSpacing.md),
                   Slider(
                     value: current.toDouble(),
                     min: AgoraService.playbackVolumeMin.toDouble(),
@@ -984,7 +975,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                             AgoraService.playbackVolumeMin) ~/
                         10,
                     label: '${current ~/ 1}',
-                    activeColor: AppTheme.primaryColor,
+                    activeColor: primary,
                     onChanged: (v) {
                       setLocal(() => current = v.round());
                       // Aplicar EN VIVO: si alguien está hablando, el cambio
@@ -996,20 +987,19 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
                       Text('1x',
-                          style: TextStyle(
-                              fontSize: 11, color: Colors.grey.shade600)),
+                          style: textTheme.labelSmall
+                              ?.copyWith(color: Colors.grey.shade600)),
                       Text('4x',
-                          style: TextStyle(
-                              fontSize: 11, color: Colors.grey.shade600)),
+                          style: textTheme.labelSmall
+                              ?.copyWith(color: Colors.grey.shade600)),
                     ],
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: AppSpacing.sm),
                   Text(
                     'Sube el volumen del altavoz del celular al máximo '
                     'antes de amplificar acá. Valores >300 pueden saturar '
                     'la voz en bocinas pequeñas.',
-                    style: TextStyle(
-                      fontSize: 11,
+                    style: textTheme.labelSmall?.copyWith(
                       color: Colors.grey.shade600,
                       fontStyle: FontStyle.italic,
                     ),
@@ -1055,12 +1045,13 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       onTap: _requestMicPermission,
       child: Container(
         width: double.infinity,
-        padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
-        color: Colors.red.shade800,
+        padding: const EdgeInsets.symmetric(
+            vertical: AppSpacing.sm, horizontal: AppSpacing.lg),
+        color: AppTheme.errorColor,
         child: Row(
           children: [
             const Icon(Icons.mic_off_rounded, color: Colors.white, size: 20),
-            const SizedBox(width: 10),
+            const SizedBox(width: AppSpacing.sm),
             const Expanded(
               child: Text(
                 'Falta permiso de micrófono · toca para conceder',
@@ -1090,14 +1081,15 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
 
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(vertical: 10, horizontal: 16),
+      padding: const EdgeInsets.symmetric(
+          vertical: AppSpacing.sm, horizontal: AppSpacing.lg),
       color: _isDriverOffline && !noInternet
-          ? Colors.orange.shade800
-          : Colors.red.shade800,
+          ? AppTheme.warningColor
+          : AppTheme.errorColor,
       child: Row(
         children: [
           Icon(icon, color: Colors.white, size: 20),
-          const SizedBox(width: 10),
+          const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Text(
               message,
@@ -1177,16 +1169,17 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             user.role == AppConstants.roleOperator);
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(vertical: 8, horizontal: 16),
-      color: isMe ? AppTheme.successColor : Colors.orange.shade700,
+      padding: const EdgeInsets.symmetric(
+          vertical: AppSpacing.sm, horizontal: AppSpacing.lg),
+      color: isMe ? AppTheme.successColor : AppTheme.warningColor,
       child: Row(
         children: [
-          Icon(
+          const Icon(
             Icons.mic,
             color: Colors.white,
             size: 20,
           ),
-          const SizedBox(width: 8),
+          const SizedBox(width: AppSpacing.sm),
           Expanded(
             child: Text(
               isMe
@@ -1287,20 +1280,20 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     if (!canManage && state.channels.isNotEmpty && visibleChannels.isEmpty) {
       return Container(
         height: 56,
-        color: Colors.amber.shade50,
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        color: AppTheme.warningColor.withValues(alpha: 0.12),
+        padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md, vertical: AppSpacing.xs + 2),
         child: Row(
           children: [
-            Icon(Icons.info_outline,
-                color: Colors.amber.shade800, size: 20),
-            const SizedBox(width: 8),
+            const Icon(Icons.info_outline,
+                color: AppTheme.warningColor, size: 20),
+            const SizedBox(width: AppSpacing.sm),
             Expanded(
               child: Text(
                 'No tienes canales asignados. Pídele al admin que te '
                 'agregue al canal de la cooperativa.',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: Colors.amber.shade900,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                  color: AppTheme.warningColor,
                   fontWeight: FontWeight.w600,
                 ),
               ),
@@ -1349,30 +1342,28 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     final itemCount = visibleChannels.length + (canManage ? 1 : 0);
     final hasMultiple = visibleChannels.length > 1;
 
+    final primary = Theme.of(context).colorScheme.primary;
     return Container(
       height: 56,
-      color: AppTheme.secondaryColor,
+      color: Theme.of(context).colorScheme.secondary,
       child: ListView.builder(
         scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+        padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.sm, vertical: AppSpacing.sm),
         itemCount: itemCount,
         itemBuilder: (context, index) {
           if (canManage && index == visibleChannels.length) {
             return Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 4),
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.xs),
               child: ActionChip(
-                avatar: Icon(Icons.add, size: 18,
-                    color: AppTheme.primaryColor),
+                avatar: Icon(Icons.add, size: 18, color: primary),
                 label: Text(
                   'Nuevo',
-                  style: TextStyle(
-                      color: AppTheme.primaryColor,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: primary, fontWeight: FontWeight.w600),
                 ),
                 backgroundColor: Colors.white,
-                side: BorderSide(
-                    color: AppTheme.primaryColor.withValues(alpha: 0.4)),
+                side: BorderSide(color: primary.withValues(alpha: 0.4)),
                 onPressed: () => _showCreateChannelDialog(),
               ),
             );
@@ -1440,9 +1431,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                             child: Icon(
                               Icons.settings,
                               size: 14,
-                              color: isSelected
-                                  ? Colors.white
-                                  : AppTheme.primaryColor,
+                              color: isSelected ? Colors.white : primary,
                             ),
                           ),
                         ),
@@ -1450,7 +1439,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                     ],
                   ),
                   selected: isSelected,
-                  selectedColor: AppTheme.primaryColor,
+                  selectedColor: primary,
                   onSelected: (selected) {
                     context.read<CommunicationBloc>().add(
                           ChannelSelected(selected ? channel.uid : null),
@@ -1486,9 +1475,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         !_overlayService.isActive;
 
     return Container(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(AppSpacing.lg),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: Theme.of(context).colorScheme.surface,
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.1),
@@ -1655,7 +1644,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                 },
                 icon: Icon(
                   _isMuted ? Icons.volume_off : Icons.volume_up,
-                  color: _isMuted ? AppTheme.errorColor : AppTheme.secondaryColor,
+                  color: _isMuted
+                      ? AppTheme.errorColor
+                      : Theme.of(context).colorScheme.secondary,
                 ),
                 iconSize: 28,
               ),
@@ -1671,7 +1662,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                   color: _overlayService.isActive
                       ? AppTheme.errorColor
                       : hasChannel
-                          ? AppTheme.secondaryColor
+                          ? Theme.of(context).colorScheme.secondary
                           : Colors.grey,
                 ),
                 iconSize: 28,
@@ -1710,7 +1701,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
                   icon: Icon(
                     Icons.assignment_ind,
                     color: !_isOffline
-                        ? AppTheme.primaryColor
+                        ? Theme.of(context).colorScheme.primary
                         : Colors.grey,
                   ),
                   iconSize: 32,
@@ -1727,11 +1718,38 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
 
   // === PTT Actions ===
 
-  /// Activa/desactiva el botón PTT flotante sobre todas las apps.
+  /// Guard anti doble-toque: mientras un toggle de overlay está en curso,
+  /// ignoramos toques subsecuentes. Sin esto, un segundo toque durante el
+  /// delay activaba y luego cerraba el overlay (flip-flop reportado en logs:
+  /// "Overlay iniciado" seguido ~4s después de "Overlay cerrado").
+  bool _overlayBusy = false;
+
+  /// Activa/desactiva el botón PTT flotante (wrapper con debounce).
+  Future<void> _toggleOverlay(CommunicationLoaded state) async {
+    if (_overlayBusy) {
+      debugPrint('[Overlay] toggle ignorado — ya hay uno en curso (debounce)');
+      return;
+    }
+    _overlayBusy = true;
+    try {
+      await _doToggleOverlay(state);
+    } finally {
+      _overlayBusy = false;
+    }
+  }
+
+  /// Cuerpo real del toggle del overlay.
   ///
   /// Con timeout para evitar que la UI quede colgada si stop()/start()
   /// del overlay se traban (typical en Android 14+ con Doze mode).
-  Future<void> _toggleOverlay(CommunicationLoaded state) async {
+  ///
+  /// Reuso de conexión: si el provider mantiene conexión persistente
+  /// (LiveKit, `hasPersistentConnection`), NO destruimos+reunimos el engine
+  /// al activar/desactivar — la Room ya conectada se reusa → activación
+  /// instantánea y el radio de la app sigue vivo al cerrar el overlay. Solo
+  /// los providers efímeros (Agora) hacen el ciclo destroy/rejoin clásico.
+  Future<void> _doToggleOverlay(CommunicationLoaded state) async {
+    final persistent = _voice.hasPersistentConnection;
     if (_overlayService.isActive) {
       // ── Desactivar overlay ──
       // Timeout de 4s — si stop se cuelga, forzamos el flag local para que
@@ -1741,15 +1759,19 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       } catch (e) {
         debugPrint('Overlay stop colgado: $e — forzando reset');
       }
-      // Re-inicializar engine para uso en esta página
-      try {
-        await _voice.initialize();
-        if (state.activeChannelId != null) {
-          _lastAgoraChannelId = state.activeChannelId;
-          await _voice.joinChannel(state.activeChannelId!);
+      // Re-inicializar engine para uso en esta página SOLO si el provider es
+      // efímero (Agora destruyó el engine en stop()). Con conexión persistente
+      // (LiveKit) la Room sigue conectada → no hay nada que reinicializar.
+      if (!persistent) {
+        try {
+          await _voice.initialize();
+          if (state.activeChannelId != null) {
+            _lastAgoraChannelId = state.activeChannelId;
+            await _voice.joinChannel(state.activeChannelId!);
+          }
+        } catch (e) {
+          debugPrint('Error re-init voice tras stop overlay: $e');
         }
-      } catch (e) {
-        debugPrint('Error re-init Agora tras stop overlay: $e');
       }
       if (mounted) setState(() {});
       return;
@@ -1761,7 +1783,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Selecciona un canal primero'),
-            backgroundColor: Colors.orange,
+            backgroundColor: AppTheme.warningColor,
           ),
         );
       }
@@ -1786,11 +1808,16 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
       return;
     }
 
-    // Destruir engine actual (el overlay gestiona su propio ciclo)
-    await _voice.destroyEngine();
-    _lastAgoraChannelId = null;
+    // Destruir engine actual SOLO para providers efímeros (Agora): el overlay
+    // gestiona su propio ciclo y re-une desde cero. Con conexión persistente
+    // (LiveKit) NO destruimos — el overlay reusa la Room ya conectada, lo que
+    // hace la activación instantánea (sin rejoin de ~2s).
+    if (!persistent) {
+      await _voice.destroyEngine();
+      _lastAgoraChannelId = null;
+    }
 
-    // Iniciar overlay (conecta Agora al canal automáticamente)
+    // Iniciar overlay (conecta/reusa el canal automáticamente según provider)
     final started = await _overlayService.start(state.activeChannelId!);
     if (!mounted) return;
     if (started) {
@@ -1799,7 +1826,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           content: Text(
             '🎙️ PTT Flotante activado — conectado al canal, PTT instantáneo',
           ),
-          backgroundColor: Colors.green,
+          backgroundColor: AppTheme.successColor,
           duration: Duration(seconds: 3),
         ),
       );
@@ -1807,14 +1834,18 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     } else {
       // Falló overlayActivate (timeout join channel, sin red, etc.). El
       // botón nativo NO se mostró (gracias al fix del start). Avisamos al
-      // usuario y volvemos a inicializar Agora en la página principal.
-      try {
-        await _voice.initialize();
-        if (state.activeChannelId != null) {
-          _lastAgoraChannelId = state.activeChannelId;
-          await _voice.joinChannel(state.activeChannelId!);
-        }
-      } catch (_) {}
+      // usuario y, si el provider es efímero (destruimos el engine arriba),
+      // volvemos a inicializarlo en la página principal. Con conexión
+      // persistente (LiveKit) la Room nunca se destruyó → nada que reiniciar.
+      if (!persistent) {
+        try {
+          await _voice.initialize();
+          if (state.activeChannelId != null) {
+            _lastAgoraChannelId = state.activeChannelId;
+            await _voice.joinChannel(state.activeChannelId!);
+          }
+        } catch (_) {}
+      }
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
@@ -1884,7 +1915,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text(msg),
-        backgroundColor: _isDriverOffline ? Colors.orange : Colors.red,
+        backgroundColor:
+            _isDriverOffline ? AppTheme.warningColor : AppTheme.errorColor,
         duration: const Duration(seconds: 3),
       ),
     );
@@ -1925,7 +1957,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: const Text('Se requiere permiso de micrófono para hablar'),
-            backgroundColor: Colors.orange,
+            backgroundColor: AppTheme.warningColor,
             action: SnackBarAction(
               label: 'Conceder',
               textColor: Colors.white,
@@ -2021,7 +2053,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('No se pudo reconectar al canal. Intentá de nuevo.'),
-            backgroundColor: Colors.orange,
+            backgroundColor: AppTheme.warningColor,
           ),
         );
         return;
@@ -2215,7 +2247,8 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
           mainAxisSize: MainAxisSize.min,
           children: [
             ListTile(
-              leading: Icon(Icons.settings, color: AppTheme.primaryColor),
+              leading: Icon(Icons.settings,
+                  color: Theme.of(ctx).colorScheme.primary),
               title: const Text('Configurar miembros y default'),
               subtitle: const Text(
                   'Quién entra al canal y para qué roles es por defecto'),
@@ -2230,16 +2263,16 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
             ),
             ListTile(
               leading: const Icon(Icons.edit),
-              title: Text('Editar nombre'),
+              title: const Text('Editar nombre'),
               onTap: () {
                 Navigator.pop(ctx);
                 _showEditChannelDialog(channel);
               },
             ),
             ListTile(
-              leading: Icon(Icons.delete, color: Colors.red.shade700),
-              title: Text('Borrar canal',
-                  style: TextStyle(color: Colors.red.shade700)),
+              leading: const Icon(Icons.delete, color: AppTheme.errorColor),
+              title: const Text('Borrar canal',
+                  style: TextStyle(color: AppTheme.errorColor)),
               onTap: () {
                 Navigator.pop(ctx);
                 _confirmDeleteChannel(channel);
@@ -2424,24 +2457,24 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
               ),
               const SizedBox(height: 8),
               Container(
-                padding: const EdgeInsets.all(10),
+                padding: const EdgeInsets.all(AppSpacing.sm + 2),
                 decoration: BoxDecoration(
-                  color: Colors.blue.shade50,
+                  color: AppTheme.infoColor.withValues(alpha: 0.08),
                   borderRadius: BorderRadius.circular(8),
-                  border: Border.all(color: Colors.blue.shade100),
+                  border: Border.all(
+                      color: AppTheme.infoColor.withValues(alpha: 0.3)),
                 ),
                 child: Row(
                   children: [
-                    Icon(Icons.info_outline,
-                        size: 16, color: Colors.blue.shade800),
-                    const SizedBox(width: 6),
+                    const Icon(Icons.info_outline,
+                        size: 16, color: AppTheme.infoColor),
+                    const SizedBox(width: AppSpacing.xs + 2),
                     Expanded(
                       child: Text(
                         'Después de crearlo se abre la configuración para '
                         'elegir miembros y si es el canal por defecto.',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.blue.shade900,
+                        style: Theme.of(ctx).textTheme.labelSmall?.copyWith(
+                          color: AppTheme.infoColor,
                         ),
                       ),
                     ),

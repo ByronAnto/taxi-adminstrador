@@ -159,6 +159,18 @@ abstract class VoiceProvider {
   /// `parkChannel` es no-op → false (la UI evita armar el timer de park).
   bool get supportsPark;
 
+  /// ¿El proveedor mantiene una conexión persistente al canal mientras el
+  /// engine vive (sin necesidad de destruir+reunirse para alternar overlay)?
+  ///
+  /// `true` para LiveKit (self-hosted, conexión barata y persistente): activar
+  /// el overlay PTT puede REUSAR la Room ya conectada — solo mostrar el botón
+  /// nativo + asegurar mic muteado → activación instantánea, sin destroy/rejoin.
+  /// Desactivar tampoco destruye la Room (el radio de la app sigue vivo).
+  ///
+  /// `false` para Agora (cobra por minuto, conexión efímera): el overlay
+  /// mantiene el comportamiento clásico destroy/rejoin del engine.
+  bool get hasPersistentConnection;
+
   String? get currentChannelId;
   String? get parkedChannelId;
 

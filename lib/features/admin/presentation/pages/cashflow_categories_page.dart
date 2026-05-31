@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/models/cashflow_model.dart';
 
@@ -184,11 +185,14 @@ class _CashflowCategoriesPageState extends State<CashflowCategoriesPage>
           IconButton(
             tooltip: 'Guardar',
             icon: _saving
-                ? const SizedBox(
+                ? SizedBox(
                     width: 20,
                     height: 20,
-                    child:
-                        CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    child: CircularProgressIndicator(
+                      strokeWidth: 2,
+                      color: Theme.of(context).colorScheme.onPrimary,
+                    ),
+                  )
                 : const Icon(Icons.save),
             onPressed: _saving ? null : _save,
           ),
@@ -202,7 +206,7 @@ class _CashflowCategoriesPageState extends State<CashflowCategoriesPage>
         ),
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? const LoadingState()
           : TabBarView(
               controller: _tab,
               children: [
@@ -217,7 +221,7 @@ class _CashflowCategoriesPageState extends State<CashflowCategoriesPage>
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(AppSpacing.md),
           child: ElevatedButton.icon(
             onPressed: () => _addCategory(isIngreso),
             icon: const Icon(Icons.add),
@@ -231,9 +235,13 @@ class _CashflowCategoriesPageState extends State<CashflowCategoriesPage>
         ),
         Expanded(
           child: cats.isEmpty
-              ? const Center(child: Text('Sin categorías'))
+              ? const EmptyState(
+                  icon: Icons.category_outlined,
+                  title: 'Sin categorías',
+                )
               : ListView.builder(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: AppSpacing.md),
                   itemCount: cats.length,
                   itemBuilder: (_, i) {
                     final c = cats[i];
@@ -244,8 +252,8 @@ class _CashflowCategoriesPageState extends State<CashflowCategoriesPage>
                               ? Icons.trending_up
                               : Icons.trending_down,
                           color: isIngreso
-                              ? Colors.green.shade700
-                              : Colors.red.shade700,
+                              ? AppTheme.successColor
+                              : AppTheme.errorColor,
                         ),
                         title: Text(c),
                         trailing: Row(
@@ -256,8 +264,8 @@ class _CashflowCategoriesPageState extends State<CashflowCategoriesPage>
                               onPressed: () => _editCategory(isIngreso, c),
                             ),
                             IconButton(
-                              icon: Icon(Icons.delete,
-                                  size: 20, color: Colors.red.shade400),
+                              icon: const Icon(Icons.delete,
+                                  size: 20, color: AppTheme.errorColor),
                               onPressed: () => _removeCategory(isIngreso, c),
                             ),
                           ],

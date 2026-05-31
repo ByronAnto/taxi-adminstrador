@@ -1,8 +1,12 @@
+import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:geolocator/geolocator.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:uuid/uuid.dart';
 
-import '../../../../core/constants/app_constants.dart';
+import '../../../../core/services/current_user_context.dart';
+import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/models/emergency_model.dart';
@@ -20,6 +24,10 @@ class _EmergencyPageState extends State<EmergencyPage>
     with SingleTickerProviderStateMixin {
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
+
+  /// Teléfono de la "Central" (la asociación). Se carga del doc de la
+  /// asociación; si no hay número, el botón/ contacto "Central" se oculta.
+  String? _centralPhone;
 
   @override
   void initState() {
@@ -39,6 +47,46 @@ class _EmergencyPageState extends State<EmergencyPage>
           .read<EmergencyBloc>()
           .add(EmergencyCheckActiveRequested(authState.user.uid));
     }
+
+    _loadCentralPhone();
+  }
+
+  /// Lee el teléfono de la asociación (`associations/{aid}.phone`) para el
+  /// botón "Llamar Central". Si no existe, [_centralPhone] queda null y el
+  /// botón/contacto se oculta (no dejamos acciones muertas).
+  Future<void> _loadCentralPhone() async {
+    final aid = CurrentUserContext.instance.associationId;
+    if (aid == null || aid.isEmpty) return;
+    try {
+      final doc = await FirebaseFirestore.instance
+          .collection('associations')
+          .doc(aid)
+          .get();
+      final phone = (doc.data()?['phone'] as String?)?.trim();
+      if (mounted && phone != null && phone.isNotEmpty) {
+        setState(() => _centralPhone = phone);
+      }
+    } catch (e) {
+      debugPrint('🚨 [EmergencyPage] No se pudo cargar tel. central: $e');
+    }
+  }
+
+  /// Lanza el marcador del teléfono con el número dado.
+  Future<void> _dial(String number) async {
+    final uri = Uri(scheme: 'tel', path: number);
+    try {
+      await launchUrl(uri);
+    } catch (e) {
+      debugPrint('🚨 [EmergencyPage] No se pudo abrir marcador ($number): $e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('No se pudo llamar al $number'),
+            backgroundColor: AppTheme.errorColor,
+          ),
+        );
+      }
+    }
   }
 
   @override
@@ -54,22 +102,56 @@ class _EmergencyPageState extends State<EmergencyPage>
     return false;
   }
 
-  void _activateSOS() {
+  Future<void> _activateSOS() async {
     final authState = context.read<AuthBloc>().state;
     if (authState is! AuthAuthenticated) return;
 
     final user = authState.user;
+
+    // Ubicación real del dispositivo. NUNCA bloqueamos el SOS por el GPS:
+    // si no logramos un fix usamos (0,0) como "desconocida" (el modelo lo
+    // trata igual que un doc sin coords) y la alerta se dispara de todos
+    // modos. La central recibe el aviso aunque no haya posición.
+    final coords = await _resolveSosCoordinates();
+
+    if (!mounted) return;
+
     final emergency = EmergencyModel(
       uid: const Uuid().v4(),
       driverId: user.uid,
       driverName: '${user.name} ${user.lastname}',
-      latitude: AppConstants.baseLatitude,
-      longitude: AppConstants.baseLongitude,
+      latitude: coords?.$1 ?? 0,
+      longitude: coords?.$2 ?? 0,
       status: 'active',
       createdAt: DateTime.now(),
     );
 
+    if (!context.mounted) return;
     context.read<EmergencyBloc>().add(EmergencyCreateRequested(emergency));
+  }
+
+  /// Obtiene la mejor ubicación disponible para la alerta:
+  /// 1. La última posición conocida del [DriverLocationService] (ya activo
+  ///    para conductores con GPS encendido — instantáneo).
+  /// 2. Si no hay, un fix en vivo de [Geolocator] con timeout corto.
+  /// Devuelve null si no se puede obtener ninguna (sin bloquear el SOS).
+  Future<(double, double)?> _resolveSosCoordinates() async {
+    final loc = DriverLocationService.instance;
+    if (loc.lastLatitude != null && loc.lastLongitude != null) {
+      return (loc.lastLatitude!, loc.lastLongitude!);
+    }
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.high,
+          timeLimit: Duration(seconds: 8),
+        ),
+      );
+      return (pos.latitude, pos.longitude);
+    } catch (e) {
+      debugPrint('🚨 [EmergencyPage] No se pudo obtener GPS para SOS: $e');
+      return null;
+    }
   }
 
   void _cancelSOS(EmergencyModel active) {
@@ -282,24 +364,29 @@ class _EmergencyPageState extends State<EmergencyPage>
 
                   const SizedBox(height: 12),
 
-                  // Quick actions
+                  // Quick actions — números de emergencia de Ecuador (911).
+                  // "Central" solo aparece si la asociación tiene teléfono.
                   Padding(
                     padding: const EdgeInsets.symmetric(horizontal: 24),
                     child: Row(
                       children: [
-                        Expanded(
-                          child: _buildQuickAction(
-                            Icons.phone,
-                            'Llamar\nCentral',
-                            Colors.blue,
+                        if (_centralPhone != null) ...[
+                          Expanded(
+                            child: _buildQuickAction(
+                              Icons.phone,
+                              'Llamar\nCentral',
+                              Colors.blue,
+                              () => _dial(_centralPhone!),
+                            ),
                           ),
-                        ),
-                        const SizedBox(width: 12),
+                          const SizedBox(width: 12),
+                        ],
                         Expanded(
                           child: _buildQuickAction(
                             Icons.local_police,
                             'Llamar\nPolicía',
                             Colors.orange,
+                            () => _dial('911'),
                           ),
                         ),
                         const SizedBox(width: 12),
@@ -308,6 +395,7 @@ class _EmergencyPageState extends State<EmergencyPage>
                             Icons.local_hospital,
                             'Llamar\nAmbulancia',
                             Colors.red,
+                            () => _dial('911'),
                           ),
                         ),
                       ],
@@ -336,7 +424,8 @@ class _EmergencyPageState extends State<EmergencyPage>
                           ),
                         ),
                         const SizedBox(height: 12),
-                        _buildContact('Central de Radio', '02-234-5678'),
+                        if (_centralPhone != null)
+                          _buildContact('Central de Radio', _centralPhone!),
                         _buildContact('ECU 911', '911'),
                         _buildContact('Policía Nacional', '101'),
                       ],
@@ -353,45 +442,56 @@ class _EmergencyPageState extends State<EmergencyPage>
     );
   }
 
-  Widget _buildQuickAction(IconData icon, String label, Color color) {
-    return Container(
-      padding: const EdgeInsets.symmetric(vertical: 16),
-      decoration: BoxDecoration(
-        color: color.withValues(alpha: 0.15),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: color.withValues(alpha: 0.3)),
-      ),
-      child: Column(
-        children: [
-          Icon(icon, color: color, size: 28),
-          const SizedBox(height: 6),
-          Text(
-            label,
-            textAlign: TextAlign.center,
-            style: TextStyle(color: color, fontSize: 11),
-          ),
-        ],
+  Widget _buildQuickAction(
+      IconData icon, String label, Color color, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Container(
+        padding: const EdgeInsets.symmetric(vertical: 16),
+        decoration: BoxDecoration(
+          color: color.withValues(alpha: 0.15),
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: color.withValues(alpha: 0.3)),
+        ),
+        child: Column(
+          children: [
+            Icon(icon, color: color, size: 28),
+            const SizedBox(height: 6),
+            Text(
+              label,
+              textAlign: TextAlign.center,
+              style: TextStyle(color: color, fontSize: 11),
+            ),
+          ],
+        ),
       ),
     );
   }
 
   Widget _buildContact(String name, String number) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Row(
-        children: [
-          const Icon(Icons.phone, color: Colors.white38, size: 16),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(name,
-                style: const TextStyle(color: Colors.white70, fontSize: 13)),
-          ),
-          Text(number,
-              style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.w600,
-                  fontSize: 13)),
-        ],
+    return InkWell(
+      onTap: () => _dial(number),
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 8),
+        child: Row(
+          children: [
+            const Icon(Icons.phone, color: Colors.white38, size: 16),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(name,
+                  style: const TextStyle(color: Colors.white70, fontSize: 13)),
+            ),
+            Text(number,
+                style: const TextStyle(
+                    color: Colors.white,
+                    fontWeight: FontWeight.w600,
+                    fontSize: 13)),
+            const SizedBox(width: 6),
+            const Icon(Icons.call, color: Colors.white38, size: 14),
+          ],
+        ),
       ),
     );
   }

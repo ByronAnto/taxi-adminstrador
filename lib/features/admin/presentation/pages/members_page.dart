@@ -6,6 +6,8 @@ import 'package:go_router/go_router.dart';
 
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/app_scaffold.dart';
+import '../../../../core/widgets/state_views.dart';
 import 'package:intl/intl.dart';
 
 import '../../../associations/data/models/association_model.dart';
@@ -73,31 +75,21 @@ class _MembersPageState extends State<MembersPage> {
     final aid = _resolveAssociationId(context);
 
     if (aid == null || aid.isEmpty) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('Socios')),
-        body: const Center(
-          child: Padding(
-            padding: EdgeInsets.all(24),
-            child: Text(
+      return const AppScaffold(
+        title: 'Socios',
+        body: EmptyState(
+          icon: Icons.person_off_outlined,
+          title: 'Sin asociación',
+          subtitle:
               'No se pudo determinar la asociación. Inicia sesión nuevamente.',
-              textAlign: TextAlign.center,
-            ),
-          ),
         ),
       );
     }
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Socios'),
-        backgroundColor: AppTheme.primaryColor,
-        foregroundColor: Colors.white,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () => context.canPop()
-              ? context.pop()
-              : context.go(_isSuperAdmin(context) ? '/super' : '/home'),
-        ),
+      appBar: AppAppBar(
+        title: 'Socios',
+        fallbackRoute: _isSuperAdmin(context) ? '/super' : '/home',
       ),
       body: Column(
         children: [
@@ -127,20 +119,26 @@ class _MembersPageState extends State<MembersPage> {
               onChanged: (v) => setState(() => _query = v.trim().toLowerCase()),
             ),
           ),
-          const SizedBox(width: 8),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-            decoration: BoxDecoration(
-              color: AppTheme.secondaryColor,
-              borderRadius: BorderRadius.circular(6),
-            ),
-            child: Text(
-              aid,
-              style: const TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
+          const SizedBox(width: AppSpacing.sm),
+          Builder(
+            builder: (context) {
+              final scheme = Theme.of(context).colorScheme;
+              return Container(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
+                decoration: BoxDecoration(
+                  color: scheme.secondary,
+                  borderRadius: BorderRadius.circular(6),
+                ),
+                child: Text(
+                  aid,
+                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: scheme.onSecondary,
+                        fontWeight: FontWeight.bold,
+                      ),
+                ),
+              );
+            },
           ),
         ],
       ),
@@ -192,19 +190,11 @@ class _MembersPageState extends State<MembersPage> {
           .where('associationId', isEqualTo: aid)
           .snapshots(),
       builder: (context, snapshot) {
-        if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
-        }
         if (snapshot.hasError) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text(
-                'Error cargando socios: ${snapshot.error}',
-                style: const TextStyle(color: Colors.red),
-              ),
-            ),
-          );
+          return ErrorState.fromError(snapshot.error);
+        }
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return const LoadingState();
         }
 
         final docs = snapshot.data?.docs ?? [];
@@ -263,22 +253,16 @@ class _MembersPageState extends State<MembersPage> {
         });
 
         if (filtered.isEmpty) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text(
-                _query.isNotEmpty
-                    ? 'Sin resultados para "$_query".'
-                    : 'No hay socios con ese filtro.',
-                style: const TextStyle(color: Colors.black54),
-                textAlign: TextAlign.center,
-              ),
-            ),
+          return EmptyState(
+            icon: _query.isNotEmpty ? Icons.search_off : Icons.group_off,
+            title: _query.isNotEmpty
+                ? 'Sin resultados para "$_query"'
+                : 'No hay socios con ese filtro',
           );
         }
 
         return ListView.separated(
-          padding: const EdgeInsets.symmetric(vertical: 8),
+          padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
           itemCount: filtered.length,
           separatorBuilder: (_, _) => const Divider(height: 1),
           itemBuilder: (_, i) => _buildMemberTile(filtered[i], aid, context),
@@ -292,14 +276,14 @@ class _MembersPageState extends State<MembersPage> {
     final isMe = u.uid == _currentUid(context);
 
     final statusColor = switch (u.status) {
-      UserStatus.active => Colors.green,
-      UserStatus.pendingApproval => Colors.orange,
-      UserStatus.paymentPending => Colors.amber.shade800,
-      UserStatus.paymentBlocked => Colors.red.shade900,
-      UserStatus.disabledByAdmin => Colors.red.shade900,
-      UserStatus.suspended => Colors.red,
-      UserStatus.rejected => Colors.grey,
-      UserStatus.deleted => Colors.grey.shade400,
+      UserStatus.active => AppTheme.successColor,
+      UserStatus.pendingApproval => AppTheme.warningColor,
+      UserStatus.paymentPending => AppTheme.warningColor,
+      UserStatus.paymentBlocked => AppTheme.errorColor,
+      UserStatus.disabledByAdmin => AppTheme.errorColor,
+      UserStatus.suspended => AppTheme.errorColor,
+      UserStatus.rejected => AppTheme.statusOffline,
+      UserStatus.deleted => AppTheme.statusOffline,
     };
 
     final statusLabel = switch (u.status) {
@@ -334,12 +318,13 @@ class _MembersPageState extends State<MembersPage> {
               right: -2,
               child: Container(
                 padding: const EdgeInsets.all(2),
-                decoration: const BoxDecoration(
-                  color: Colors.amber,
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.secondary,
                   shape: BoxShape.circle,
                 ),
-                child: const Icon(Icons.shield,
-                    size: 12, color: Colors.white),
+                child: Icon(Icons.shield,
+                    size: 12,
+                    color: Theme.of(context).colorScheme.onSecondary),
               ),
             ),
         ],
@@ -355,9 +340,10 @@ class _MembersPageState extends State<MembersPage> {
             ),
           ),
           if (isMe)
-            const Padding(
-              padding: EdgeInsets.only(left: 6),
-              child: Text('(yo)', style: TextStyle(fontSize: 11)),
+            Padding(
+              padding: const EdgeInsets.only(left: 6),
+              child:
+                  Text('(yo)', style: Theme.of(context).textTheme.labelSmall),
             ),
         ],
       ),
@@ -367,10 +353,12 @@ class _MembersPageState extends State<MembersPage> {
           Text(
             '${_roleLabel(u.role)} · $statusLabel · '
             '${u.numeroVehiculo.isNotEmpty ? "Veh ${u.numeroVehiculo}" : u.cedula}',
-            style: const TextStyle(fontSize: 12),
+            style: Theme.of(context).textTheme.bodySmall,
           ),
           Text(u.email,
-              style: const TextStyle(fontSize: 11, color: Colors.black54)),
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                    color: AppTheme.textSecondary,
+                  )),
         ],
       ),
       isThreeLine: true,
@@ -416,7 +404,7 @@ class _MembersPageState extends State<MembersPage> {
       items.add(const PopupMenuItem(
         value: 'approve',
         child: Row(children: [
-          Icon(Icons.check_circle, size: 18, color: Colors.green),
+          Icon(Icons.check_circle, size: 18, color: AppTheme.successColor),
           SizedBox(width: 8),
           Text('Aprobar'),
         ]),
@@ -424,7 +412,7 @@ class _MembersPageState extends State<MembersPage> {
       items.add(const PopupMenuItem(
         value: 'reject',
         child: Row(children: [
-          Icon(Icons.cancel, size: 18, color: Colors.red),
+          Icon(Icons.cancel, size: 18, color: AppTheme.errorColor),
           SizedBox(width: 8),
           Text('Rechazar'),
         ]),
@@ -452,7 +440,7 @@ class _MembersPageState extends State<MembersPage> {
       items.add(const PopupMenuItem(
         value: 'reactivate',
         child: Row(children: [
-          Icon(Icons.refresh, size: 18, color: Colors.green),
+          Icon(Icons.refresh, size: 18, color: AppTheme.successColor),
           SizedBox(width: 8),
           Text('Activar / Reactivar'),
         ]),
@@ -463,7 +451,7 @@ class _MembersPageState extends State<MembersPage> {
       items.add(const PopupMenuItem(
         value: 'approve',
         child: Row(children: [
-          Icon(Icons.check_circle, size: 18, color: Colors.green),
+          Icon(Icons.check_circle, size: 18, color: AppTheme.successColor),
           SizedBox(width: 8),
           Text('Re-aprobar'),
         ]),
@@ -481,7 +469,7 @@ class _MembersPageState extends State<MembersPage> {
       items.add(const PopupMenuItem(
         value: 'make_admin',
         child: Row(children: [
-          Icon(Icons.shield, size: 18, color: Colors.amber),
+          Icon(Icons.shield, size: 18, color: AppTheme.warningColor),
           SizedBox(width: 8),
           Text('Hacer administrador'),
         ]),
@@ -489,7 +477,7 @@ class _MembersPageState extends State<MembersPage> {
       items.add(const PopupMenuItem(
         value: 'add_co_admin',
         child: Row(children: [
-          Icon(Icons.person_add_alt_1, size: 18, color: Colors.green),
+          Icon(Icons.person_add_alt_1, size: 18, color: AppTheme.successColor),
           SizedBox(width: 8),
           Text('Agregar como co-admin'),
         ]),
@@ -499,12 +487,12 @@ class _MembersPageState extends State<MembersPage> {
     // Crear cobro one-off: para conductores activos (multa/ayuda/deuda
     // emitida por el admin). El conductor lo verá en /my-payments.
     if (u.role == AppConstants.roleDriver) {
-      items.add(const PopupMenuItem(
+      items.add(PopupMenuItem(
         value: 'view_report',
         child: Row(children: [
-          Icon(Icons.bar_chart, size: 18, color: Colors.indigo),
-          SizedBox(width: 8),
-          Text('Ver reporte'),
+          Icon(Icons.bar_chart, size: 18, color: AppTheme.categorical[0]),
+          const SizedBox(width: 8),
+          const Text('Ver reporte'),
         ]),
       ));
     }
@@ -512,32 +500,30 @@ class _MembersPageState extends State<MembersPage> {
         (u.status == UserStatus.active ||
             u.status == UserStatus.paymentPending ||
             u.status == UserStatus.paymentBlocked)) {
-      items.add(const PopupMenuItem(
+      items.add(PopupMenuItem(
         value: 'create_charge',
         child: Row(children: [
           Icon(Icons.request_quote_outlined,
-              size: 18, color: AppTheme.primaryColor),
-          SizedBox(width: 8),
-          Text('Crear cobro'),
+              size: 18, color: AppTheme.categorical[3]),
+          const SizedBox(width: 8),
+          const Text('Crear cobro'),
         ]),
       ));
       // Permisos: el conductor avisa que se va X días. Mientras esté
       // activo, su cuota se "congela". Al regresar se calcula proporción
       // y se cobra solo lo que faltan trabajar del periodo.
-      items.add(const PopupMenuItem(
+      items.add(PopupMenuItem(
         value: 'grant_permission',
         child: Row(children: [
-          Icon(Icons.event_busy,
-              size: 18, color: Colors.indigo),
-          SizedBox(width: 8),
-          Text('Conceder permiso'),
+          Icon(Icons.event_busy, size: 18, color: AppTheme.categorical[0]),
+          const SizedBox(width: 8),
+          const Text('Conceder permiso'),
         ]),
       ));
       items.add(const PopupMenuItem(
         value: 'close_permission',
         child: Row(children: [
-          Icon(Icons.event_available,
-              size: 18, color: Colors.green),
+          Icon(Icons.event_available, size: 18, color: AppTheme.successColor),
           SizedBox(width: 8),
           Text('Registrar regreso'),
         ]),
@@ -564,9 +550,9 @@ class _MembersPageState extends State<MembersPage> {
       items.add(const PopupMenuItem(
         value: 'delete',
         child: Row(children: [
-          Icon(Icons.delete_outline, size: 18, color: Colors.red),
+          Icon(Icons.delete_outline, size: 18, color: AppTheme.errorColor),
           SizedBox(width: 8),
-          Text('Eliminar', style: TextStyle(color: Colors.red)),
+          Text('Eliminar', style: TextStyle(color: AppTheme.errorColor)),
         ]),
       ));
     }
@@ -597,7 +583,7 @@ class _MembersPageState extends State<MembersPage> {
         SnackBar(
           content: Text(
               '${u.name} ya tiene un permiso activo desde ${DateFormat('dd MMM').format(active.startDate)}.'),
-          backgroundColor: Colors.orange,
+          backgroundColor: AppTheme.warningColor,
         ),
       );
       return;
@@ -679,7 +665,7 @@ class _MembersPageState extends State<MembersPage> {
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: Colors.blue.shade50,
+                  color: AppTheme.infoColor.withValues(alpha: 0.10),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: const Text(
@@ -718,7 +704,7 @@ class _MembersPageState extends State<MembersPage> {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('✅ Permiso otorgado a ${u.name}'),
+          content: Text('Permiso otorgado a ${u.name}'),
           backgroundColor: AppTheme.successColor,
         ),
       );
@@ -743,7 +729,7 @@ class _MembersPageState extends State<MembersPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('${u.name} no tiene permiso activo.'),
-          backgroundColor: Colors.orange,
+          backgroundColor: AppTheme.warningColor,
         ),
       );
       return;
@@ -804,19 +790,33 @@ class _MembersPageState extends State<MembersPage> {
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
                   color: quote.hasCharge
-                      ? Colors.amber.shade50
-                      : Colors.green.shade50,
+                      ? AppTheme.warningColor.withValues(alpha: 0.10)
+                      : AppTheme.successColor.withValues(alpha: 0.10),
                   borderRadius: BorderRadius.circular(8),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    Text(
-                      quote.hasCharge
-                          ? '💰 Cobro proporcional'
-                          : '✅ Sin cobro adicional',
-                      style: const TextStyle(
-                          fontWeight: FontWeight.w800, fontSize: 13),
+                    Row(
+                      children: [
+                        Icon(
+                          quote.hasCharge
+                              ? Icons.attach_money
+                              : Icons.check_circle,
+                          size: 16,
+                          color: quote.hasCharge
+                              ? AppTheme.warningColor
+                              : AppTheme.successColor,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          quote.hasCharge
+                              ? 'Cobro proporcional'
+                              : 'Sin cobro adicional',
+                          style: const TextStyle(
+                              fontWeight: FontWeight.w800, fontSize: 13),
+                        ),
+                      ],
                     ),
                     const SizedBox(height: 4),
                     Text(
@@ -840,8 +840,8 @@ class _MembersPageState extends State<MembersPage> {
                           fontSize: 16,
                           fontWeight: FontWeight.w900,
                           color: quote.hasCharge
-                              ? Colors.deepOrange
-                              : Colors.green),
+                              ? AppTheme.warningColor
+                              : AppTheme.successColor),
                     ),
                   ],
                 ),
@@ -899,8 +899,8 @@ class _MembersPageState extends State<MembersPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(generateCharge && quote.hasCharge
-              ? '✅ ${u.name} regresó. Cobro de \$${quote.amountToCharge.toStringAsFixed(2)} generado.'
-              : '✅ ${u.name} regresó. Sin cobro adicional.'),
+              ? '${u.name} regresó. Cobro de \$${quote.amountToCharge.toStringAsFixed(2)} generado.'
+              : '${u.name} regresó. Sin cobro adicional.'),
           backgroundColor: AppTheme.successColor,
         ),
       );
@@ -994,9 +994,10 @@ class _MembersPageState extends State<MembersPage> {
             Container(
               padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.amber.shade50,
+                color: AppTheme.warningColor.withValues(alpha: 0.10),
                 borderRadius: BorderRadius.circular(8),
-                border: Border.all(color: Colors.amber.shade300),
+                border: Border.all(
+                    color: AppTheme.warningColor.withValues(alpha: 0.4)),
               ),
               child: const Text(
                 'Eliminación con auditoría:\n'
@@ -1020,7 +1021,7 @@ class _MembersPageState extends State<MembersPage> {
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red,
+              backgroundColor: AppTheme.errorColor,
               foregroundColor: Colors.white,
             ),
             onPressed: () => Navigator.pop(ctx, true),
@@ -1092,8 +1093,8 @@ class _MembersPageState extends State<MembersPage> {
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.amber.shade700,
-              foregroundColor: Colors.white,
+              backgroundColor: Theme.of(ctx).colorScheme.secondary,
+              foregroundColor: Theme.of(ctx).colorScheme.onSecondary,
             ),
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('Confirmar transferencia'),
@@ -1129,7 +1130,7 @@ class _MembersPageState extends State<MembersPage> {
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.green.shade700,
+              backgroundColor: AppTheme.successColor,
               foregroundColor: Colors.white,
             ),
             onPressed: () => Navigator.pop(ctx, true),
@@ -1156,14 +1157,16 @@ class _MembersPageState extends State<MembersPage> {
       await _functions.httpsCallable(name).call(data);
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(successMsg), backgroundColor: Colors.green),
+        SnackBar(
+            content: Text(successMsg),
+            backgroundColor: AppTheme.successColor),
       );
     } on FirebaseFunctionsException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error: ${e.message ?? e.code}'),
-          backgroundColor: Colors.red,
+          backgroundColor: AppTheme.errorColor,
         ),
       );
     } catch (e) {
@@ -1171,7 +1174,7 @@ class _MembersPageState extends State<MembersPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error: $e'),
-          backgroundColor: Colors.red,
+          backgroundColor: AppTheme.errorColor,
         ),
       );
     }
@@ -1321,7 +1324,7 @@ class _EditMemberDialogState extends State<_EditMemberDialog> {
                   'Email, rol y status no se editan aquí. '
                   'Para cambiar el rol usa "Hacer administrador". '
                   'Para suspender/reactivar usa el menú principal.',
-                  style: TextStyle(fontSize: 11, color: Colors.black54),
+                  style: TextStyle(fontSize: 11, color: AppTheme.textSecondary),
                 ),
               ],
             ),
@@ -1374,7 +1377,7 @@ class _EditMemberDialogState extends State<_EditMemberDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Datos actualizados.'),
-          backgroundColor: Colors.green,
+          backgroundColor: AppTheme.successColor,
         ),
       );
       Navigator.pop(context);
@@ -1383,7 +1386,7 @@ class _EditMemberDialogState extends State<_EditMemberDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error: ${e.message ?? e.code}'),
-          backgroundColor: Colors.red,
+          backgroundColor: AppTheme.errorColor,
         ),
       );
     } catch (e) {
@@ -1391,7 +1394,7 @@ class _EditMemberDialogState extends State<_EditMemberDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error: $e'),
-          backgroundColor: Colors.red,
+          backgroundColor: AppTheme.errorColor,
         ),
       );
     } finally {
@@ -1416,14 +1419,14 @@ class _MemberDetailDialog extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final statusColor = switch (user.status) {
-      UserStatus.active => Colors.green,
-      UserStatus.pendingApproval => Colors.orange,
-      UserStatus.paymentPending => Colors.amber.shade800,
-      UserStatus.paymentBlocked => Colors.red.shade900,
-      UserStatus.disabledByAdmin => Colors.red.shade900,
-      UserStatus.suspended => Colors.red,
-      UserStatus.rejected => Colors.grey,
-      UserStatus.deleted => Colors.grey.shade400,
+      UserStatus.active => AppTheme.successColor,
+      UserStatus.pendingApproval => AppTheme.warningColor,
+      UserStatus.paymentPending => AppTheme.warningColor,
+      UserStatus.paymentBlocked => AppTheme.errorColor,
+      UserStatus.disabledByAdmin => AppTheme.errorColor,
+      UserStatus.suspended => AppTheme.errorColor,
+      UserStatus.rejected => AppTheme.statusOffline,
+      UserStatus.deleted => AppTheme.statusOffline,
     };
     final statusLabel = switch (user.status) {
       UserStatus.active => 'Activo',
@@ -1440,6 +1443,8 @@ class _MemberDetailDialog extends StatelessWidget {
         .toUpperCase();
     final isDriver = user.role == AppConstants.roleDriver;
     final isAdmin = user.role == AppConstants.roleAdmin;
+    final scheme = Theme.of(context).colorScheme;
+    final onHeader = scheme.onPrimary;
 
     return Dialog(
       child: ConstrainedBox(
@@ -1449,23 +1454,23 @@ class _MemberDetailDialog extends StatelessWidget {
           children: [
             // Header
             Container(
-              padding: const EdgeInsets.all(16),
-              color: AppTheme.primaryColor,
+              padding: const EdgeInsets.all(AppSpacing.lg),
+              color: scheme.primary,
               child: Row(
                 children: [
                   CircleAvatar(
                     radius: 28,
-                    backgroundColor: Colors.white24,
+                    backgroundColor: onHeader.withValues(alpha: 0.15),
                     child: Text(
                       initials.isEmpty ? '?' : initials,
-                      style: const TextStyle(
-                        color: Colors.white,
+                      style: TextStyle(
+                        color: onHeader,
                         fontWeight: FontWeight.bold,
                         fontSize: 20,
                       ),
                     ),
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: AppSpacing.md),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1474,34 +1479,35 @@ class _MemberDetailDialog extends StatelessWidget {
                           '${user.name} ${user.lastname}'.trim().isEmpty
                               ? user.email
                               : '${user.name} ${user.lastname}',
-                          style: const TextStyle(
-                            color: Colors.white,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                          ),
+                          style: Theme.of(context)
+                              .textTheme
+                              .titleMedium
+                              ?.copyWith(color: onHeader),
                         ),
-                        const SizedBox(height: 4),
+                        const SizedBox(height: AppSpacing.xs),
                         Container(
                           padding: const EdgeInsets.symmetric(
                               horizontal: 8, vertical: 2),
                           decoration: BoxDecoration(
-                            color: statusColor.withValues(alpha: 0.2),
+                            color: statusColor.withValues(alpha: 0.85),
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
                             '${_roleLabel(user.role)} · $statusLabel',
-                            style: TextStyle(
-                              color: Colors.white,
-                              fontSize: 11,
-                              fontWeight: FontWeight.w600,
-                            ),
+                            style: Theme.of(context)
+                                .textTheme
+                                .labelSmall
+                                ?.copyWith(
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w600,
+                                ),
                           ),
                         ),
                       ],
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
+                    icon: Icon(Icons.close, color: onHeader),
                     onPressed: () => Navigator.pop(context),
                   ),
                 ],
@@ -1514,18 +1520,19 @@ class _MemberDetailDialog extends StatelessWidget {
                 children: [
                   if (isAdmin)
                     Container(
-                      padding: const EdgeInsets.all(8),
-                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.all(AppSpacing.sm),
+                      margin: const EdgeInsets.only(bottom: AppSpacing.md),
                       decoration: BoxDecoration(
-                        color: Colors.amber.shade50,
+                        color: scheme.secondary.withValues(alpha: 0.10),
                         borderRadius: BorderRadius.circular(8),
-                        border: Border.all(color: Colors.amber.shade200),
+                        border: Border.all(
+                            color: scheme.secondary.withValues(alpha: 0.3)),
                       ),
                       child: Row(
                         children: [
-                          const Icon(Icons.shield,
-                              size: 18, color: Colors.amber),
-                          const SizedBox(width: 8),
+                          Icon(Icons.shield,
+                              size: 18, color: scheme.secondary),
+                          const SizedBox(width: AppSpacing.sm),
                           const Text(
                             'Administrador actual de la asociación',
                             style: TextStyle(fontSize: 12),
@@ -1533,13 +1540,13 @@ class _MemberDetailDialog extends StatelessWidget {
                         ],
                       ),
                     ),
-                  _section('Datos personales'),
+                  _section(context, 'Datos personales'),
                   _info('Email', user.email),
                   _info('Cédula', user.cedula.isEmpty ? '—' : user.cedula),
                   _info('Teléfono', user.phone.isEmpty ? '—' : user.phone),
                   if (isDriver || isAdmin) ...[
                     const SizedBox(height: 12),
-                    _section('Vehículo'),
+                    _section(context, 'Vehículo'),
                     _info('Cooperativa',
                         user.cooperativa.isEmpty ? '—' : user.cooperativa),
                     _info('Cód. cooperativa',
@@ -1554,7 +1561,7 @@ class _MemberDetailDialog extends StatelessWidget {
                   ],
                   if (isDriver || isAdmin) ...[
                     const SizedBox(height: 12),
-                    _section('Documentos'),
+                    _section(context, 'Documentos'),
                     _photosRow(context, user),
                   ],
                   // TODO: mostrar motivo de rechazo cuando UserModel
@@ -1583,9 +1590,8 @@ class _MemberDetailDialog extends StatelessWidget {
                         icon: const Icon(Icons.more_vert, size: 18),
                         label: const Text('Acciones'),
                         style: ElevatedButton.styleFrom(
-                          disabledBackgroundColor:
-                              AppTheme.primaryColor,
-                          disabledForegroundColor: Colors.white,
+                          disabledBackgroundColor: scheme.secondary,
+                          disabledForegroundColor: scheme.onSecondary,
                         ),
                       ),
                     ),
@@ -1611,16 +1617,15 @@ class _MemberDetailDialog extends StatelessWidget {
     }
   }
 
-  Widget _section(String title) {
+  Widget _section(BuildContext context, String title) {
     return Padding(
-      padding: const EdgeInsets.only(top: 4, bottom: 6),
+      padding: const EdgeInsets.only(top: AppSpacing.xs, bottom: 6),
       child: Text(
         title,
-        style: const TextStyle(
-          fontWeight: FontWeight.bold,
-          fontSize: 13,
-          color: AppTheme.primaryColor,
-        ),
+        style: Theme.of(context).textTheme.titleMedium?.copyWith(
+              fontSize: 13,
+              color: Theme.of(context).colorScheme.secondary,
+            ),
       ),
     );
   }
@@ -1636,7 +1641,7 @@ class _MemberDetailDialog extends StatelessWidget {
             child: Text(
               label,
               style: const TextStyle(
-                  color: Colors.black54, fontSize: 13),
+                  color: AppTheme.textSecondary, fontSize: 13),
             ),
           ),
           Expanded(
@@ -1677,9 +1682,9 @@ class _MemberDetailDialog extends StatelessWidget {
         height: 110,
         decoration: BoxDecoration(
           borderRadius: BorderRadius.circular(8),
-          color: hasPhoto ? null : Colors.grey.shade100,
+          color: hasPhoto ? null : AppTheme.neutralBg,
           border: Border.all(
-            color: hasPhoto ? Colors.green : Colors.grey.shade300,
+            color: hasPhoto ? AppTheme.successColor : AppTheme.dividerColor,
             width: hasPhoto ? 2 : 1,
           ),
           image: hasPhoto
@@ -1691,12 +1696,12 @@ class _MemberDetailDialog extends StatelessWidget {
             ? Column(
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
-                  Icon(p.icon, color: Colors.grey, size: 28),
+                  Icon(p.icon, color: AppTheme.statusOffline, size: 28),
                   const SizedBox(height: 4),
-                  Text(
+                  const Text(
                     'Sin foto',
                     style: TextStyle(
-                        fontSize: 10, color: Colors.grey.shade600),
+                        fontSize: 10, color: AppTheme.textSecondary),
                   ),
                 ],
               )

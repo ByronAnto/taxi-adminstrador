@@ -3,9 +3,11 @@ import 'dart:async';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
-import 'package:flutter_webrtc/flutter_webrtc.dart' show Helper;
+import 'package:flutter_webrtc/flutter_webrtc.dart'
+    show AndroidAudioConfiguration, Helper;
 import 'package:livekit_client/livekit_client.dart' as lk;
 import 'package:permission_handler/permission_handler.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../agora_service.dart' show AgoraService;
 import 'voice_provider.dart';
@@ -20,14 +22,25 @@ import 'voice_provider.dart';
 /// (mic deshabilitado); al apretar PTT se publica el mic con [unmuteMic] y al
 /// soltar se silencia con [muteMic] — el mic hardware queda libre.
 ///
+/// **Volumen de reproducción (fix audio bajo / slider):** livekit_client 2.5.4
+/// no expone `setVolume` en `RemoteAudioTrack`, PERO flutter_webrtc sí permite
+/// ajustar la ganancia del track recibido vía `Helper.setVolume(factor, track)`
+/// (mapea al nativo `AudioTrack.setVolume`, rango 0–10). Además, por defecto
+/// flutter_webrtc rutea el audio WebRTC al stream `STREAM_VOICE_CALL`
+/// (MODE_IN_COMMUNICATION / USAGE_VOICE_COMMUNICATION): se oye bajo y NO sube
+/// con el volumen multimedia del celular. Por eso forzamos
+/// `AndroidAudioConfiguration.media` (STREAM_MUSIC / USAGE_MEDIA, MODE_NORMAL)
+/// tras conectar y en cada reconexión/resume → el audio sale por el altavoz al
+/// volumen multimedia y el slider de ganancia (100–400 → 1.0–4.0) sí tiene
+/// efecto audible. MODE_NORMAL coincide con bypassVoiceProcessing → no rompe el
+/// invariante de mic libre. El valor del slider se persiste en SharedPreferences
+/// y se reaplica a las pistas nuevas (TrackSubscribed) y en cold-start.
+///
 /// **Limitaciones conocidas de esta primera versión (ver spec, Fase 3):**
 /// - `playLocalEffect`: LiveKit no mezcla SFX locales en el engine → devuelve
 ///   `false` para que la UI use su fallback (AudioPlayer).
 /// - `startLocalRecording`/`stopLocalRecording`: el historial de audios local
 ///   aún no está soportado en LiveKit → no-op (devuelve `false`).
-/// - `setPlaybackVolume`: livekit_client 2.5.4 no expone control de volumen de
-///   reproducción en runtime → se guarda el valor (lo consume el slider) pero
-///   no se aplica a nivel SDK.
 class LiveKitVoiceProvider implements VoiceProvider {
   LiveKitVoiceProvider._();
   static final LiveKitVoiceProvider instance = LiveKitVoiceProvider._();
@@ -69,6 +82,10 @@ class LiveKitVoiceProvider implements VoiceProvider {
   // Default 200 = factor 2.0 (boost). Con bypassVoiceProcessing=true no hay AGC,
   // el audio entra más bajo; este boost + altavoz forzado compensan. Slider 100–400.
   int _playbackVolume = 200;
+  // Clave de persistencia del volumen del radio (mismo comportamiento que Agora:
+  // sobrevive a cold-starts para no perder la ganancia que ajustó el conductor).
+  static const String _kPrefsPlaybackVolume = 'livekit_playback_volume';
+  bool _volumeHydrated = false;
 
   // Guarda de idempotencia: el provider es singleton y varios componentes
   // (página walkie + RadioForegroundService) pueden llamar joinChannel sobre
@@ -240,6 +257,17 @@ class LiveKitVoiceProvider implements VoiceProvider {
     _intentionalDisconnect = false;
     try {
       await _ensureSdkInit(); // bypassVoiceProcessing ANTES de conectar
+      await _hydrateVolume(); // recupera la ganancia persistida (cold-start)
+      // Fija la ruta de audio MEDIA (stream MUSIC) en el AudioSwitchManager
+      // ANTES de connect, para que WebRTC active el foco de audio ya con el
+      // stream correcto (la doc recomienda configurarlo antes de la sesión). Se
+      // reaplica tras connect/reconnect/resume por si el SO lo revierte.
+      try {
+        await Helper.setAndroidAudioConfiguration(
+            AndroidAudioConfiguration.media);
+      } catch (e) {
+        _log('setAndroidAudioConfiguration(pre-connect): $e');
+      }
       final t = await _fetchToken(channelId);
 
       // Cambiando de canal (o reconectando): cierra la sala previa.
@@ -285,9 +313,7 @@ class LiveKitVoiceProvider implements VoiceProvider {
           _isInChannel = true;
           _log('RoomReconnected (recuperado por el SDK)');
           unawaited(() async {
-            try {
-              await lk.Hardware.instance.setSpeakerphoneOn(true);
-            } catch (_) {}
+            await _forceMediaAudioRoute();
             await _applyVolumeAll();
           }());
         })
@@ -320,14 +346,13 @@ class LiveKitVoiceProvider implements VoiceProvider {
         });
 
       await room.connect(t.url, t.token);
-      // Forzar salida por ALTAVOZ. Con bypassVoiceProcessing (MODE_NORMAL) el
-      // audio remoto se rutea al auricular y se oye bajísimo; esto lo manda al
-      // speaker (como hacía Agora). Sin headset/BT enchufado.
-      try {
-        await lk.Hardware.instance.setSpeakerphoneOn(true);
-      } catch (e) {
-        _log('setSpeakerphoneOn: $e');
-      }
+      // Ruta de audio MEDIA + ALTAVOZ. Por defecto flutter_webrtc rutea el audio
+      // recibido al stream VOICE_CALL (MODE_IN_COMMUNICATION): se oye bajo y NO
+      // sube con el volumen MULTIMEDIA que el conductor pone al máximo. Forzamos
+      // el stream MUSIC/USAGE_MEDIA (MODE_NORMAL) — así sale fuerte por el
+      // altavoz y el slider de ganancia tiene efecto real. MODE_NORMAL coincide
+      // con bypassVoiceProcessing → NO rompe el mic libre.
+      await _forceMediaAudioRoute();
       _room = room;
       _listener = listener;
       _currentChannelId = channelId;
@@ -473,7 +498,14 @@ class LiveKitVoiceProvider implements VoiceProvider {
 
   @override
   Future<void> overlayDeactivate() async {
-    await destroyEngine();
+    // LiveKit = conexión persistente (hasPersistentConnection=true): NO
+    // destruimos el engine al desactivar el overlay. La Room sigue viva para
+    // que el radio dentro de la app continúe escuchando/transmitiendo. Solo
+    // garantizamos que el mic quede muteado (mic hardware libre en reposo).
+    // El teardown real (mic 100% libre del SO) ocurre en destroyEngine/dispose
+    // cuando se apaga el radio o se cierra sesión.
+    await muteMic();
+    _log('overlayDeactivate (persistente) — Room intacta, mic OFF');
   }
 
   @override
@@ -627,9 +659,7 @@ class LiveKitVoiceProvider implements VoiceProvider {
   Future<void> resumeAudioReceive() async {
     // Re-habilita la recepción de audio remoto al volver de background.
     _isRemoteAudioMuted = false;
-    try {
-      await lk.Hardware.instance.setSpeakerphoneOn(true);
-    } catch (_) {}
+    await _forceMediaAudioRoute();
     await _applyVolumeAll();
   }
 
@@ -642,7 +672,50 @@ class LiveKitVoiceProvider implements VoiceProvider {
   Future<void> setPlaybackVolume(int volume) async {
     _playbackVolume = volume.clamp(
         AgoraService.playbackVolumeMin, AgoraService.playbackVolumeMax);
+    _volumeHydrated = true; // valor explícito del usuario: no lo pisa la hidratación
     await _applyVolumeAll();
+    // Persistir para sobrevivir cold-starts (mismo comportamiento que Agora).
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_kPrefsPlaybackVolume, _playbackVolume);
+    } catch (_) {}
+    _log('🔊 Volumen radio = $_playbackVolume (factor ${_playbackVolume / 100.0})');
+  }
+
+  /// Carga el volumen del radio persistido (una sola vez por proceso). Si el
+  /// usuario ya ajustó el slider en esta sesión, NO lo sobrescribe.
+  Future<void> _hydrateVolume() async {
+    if (_volumeHydrated) return;
+    _volumeHydrated = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getInt(_kPrefsPlaybackVolume);
+      if (saved != null) {
+        _playbackVolume = saved.clamp(
+            AgoraService.playbackVolumeMin, AgoraService.playbackVolumeMax);
+        _log('Volumen radio hidratado: $_playbackVolume');
+      }
+    } catch (_) {}
+  }
+
+  /// Fuerza la ruta de audio a MEDIA (stream MUSIC / USAGE_MEDIA, MODE_NORMAL)
+  /// y el altavoz. Es la corrección del "audio bajo": por defecto flutter_webrtc
+  /// rutea el audio recibido al stream VOICE_CALL, que se oye bajo y NO sube con
+  /// el volumen multimedia del celular. En Android `AndroidAudioConfiguration.media`
+  /// lo manda al stream MUSIC; en iOS es no-op interno. MODE_NORMAL mantiene el
+  /// mic libre (igual que bypassVoiceProcessing). Idempotente y seguro de llamar
+  /// tras conectar, en reconexión y al volver de background.
+  Future<void> _forceMediaAudioRoute() async {
+    try {
+      await Helper.setAndroidAudioConfiguration(AndroidAudioConfiguration.media);
+    } catch (e) {
+      _log('setAndroidAudioConfiguration(media): $e');
+    }
+    try {
+      await lk.Hardware.instance.setSpeakerphoneOn(true);
+    } catch (e) {
+      _log('setSpeakerphoneOn: $e');
+    }
   }
 
   @override
@@ -753,6 +826,12 @@ class LiveKitVoiceProvider implements VoiceProvider {
   // parkChannel es no-op → no usamos el timer de park (evita spam cada 5s).
   @override
   bool get supportsPark => false;
+
+  // LiveKit self-hosted: la Room queda conectada mientras el engine vive →
+  // el overlay PTT puede reusar la conexión (activación instantánea, sin
+  // destroy/rejoin). Ver OverlayPttService.start/stop y walkie_talkie_page.
+  @override
+  bool get hasPersistentConnection => true;
 
   @override
   String? get currentChannelId => _currentChannelId;

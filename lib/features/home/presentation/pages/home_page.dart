@@ -17,7 +17,6 @@ import '../../../payments/presentation/widgets/due_date_banner.dart';
 import '../widgets/dashboard_kpis.dart';
 import '../widgets/notifications_bell_button.dart';
 import '../widgets/radio_wave_button.dart';
-import '../widgets/remote_logging_dialog.dart';
 
 /// Página principal con navegación inferior y dashboard por rol.
 ///
@@ -106,16 +105,20 @@ class _HomePageState extends State<HomePage> {
                   child: Center(child: const AvailabilityToggle()),
                 ),
               IconButton(
-                onPressed: () => _showEmergencyDialog(context),
+                onPressed: () => context.push('/emergency'),
                 icon: const Icon(Icons.sos, color: AppTheme.errorColor),
                 tooltip: 'Emergencia',
               ),
               IconButton(
                 onPressed: () => context.push('/profile'),
-                icon: const CircleAvatar(
+                icon: CircleAvatar(
                   radius: 16,
-                  backgroundColor: AppTheme.secondaryColor,
-                  child: Icon(Icons.person, size: 18, color: Colors.white),
+                  backgroundColor: Theme.of(context).colorScheme.secondary,
+                  child: Icon(
+                    Icons.person,
+                    size: 18,
+                    color: Theme.of(context).colorScheme.onSecondary,
+                  ),
                 ),
               ),
             ],
@@ -301,25 +304,21 @@ class _HomePageState extends State<HomePage> {
       list.add(_ActionTile(
         title: 'Mis carreras',
         icon: Icons.local_taxi_outlined,
-        color: AppTheme.primaryColor,
         onTap: () => context.push('/trips'),
       ));
       list.add(_ActionTile(
         title: 'Mis pagos',
         icon: Icons.payments_outlined,
-        color: AppTheme.secondaryColor,
         onTap: () => context.push('/my-payments'),
       ));
       list.add(_ActionTile(
         title: 'Registrar gasto',
         icon: Icons.receipt_long_outlined,
-        color: Colors.amber.shade700,
         onTap: () => context.push('/expenses'),
       ));
       list.add(_ActionTile(
         title: 'Mi reporte',
         icon: Icons.bar_chart,
-        color: Colors.indigo,
         onTap: () => context.push('/driver-report'),
       ));
     }
@@ -327,7 +326,6 @@ class _HomePageState extends State<HomePage> {
       list.add(_ActionTile(
         title: 'Solicitudes web',
         icon: Icons.assignment_turned_in_outlined,
-        color: Colors.deepPurple,
         onTap: () => context.push('/trip-requests'),
       ));
       // Carreras: ver asignadas/activas, reasignar (cambiar conductor) y
@@ -336,7 +334,6 @@ class _HomePageState extends State<HomePage> {
         list.add(_ActionTile(
           title: 'Carreras',
           icon: Icons.local_taxi_outlined,
-          color: AppTheme.primaryColor,
           onTap: () => context.push('/trips'),
         ));
       }
@@ -362,31 +359,26 @@ class _HomePageState extends State<HomePage> {
         _ActionTile(
           title: 'Validar pagos',
           icon: Icons.fact_check_outlined,
-          color: Colors.deepOrange,
           onTap: () => context.push('/payment-approvals'),
         ),
         _ActionTile(
           title: 'Cambios de unidad',
           icon: Icons.directions_car_filled,
-          color: Colors.deepPurple,
           onTap: () => context.push('/vehicle-change-requests'),
         ),
         _ActionTile(
           title: 'Mis validaciones',
           icon: Icons.assignment_turned_in_outlined,
-          color: AppTheme.accentColor,
           onTap: () => context.push('/operator-validations'),
         ),
         _ActionTile(
           title: 'Reportes',
           icon: Icons.bar_chart_outlined,
-          color: AppTheme.accentColor,
           onTap: () => context.push('/reports'),
         ),
         _ActionTile(
           title: 'Paradas',
           icon: Icons.flag_outlined,
-          color: Colors.orange,
           onTap: () => context.push('/taxi-stands'),
         ),
       ];
@@ -396,31 +388,26 @@ class _HomePageState extends State<HomePage> {
       _ActionTile(
         title: 'Validar pagos',
         icon: Icons.fact_check_outlined,
-        color: Colors.deepOrange,
         onTap: () => context.push('/payment-approvals'),
       ),
       _ActionTile(
         title: 'Cambios de unidad',
         icon: Icons.directions_car_filled,
-        color: Colors.deepPurple,
         onTap: () => context.push('/vehicle-change-requests'),
       ),
       _ActionTile(
         title: 'Caja',
         icon: Icons.account_balance_wallet_outlined,
-        color: Colors.teal,
         onTap: () => context.push('/cashflow'),
       ),
       _ActionTile(
         title: 'Reportes',
         icon: Icons.bar_chart_outlined,
-        color: AppTheme.accentColor,
         onTap: () => context.push('/reports'),
       ),
       _ActionTile(
         title: 'Paradas',
         icon: Icons.flag_outlined,
-        color: Colors.orange,
         onTap: () => context.push('/taxi-stands'),
       ),
     ];
@@ -434,99 +421,91 @@ class _HomePageState extends State<HomePage> {
       _ActionTile(
         title: 'Socios',
         icon: Icons.people_outline,
-        color: AppTheme.successColor,
         onTap: () => context.push('/members'),
       ),
       _ActionTile(
         title: 'Avisos',
         icon: Icons.campaign_outlined,
-        color: Colors.indigo,
         onTap: () => context.push('/notifications'),
       ),
       _ActionTile(
         title: 'Branding',
         icon: Icons.palette_outlined,
-        color: Colors.pink,
         onTap: () => context.push('/theme-settings'),
       ),
+      // Configuración financiera agrupada en un solo tile → bottom-sheet
+      // con las 3 opciones. Reduce la densidad de la grilla de Administración.
       _ActionTile(
-        title: 'Config. cobros',
+        title: 'Cobros y caja',
         icon: Icons.tune,
-        color: AppTheme.primaryDark,
-        onTap: () => context.push('/billing-config'),
-      ),
-      _ActionTile(
-        title: 'Conceptos pago',
-        icon: Icons.list_alt_outlined,
-        color: Colors.brown,
-        onTap: () => context.push('/payment-concepts'),
-      ),
-      _ActionTile(
-        title: 'Categorías caja',
-        icon: Icons.category_outlined,
-        color: Colors.cyan.shade800,
-        onTap: () => context.push('/cashflow-categories'),
+        onTap: () => _showFinanceConfigSheet(context),
       ),
       _ActionTile(
         title: 'Ubicación parada',
         icon: Icons.location_on_outlined,
-        color: Colors.amber.shade800,
         onTap: () => context.push('/stand-location'),
-      ),
-      _ActionTile(
-        title: 'Logs remotos',
-        icon: Icons.bug_report_outlined,
-        color: Colors.blueGrey.shade700,
-        onTap: () => RemoteLoggingDialog.show(context),
       ),
       if (isSuper)
         _ActionTile(
           title: 'Panel SaaS',
           icon: Icons.shield_outlined,
-          color: Colors.red.shade800,
           onTap: () => context.push('/super'),
         ),
     ];
   }
 
-  void _showEmergencyDialog(BuildContext context) {
-    showDialog(
+  /// Submenú de configuración financiera. Agrupa las 3 pantallas de cobros
+  /// y caja en un bottom-sheet para no saturar la grilla de Administración.
+  void _showFinanceConfigSheet(BuildContext context) {
+    showModalBottomSheet<void>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Row(
+      showDragHandle: true,
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.warning, color: AppTheme.errorColor),
-            SizedBox(width: 8),
-            Text('¡EMERGENCIA!'),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 4, 20, 8),
+              child: Align(
+                alignment: Alignment.centerLeft,
+                child: Text(
+                  'Cobros y caja',
+                  style: Theme.of(sheetCtx).textTheme.titleMedium,
+                ),
+              ),
+            ),
+            ListTile(
+              leading: Icon(Icons.tune, color: AppTheme.categorical[0]),
+              title: const Text('Configuración de cobros'),
+              subtitle: const Text('Monto, periodo, multas'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                context.push('/billing-config');
+              },
+            ),
+            ListTile(
+              leading: Icon(Icons.list_alt_outlined,
+                  color: AppTheme.categorical[1]),
+              title: const Text('Conceptos de pago'),
+              subtitle: const Text('Cuotas, multas, ayudas'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                context.push('/payment-concepts');
+              },
+            ),
+            ListTile(
+              leading: Icon(Icons.category_outlined,
+                  color: AppTheme.categorical[2]),
+              title: const Text('Categorías de caja'),
+              subtitle: const Text('Ingresos y egresos'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                context.push('/cashflow-categories');
+              },
+            ),
+            const SizedBox(height: AppSpacing.sm),
           ],
         ),
-        content: const Text(
-          '¿Estás seguro de que deseas enviar una alerta de emergencia? '
-          'Se notificará a todos los miembros de la asociación y se '
-          'compartirá tu ubicación actual.',
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancelar')),
-          ElevatedButton(
-            onPressed: () {
-              Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(
-                  content: Text('🚨 ¡Alerta de emergencia enviada!'),
-                  backgroundColor: AppTheme.errorColor,
-                  duration: Duration(seconds: 5),
-                ),
-              );
-            },
-            style: ElevatedButton.styleFrom(
-              backgroundColor: AppTheme.errorColor,
-              foregroundColor: Colors.white,
-            ),
-            child: const Text('ENVIAR ALERTA'),
-          ),
-        ],
       ),
     );
   }
@@ -550,7 +529,9 @@ class _NavBarItem extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final color = selected ? AppTheme.primaryColor : Colors.grey.shade600;
+    final color = selected
+        ? Theme.of(context).colorScheme.primary
+        : Colors.grey.shade600;
     return InkWell(
       onTap: onTap,
       child: Column(
@@ -580,6 +561,9 @@ class _ProfileGreetingCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final primary = scheme.primary;
+    final onPrimary = scheme.onPrimary;
     final initials = (user.name.isNotEmpty ? user.name[0] : '').toUpperCase() +
         (user.lastname.isNotEmpty ? user.lastname[0] : '').toUpperCase();
     return Card(
@@ -593,8 +577,8 @@ class _ProfileGreetingCard extends StatelessWidget {
           decoration: BoxDecoration(
             gradient: LinearGradient(
               colors: [
-                AppTheme.primaryColor,
-                AppTheme.primaryColor.withValues(alpha: 0.75),
+                primary,
+                primary.withValues(alpha: 0.75),
               ],
               begin: Alignment.topLeft,
               end: Alignment.bottomRight,
@@ -604,11 +588,11 @@ class _ProfileGreetingCard extends StatelessWidget {
             children: [
               CircleAvatar(
                 radius: 28,
-                backgroundColor: Colors.white.withValues(alpha: 0.25),
+                backgroundColor: onPrimary.withValues(alpha: 0.25),
                 child: Text(
                   initials.isEmpty ? '?' : initials,
-                  style: const TextStyle(
-                    color: Colors.white,
+                  style: TextStyle(
+                    color: onPrimary,
                     fontWeight: FontWeight.w800,
                     fontSize: 22,
                   ),
@@ -621,8 +605,8 @@ class _ProfileGreetingCard extends StatelessWidget {
                   children: [
                     Text(
                       'Hola, ${user.name}',
-                      style: const TextStyle(
-                        color: Colors.white,
+                      style: TextStyle(
+                        color: onPrimary,
                         fontSize: 18,
                         fontWeight: FontWeight.w800,
                       ),
@@ -633,13 +617,13 @@ class _ProfileGreetingCard extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 10, vertical: 3),
                       decoration: BoxDecoration(
-                        color: Colors.white.withValues(alpha: 0.22),
+                        color: onPrimary.withValues(alpha: 0.22),
                         borderRadius: BorderRadius.circular(20),
                       ),
                       child: Text(
                         _roleLabel(user.role),
-                        style: const TextStyle(
-                            color: Colors.white,
+                        style: TextStyle(
+                            color: onPrimary,
                             fontSize: 11,
                             fontWeight: FontWeight.w700),
                       ),
@@ -650,7 +634,7 @@ class _ProfileGreetingCard extends StatelessWidget {
                         'Unidad #${user.numeroVehiculo}'
                         '${user.placa.isNotEmpty ? " · ${user.placa}" : ""}',
                         style: TextStyle(
-                          color: Colors.white.withValues(alpha: 0.85),
+                          color: onPrimary.withValues(alpha: 0.85),
                           fontSize: 12,
                         ),
                       ),
@@ -658,7 +642,8 @@ class _ProfileGreetingCard extends StatelessWidget {
                   ],
                 ),
               ),
-              const Icon(Icons.chevron_right, color: Colors.white70),
+              Icon(Icons.chevron_right,
+                  color: onPrimary.withValues(alpha: 0.7)),
             ],
           ),
         ),
@@ -708,14 +693,21 @@ class _CardGrid extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (items.isEmpty) return const SizedBox.shrink();
+    // Paleta categórica coherente: color por posición en la grilla, en vez
+    // de los colores ad-hoc (Colors.teal/deepPurple…) que tenía cada tile.
+    final colored = <Widget>[
+      for (var i = 0; i < items.length; i++)
+        items[i]._withColor(
+            AppTheme.categorical[i % AppTheme.categorical.length]),
+    ];
     return GridView.count(
       crossAxisCount: 3,
       shrinkWrap: true,
       physics: const NeverScrollableScrollPhysics(),
-      crossAxisSpacing: 10,
-      mainAxisSpacing: 10,
+      crossAxisSpacing: AppSpacing.sm,
+      mainAxisSpacing: AppSpacing.sm,
       childAspectRatio: 0.95, // tarjetas casi cuadradas
-      children: items,
+      children: colored,
     );
   }
 }
@@ -723,18 +715,29 @@ class _CardGrid extends StatelessWidget {
 class _ActionTile extends StatelessWidget {
   final String title;
   final IconData icon;
-  final Color color;
   final VoidCallback onTap;
+
+  /// Color asignado por la grilla (paleta categórica). Si es null se usa
+  /// el primario del tema como respaldo.
+  final Color? color;
 
   const _ActionTile({
     required this.title,
     required this.icon,
-    required this.color,
     required this.onTap,
+    this.color,
   });
+
+  _ActionTile _withColor(Color c) => _ActionTile(
+        title: title,
+        icon: icon,
+        onTap: onTap,
+        color: c,
+      );
 
   @override
   Widget build(BuildContext context) {
+    final color = this.color ?? Theme.of(context).colorScheme.primary;
     return Material(
       color: Colors.white,
       elevation: 1.5,
@@ -756,7 +759,7 @@ class _ActionTile extends StatelessWidget {
                 ),
                 child: Icon(icon, color: color, size: 24),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               Text(
                 title,
                 textAlign: TextAlign.center,

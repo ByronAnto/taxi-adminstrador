@@ -595,9 +595,19 @@ class _StandQueueBarState extends State<StandQueueBar> {
                     //  - Que `isActive` no sea explícitamente false.
                     //  - Que tenga vehicleNumber (excluye operadoras y
                     //    docs sin unidad).
+                    final nowTs = DateTime.now();
                     final notInQueue = docs.where((d) {
                       final data = d.data();
-                      if (data['inQueueAt'] != null) return false;
+                      // "En cola" solo si inQueueAt es RECIENTE (misma regla de
+                      // 2h que watchQueue). Un inQueueAt viejo deja la unidad
+                      // fuera de la lista visible pero antes bloqueaba el
+                      // re-agregado → la unidad no podía volver a entrar.
+                      final iq = data['inQueueAt'];
+                      if (iq is Timestamp &&
+                          nowTs.difference(iq.toDate()) <
+                              const Duration(hours: 2)) {
+                        return false;
+                      }
                       if (data['archivedAt'] != null) return false;
                       if (data['deletedAt'] != null) return false;
                       if (data['isActive'] == false) return false;

@@ -1,4 +1,5 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
@@ -7,9 +8,41 @@ import 'package:go_router/go_router.dart';
 import '../../../../core/services/excel_export_service.dart';
 import '../../../../core/services/pdf_export_service.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../reports/data/weekly_closing_service.dart';
 import '../../data/models/cashflow_model.dart';
+
+/// Agregados de ingresos/egresos/balance de un período, reutilizable para el
+/// período actual y el anterior (comparativa).
+class _CashTotals {
+  final double ingresos;
+  final double egresos;
+  double get balance => ingresos - egresos;
+  const _CashTotals(this.ingresos, this.egresos);
+
+  factory _CashTotals.of(Iterable<CashflowMovement> movs) {
+    var ing = 0.0;
+    var egr = 0.0;
+    for (final m in movs) {
+      if (m.isIngreso) {
+        ing += m.monto;
+      } else {
+        egr += m.monto;
+      }
+    }
+    return _CashTotals(ing, egr);
+  }
+}
+
+/// Un bucket del gráfico de barras: etiqueta del eje X + totales del sub-período.
+class _CashBucket {
+  final String label;
+  double ingresos = 0;
+  double egresos = 0;
+  _CashBucket(this.label);
+  double get balance => ingresos - egresos;
+}
 
 /// Pantalla "Caja" del admin: resumen, movimientos y pagos a operadoras.
 ///
@@ -54,6 +87,40 @@ class _CashflowPageState extends State<CashflowPage>
     }
   }
 
+  /// Inicio del período inmediatamente anterior, del mismo largo calendario.
+  DateTime get _prevPeriodStart {
+    final start = _periodStart;
+    switch (_period) {
+      case 'day':
+        return start.subtract(const Duration(days: 1));
+      case 'week':
+        return start.subtract(const Duration(days: 7));
+      case 'year':
+        return DateTime(start.year - 1, 1, 1);
+      case 'month':
+      default:
+        return DateTime(start.year, start.month - 1, 1);
+    }
+  }
+
+  /// Fin (exclusivo) del período anterior: coincide con el inicio del actual.
+  DateTime get _prevPeriodEnd => _periodStart;
+
+  /// Texto "vs día/semana/mes/año anterior" según [_period].
+  String get _comparisonLabel {
+    switch (_period) {
+      case 'day':
+        return 'vs día anterior';
+      case 'week':
+        return 'vs semana anterior';
+      case 'year':
+        return 'vs año anterior';
+      case 'month':
+      default:
+        return 'vs mes anterior';
+    }
+  }
+
   Stream<QuerySnapshot<Map<String, dynamic>>> _stream(String aid) {
     return FirebaseFirestore.instance
         .collection('cashflow')
@@ -68,7 +135,7 @@ class _CashflowPageState extends State<CashflowPage>
   Widget build(BuildContext context) {
     final auth = context.watch<AuthBloc>().state;
     if (auth is! AuthAuthenticated) {
-      return const Scaffold(body: Center(child: CircularProgressIndicator()));
+      return const Scaffold(body: LoadingState());
     }
     final aid = auth.user.associationId;
 
@@ -141,6 +208,13 @@ class _CashflowPageState extends State<CashflowPage>
       body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
         stream: _stream(aid),
         builder: (context, snap) {
+          if (snap.hasError) {
+            return ErrorState.fromError(snap.error);
+          }
+          if (snap.connectionState == ConnectionState.waiting &&
+              !snap.hasData) {
+            return const LoadingState();
+          }
           final docs = snap.data?.docs ?? [];
           final movs = docs
               .map((d) => CashflowMovement.fromFirestore(d))
@@ -152,7 +226,7 @@ class _CashflowPageState extends State<CashflowPage>
                 child: TabBarView(
                   controller: _tab,
                   children: [
-                    _buildSummary(movs),
+                    _buildSummary(movs, aid),
                     _buildMovements(movs),
                     _buildOperadoras(movs),
                   ],
@@ -192,37 +266,247 @@ class _CashflowPageState extends State<CashflowPage>
     );
   }
 
-  Widget _buildSummary(List<CashflowMovement> movs) {
-    final ingresos =
-        movs.where((m) => m.isIngreso).fold<double>(0, (s, m) => s + m.monto);
-    final egresos =
-        movs.where((m) => m.isEgreso).fold<double>(0, (s, m) => s + m.monto);
-    final balance = ingresos - egresos;
+  Widget _buildSummary(List<CashflowMovement> movs, String aid) {
+    final totals = _CashTotals.of(movs);
     final fmt = NumberFormat.currency(symbol: '\$', decimalDigits: 2);
 
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          _kpi('Ingresos', fmt.format(ingresos), Icons.trending_up,
-              Colors.green.shade700),
-          const SizedBox(height: 12),
-          _kpi('Egresos', fmt.format(egresos), Icons.trending_down,
-              Colors.red.shade700),
-          const SizedBox(height: 12),
-          _kpi('Balance', fmt.format(balance), Icons.account_balance_wallet,
-              balance >= 0 ? Colors.blue.shade800 : Colors.red.shade800),
-          const SizedBox(height: 24),
-          Text('Por categoría',
-              style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 8),
-          ..._byCategory(movs, CashflowType.ingreso, fmt),
-          if (movs.any((m) => m.isEgreso)) ...[
-            const Divider(),
-            ..._byCategory(movs, CashflowType.egreso, fmt),
+    // Comparativa: traemos el período anterior y, cuando llega, recalculamos
+    // los KPIs con badges de % de cambio. Mientras tanto / si falla, se
+    // muestran los KPIs sin badge (degradación con gracia).
+    return FutureBuilder<_CashTotals?>(
+      // key liga el future al período activo para refrescar al cambiar de chip.
+      key: ValueKey('prev_$_period'),
+      future: _loadPreviousTotals(aid),
+      builder: (context, prevSnap) {
+        final prev = prevSnap.data;
+        return SingleChildScrollView(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              _kpi(
+                'Ingresos',
+                fmt.format(totals.ingresos),
+                Icons.trending_up,
+                AppTheme.successColor,
+                // Ingresos: subir es bueno → mejora si sube.
+                changePct: _pctChange(prev?.ingresos, totals.ingresos),
+                improvesWhenUp: true,
+              ),
+              const SizedBox(height: AppSpacing.md),
+              _kpi(
+                'Egresos',
+                fmt.format(totals.egresos),
+                Icons.trending_down,
+                AppTheme.errorColor,
+                // Egresos: subir es malo → mejora si baja.
+                changePct: _pctChange(prev?.egresos, totals.egresos),
+                improvesWhenUp: false,
+              ),
+              const SizedBox(height: AppSpacing.md),
+              _kpi(
+                'Balance',
+                fmt.format(totals.balance),
+                Icons.account_balance_wallet,
+                totals.balance >= 0
+                    ? AppTheme.infoColor
+                    : AppTheme.errorColor,
+                // Balance: subir es bueno.
+                changePct: _pctChange(prev?.balance, totals.balance),
+                improvesWhenUp: true,
+              ),
+              const SizedBox(height: AppSpacing.xl),
+              Text('Tendencia del período',
+                  style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: AppSpacing.sm),
+              _buildCharts(movs, fmt),
+              const SizedBox(height: AppSpacing.xl),
+              Text('Por categoría',
+                  style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 8),
+              ..._byCategory(movs, CashflowType.ingreso, fmt),
+              if (movs.any((m) => m.isEgreso)) ...[
+                const Divider(),
+                ..._byCategory(movs, CashflowType.egreso, fmt),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  /// % de cambio de [current] respecto a [previous]. Devuelve `null` cuando no
+  /// hay base de comparación (período anterior nulo o con valor 0), para
+  /// mostrar "—" sin badge.
+  double? _pctChange(double? previous, double current) {
+    if (previous == null) return null;
+    if (previous == 0) return null;
+    return (current - previous) / previous.abs() * 100;
+  }
+
+  /// Consulta el rango previo `[prevStart, prevEnd)` en `cashflow` respetando
+  /// el multi-tenant `aid`. Degrada a `null` ante cualquier error.
+  Future<_CashTotals?> _loadPreviousTotals(String aid) async {
+    try {
+      final snap = await FirebaseFirestore.instance
+          .collection('cashflow')
+          .where('associationId', isEqualTo: aid)
+          .where('fecha',
+              isGreaterThanOrEqualTo: Timestamp.fromDate(_prevPeriodStart))
+          .where('fecha', isLessThan: Timestamp.fromDate(_prevPeriodEnd))
+          .get();
+      final movs = snap.docs.map(CashflowMovement.fromFirestore);
+      return _CashTotals.of(movs);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // ==========================================================================
+  // Gráficos (fl_chart): barras agrupadas Ingresos/Egresos + línea de balance.
+  // ==========================================================================
+
+  /// Agrupa los movimientos del período actual en sub-buckets según [_period]:
+  /// día → 2 barras (total ing vs egr); week → Lun..Dom; month → semanas del
+  /// mes; year → Ene..Dic.
+  List<_CashBucket> _bucketize(List<CashflowMovement> movs) {
+    final start = _periodStart;
+    switch (_period) {
+      case 'week':
+        {
+          const labels = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
+          final buckets = [for (final l in labels) _CashBucket(l)];
+          for (final m in movs) {
+            final idx = (m.fecha.weekday - 1).clamp(0, 6);
+            _add(buckets[idx], m);
+          }
+          return buckets;
+        }
+      case 'month':
+        {
+          // Semanas del mes por número de semana calendario (1..n).
+          final lastDay = DateTime(start.year, start.month + 1, 0).day;
+          final nWeeks = (((start.weekday - 1) + lastDay) / 7).ceil();
+          final buckets = [
+            for (var i = 0; i < nWeeks; i++) _CashBucket('S${i + 1}')
+          ];
+          for (final m in movs) {
+            final dayIdx = m.fecha.day - 1;
+            final wk = ((start.weekday - 1) + dayIdx) ~/ 7;
+            if (wk >= 0 && wk < buckets.length) _add(buckets[wk], m);
+          }
+          return buckets;
+        }
+      case 'year':
+        {
+          const labels = [
+            'Ene', 'Feb', 'Mar', 'Abr', 'May', 'Jun',
+            'Jul', 'Ago', 'Sep', 'Oct', 'Nov', 'Dic'
+          ];
+          final buckets = [for (final l in labels) _CashBucket(l)];
+          for (final m in movs) {
+            final idx = (m.fecha.month - 1).clamp(0, 11);
+            _add(buckets[idx], m);
+          }
+          return buckets;
+        }
+      case 'day':
+      default:
+        {
+          // Día: 2 barras agregadas (Ingresos vs Egresos) para evitar ruido.
+          final b = _CashBucket('Hoy');
+          for (final m in movs) {
+            _add(b, m);
+          }
+          return [b];
+        }
+    }
+  }
+
+  void _add(_CashBucket b, CashflowMovement m) {
+    if (m.isIngreso) {
+      b.ingresos += m.monto;
+    } else {
+      b.egresos += m.monto;
+    }
+  }
+
+  Widget _buildCharts(List<CashflowMovement> movs, NumberFormat fmt) {
+    if (movs.isEmpty) {
+      return _chartPlaceholder('Sin movimientos en este período');
+    }
+    final buckets = _bucketize(movs);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        _chartLegend(),
+        const SizedBox(height: AppSpacing.sm),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 16, 12, 8),
+            child: _IncomeExpenseBars(buckets: buckets),
+          ),
+        ),
+        const SizedBox(height: AppSpacing.md),
+        Row(
+          children: [
+            Icon(Icons.show_chart, size: 16, color: AppTheme.infoColor),
+            const SizedBox(width: 6),
+            Text('Balance por sub-período',
+                style: Theme.of(context).textTheme.bodyMedium),
           ],
-        ],
+        ),
+        const SizedBox(height: AppSpacing.sm),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(8, 16, 12, 8),
+            child: _BalanceLine(buckets: buckets),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _chartLegend() {
+    Widget item(Color c, String label) => Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+                width: 12,
+                height: 12,
+                decoration: BoxDecoration(
+                    color: c, borderRadius: BorderRadius.circular(2))),
+            const SizedBox(width: 4),
+            Text(label, style: const TextStyle(fontSize: 12)),
+          ],
+        );
+    return Row(
+      children: [
+        item(AppTheme.successColor, 'Ingresos'),
+        const SizedBox(width: AppSpacing.lg),
+        item(AppTheme.errorColor, 'Egresos'),
+      ],
+    );
+  }
+
+  Widget _chartPlaceholder(String msg) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Center(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.insert_chart_outlined,
+                  size: 36, color: Colors.grey[400]),
+              const SizedBox(height: 8),
+              Text(msg,
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.grey[500], fontSize: 13)),
+            ],
+          ),
+        ),
       ),
     );
   }
@@ -242,12 +526,11 @@ class _CashflowPageState extends State<CashflowPage>
         padding: const EdgeInsets.only(top: 12, bottom: 8),
         child: Text(
           tipo == CashflowType.ingreso ? 'Ingresos' : 'Egresos',
-          style: TextStyle(
-            color: tipo == CashflowType.ingreso
-                ? Colors.green.shade700
-                : Colors.red.shade700,
-            fontWeight: FontWeight.w700,
-          ),
+          style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                color: tipo == CashflowType.ingreso
+                    ? AppTheme.successColor
+                    : AppTheme.errorColor,
+              ),
         ),
       ),
       ...sorted.map((e) => ListTile(
@@ -259,7 +542,8 @@ class _CashflowPageState extends State<CashflowPage>
     ];
   }
 
-  Widget _kpi(String label, String value, IconData icon, Color color) {
+  Widget _kpi(String label, String value, IconData icon, Color color,
+      {double? changePct, bool improvesWhenUp = true}) {
     return Card(
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -272,13 +556,18 @@ class _CashflowPageState extends State<CashflowPage>
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(label,
-                      style: TextStyle(color: Colors.grey.shade700)),
-                  const SizedBox(height: 4),
+                      style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                          color: AppTheme.textSecondary)),
+                  const SizedBox(height: AppSpacing.xs),
                   Text(value,
-                      style: TextStyle(
-                          fontSize: 22,
-                          fontWeight: FontWeight.w800,
-                          color: color)),
+                      style: Theme.of(context)
+                          .textTheme
+                          .headlineMedium
+                          ?.copyWith(color: color)),
+                  if (changePct != null) ...[
+                    const SizedBox(height: AppSpacing.xs),
+                    _comparisonRow(changePct, improvesWhenUp),
+                  ],
                 ],
               ),
             ),
@@ -288,26 +577,68 @@ class _CashflowPageState extends State<CashflowPage>
     );
   }
 
+  /// Fila de comparativa: badge ↑/↓ coloreado por "mejora" (no por signo) +
+  /// el texto "vs … anterior". Para ingresos/balance mejora = subir; para
+  /// egresos mejora = bajar ([improvesWhenUp] = false).
+  Widget _comparisonRow(double pct, bool improvesWhenUp) {
+    final improved =
+        pct == 0 ? null : (improvesWhenUp ? pct > 0 : pct < 0);
+    final color = improved == null
+        ? Colors.grey
+        : (improved ? AppTheme.successColor : AppTheme.errorColor);
+    final arrow = pct == 0
+        ? ''
+        : (pct > 0 ? '↑ ' : '↓ ');
+    return Row(
+      children: [
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: color.withValues(alpha: 0.15),
+            borderRadius: BorderRadius.circular(8),
+          ),
+          child: Text(
+            '$arrow${pct.abs().toStringAsFixed(0)}%',
+            style: TextStyle(
+                fontSize: 11, fontWeight: FontWeight.w600, color: color),
+          ),
+        ),
+        const SizedBox(width: AppSpacing.sm),
+        Flexible(
+          child: Text(
+            _comparisonLabel,
+            style: const TextStyle(
+                fontSize: 11, color: AppTheme.textSecondary),
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildMovements(List<CashflowMovement> movs) {
     if (movs.isEmpty) {
-      return const Center(child: Text('Sin movimientos en el período'));
+      return const EmptyState(
+        icon: Icons.receipt_long_outlined,
+        title: 'Sin movimientos en el período',
+      );
     }
     final fmt = NumberFormat.currency(symbol: '\$', decimalDigits: 2);
     return ListView.separated(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(AppSpacing.md),
       itemCount: movs.length,
-      separatorBuilder: (_, _) => const SizedBox(height: 4),
+      separatorBuilder: (_, _) => const SizedBox(height: AppSpacing.xs),
       itemBuilder: (_, i) {
         final m = movs[i];
         final color =
-            m.isIngreso ? Colors.green.shade700 : Colors.red.shade700;
+            m.isIngreso ? AppTheme.successColor : AppTheme.errorColor;
         return Dismissible(
           key: ValueKey(m.uid),
           direction: DismissDirection.endToStart,
           background: Container(
             alignment: Alignment.centerRight,
-            padding: const EdgeInsets.only(right: 24),
-            color: Colors.red.shade700,
+            padding: const EdgeInsets.only(right: AppSpacing.xl),
+            color: AppTheme.errorColor,
             child: const Icon(Icons.delete, color: Colors.white),
           ),
           confirmDismiss: (_) => _confirmDelete(m),
@@ -332,10 +663,10 @@ class _CashflowPageState extends State<CashflowPage>
               ),
               trailing: Text(
                 '${m.isIngreso ? '+' : '-'}${fmt.format(m.monto)}',
-                style: TextStyle(
-                    color: color,
-                    fontWeight: FontWeight.w800,
-                    fontSize: 15),
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      color: color,
+                      fontWeight: FontWeight.w800,
+                    ),
               ),
               onTap: () => _editMovement(m),
             ),
@@ -413,15 +744,19 @@ class _CashflowPageState extends State<CashflowPage>
     return Column(
       children: [
         Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(AppSpacing.lg),
           child: _kpi('Pagado a operadoras', fmt.format(total),
-              Icons.headset_mic, Colors.purple.shade700),
+              Icons.headset_mic, AppTheme.categorical[2]),
         ),
         Expanded(
           child: pagosOp.isEmpty
-              ? const Center(child: Text('Sin pagos a operadoras'))
+              ? const EmptyState(
+                  icon: Icons.headset_mic_outlined,
+                  title: 'Sin pagos a operadoras',
+                )
               : ListView(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  padding: const EdgeInsets.symmetric(
+                      horizontal: AppSpacing.md),
                   children: pagosOp.map((m) {
                     return Card(
                       child: ListTile(
@@ -430,9 +765,10 @@ class _CashflowPageState extends State<CashflowPage>
                         subtitle: Text(DateFormat('dd MMM yyyy').format(m.fecha)),
                         trailing: Text(
                           '-${fmt.format(m.monto)}',
-                          style: TextStyle(
-                              color: Colors.red.shade700,
-                              fontWeight: FontWeight.w700),
+                          style: Theme.of(context)
+                              .textTheme
+                              .titleMedium
+                              ?.copyWith(color: AppTheme.errorColor),
                         ),
                       ),
                     );
@@ -789,9 +1125,21 @@ class _CashflowPageState extends State<CashflowPage>
                 style: TextStyle(fontSize: 12),
               ),
               const SizedBox(height: 8),
-              const Text(
-                '⚠️ Este reporte agrega 12 meses × N semanas, puede tardar un minuto.',
-                style: TextStyle(fontSize: 11, fontStyle: FontStyle.italic),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Icon(Icons.warning_amber_rounded,
+                      size: 16, color: AppTheme.warningColor),
+                  const SizedBox(width: 4),
+                  const Expanded(
+                    child: Text(
+                      'Este reporte agrega 12 meses × N semanas, puede '
+                      'tardar un minuto.',
+                      style: TextStyle(
+                          fontSize: 11, fontStyle: FontStyle.italic),
+                    ),
+                  ),
+                ],
               ),
               const SizedBox(height: 12),
               DropdownButtonFormField<int>(
@@ -1031,10 +1379,9 @@ class _AddMovementFormState extends State<_AddMovementForm> {
                     : (_tipo == CashflowType.ingreso
                         ? 'Nuevo ingreso'
                         : 'Nuevo egreso'),
-                style: const TextStyle(
-                    fontSize: 18, fontWeight: FontWeight.w700),
+                style: Theme.of(context).textTheme.titleLarge,
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               SegmentedButton<CashflowType>(
                 segments: const [
                   ButtonSegment(
@@ -1164,6 +1511,212 @@ class _AddMovementFormState extends State<_AddMovementForm> {
               const SizedBox(height: 12),
             ],
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ============================================================================
+// Gráficos de caja (fl_chart)
+// ============================================================================
+
+/// Barras agrupadas Ingresos (verde) vs Egresos (rojo) por sub-bucket del
+/// período. Etiquetas del eje X según el bucketing (días, semanas, meses…).
+class _IncomeExpenseBars extends StatelessWidget {
+  final List<_CashBucket> buckets;
+  const _IncomeExpenseBars({required this.buckets});
+
+  @override
+  Widget build(BuildContext context) {
+    var maxV = 0.0;
+    for (final b in buckets) {
+      if (b.ingresos > maxV) maxV = b.ingresos;
+      if (b.egresos > maxV) maxV = b.egresos;
+    }
+    if (maxV <= 0) maxV = 1;
+    final fmt = NumberFormat.compactCurrency(symbol: '\$', decimalDigits: 0);
+
+    return SizedBox(
+      height: 220,
+      child: BarChart(
+        BarChartData(
+          alignment: BarChartAlignment.spaceAround,
+          maxY: maxV * 1.2,
+          barTouchData: BarTouchData(
+            touchTooltipData: BarTouchTooltipData(
+              getTooltipItem: (group, gIndex, rod, rIndex) {
+                final b = buckets[group.x];
+                final isIng = rIndex == 0;
+                return BarTooltipItem(
+                  '${b.label}\n${isIng ? 'Ingresos' : 'Egresos'}: '
+                  '\$${rod.toY.toStringAsFixed(2)}',
+                  const TextStyle(color: Colors.white, fontSize: 12),
+                );
+              },
+            ),
+          ),
+          titlesData: FlTitlesData(
+            show: true,
+            topTitles:
+                const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+            rightTitles:
+                const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+            leftTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                reservedSize: 44,
+                getTitlesWidget: (v, m) => Text(
+                  v <= 0 ? '0' : fmt.format(v),
+                  style: const TextStyle(fontSize: 10),
+                ),
+              ),
+            ),
+            bottomTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                reservedSize: 24,
+                getTitlesWidget: (v, m) {
+                  final i = v.toInt();
+                  if (i < 0 || i >= buckets.length) {
+                    return const SizedBox.shrink();
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(buckets[i].label,
+                        style: const TextStyle(fontSize: 10)),
+                  );
+                },
+              ),
+            ),
+          ),
+          borderData: FlBorderData(show: false),
+          gridData: const FlGridData(show: true, drawVerticalLine: false),
+          barGroups: [
+            for (var i = 0; i < buckets.length; i++)
+              BarChartGroupData(
+                x: i,
+                barRods: [
+                  BarChartRodData(
+                    toY: buckets[i].ingresos,
+                    color: AppTheme.successColor,
+                    width: 9,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(3),
+                      topRight: Radius.circular(3),
+                    ),
+                  ),
+                  BarChartRodData(
+                    toY: buckets[i].egresos,
+                    color: AppTheme.errorColor,
+                    width: 9,
+                    borderRadius: const BorderRadius.only(
+                      topLeft: Radius.circular(3),
+                      topRight: Radius.circular(3),
+                    ),
+                  ),
+                ],
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// Línea del balance (ingresos − egresos) por sub-bucket, en infoColor.
+class _BalanceLine extends StatelessWidget {
+  final List<_CashBucket> buckets;
+  const _BalanceLine({required this.buckets});
+
+  @override
+  Widget build(BuildContext context) {
+    // Con un solo bucket (período = día) la línea no aporta; mostramos el
+    // balance como un punto y su valor para que no quede un gráfico plano raro.
+    final spots = [
+      for (var i = 0; i < buckets.length; i++)
+        FlSpot(i.toDouble(), buckets[i].balance),
+    ];
+    var minV = 0.0;
+    var maxV = 0.0;
+    for (final b in buckets) {
+      if (b.balance < minV) minV = b.balance;
+      if (b.balance > maxV) maxV = b.balance;
+    }
+    if (minV == maxV) {
+      minV -= 1;
+      maxV += 1;
+    }
+    final pad = (maxV - minV) * 0.15;
+    final fmt = NumberFormat.compactCurrency(symbol: '\$', decimalDigits: 0);
+
+    return SizedBox(
+      height: 200,
+      child: LineChart(
+        LineChartData(
+          minY: minV - pad,
+          maxY: maxV + pad,
+          lineTouchData: LineTouchData(
+            touchTooltipData: LineTouchTooltipData(
+              getTooltipItems: (touched) => touched.map((spot) {
+                final i = spot.x.toInt();
+                final label =
+                    (i >= 0 && i < buckets.length) ? buckets[i].label : '';
+                return LineTooltipItem(
+                  '$label\n\$${spot.y.toStringAsFixed(2)}',
+                  const TextStyle(color: Colors.white, fontSize: 12),
+                );
+              }).toList(),
+            ),
+          ),
+          gridData: const FlGridData(show: true, drawVerticalLine: false),
+          titlesData: FlTitlesData(
+            show: true,
+            topTitles:
+                const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+            rightTitles:
+                const AxisTitles(sideTitles: SideTitles(showTitles: false)),
+            leftTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                reservedSize: 44,
+                getTitlesWidget: (v, m) =>
+                    Text(fmt.format(v), style: const TextStyle(fontSize: 10)),
+              ),
+            ),
+            bottomTitles: AxisTitles(
+              sideTitles: SideTitles(
+                showTitles: true,
+                reservedSize: 24,
+                getTitlesWidget: (v, m) {
+                  final i = v.toInt();
+                  if (i < 0 || i >= buckets.length || v != i.toDouble()) {
+                    return const SizedBox.shrink();
+                  }
+                  return Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(buckets[i].label,
+                        style: const TextStyle(fontSize: 10)),
+                  );
+                },
+              ),
+            ),
+          ),
+          borderData: FlBorderData(show: false),
+          lineBarsData: [
+            LineChartBarData(
+              spots: spots,
+              isCurved: false,
+              color: AppTheme.infoColor,
+              barWidth: 3,
+              isStrokeCapRound: true,
+              dotData: FlDotData(show: buckets.length <= 12),
+              belowBarData: BarAreaData(
+                show: true,
+                color: AppTheme.infoColor.withValues(alpha: 0.15),
+              ),
+            ),
+          ],
         ),
       ),
     );

@@ -4,6 +4,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../trips/data/models/trip_model.dart';
 import '../../../trips/presentation/widgets/active_driver_picker_sheet.dart';
@@ -14,6 +15,21 @@ import '../../../trips/presentation/widgets/active_driver_picker_sheet.dart';
 /// futuro portal web del cliente (Fase 6) o del propio admin manualmente
 /// (por ahora). Aquí la operadora las ve, asigna a un conductor online y
 /// las marca como asignadas (creando el doc en `trips/`).
+/// Línea de detalle con icono Material + texto (reemplaza emojis en UI).
+Widget _iconLine(IconData icon, String text) {
+  return Padding(
+    padding: const EdgeInsets.only(top: 2),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Icon(icon, size: 14, color: Colors.grey),
+        const SizedBox(width: 4),
+        Expanded(child: Text(text)),
+      ],
+    ),
+  );
+}
+
 class TripRequestsPage extends StatelessWidget {
   const TripRequestsPage({super.key});
 
@@ -45,17 +61,23 @@ class TripRequestsPage extends StatelessWidget {
             .limit(50)
             .snapshots(),
         builder: (context, snap) {
+          if (snap.hasError) {
+            return ErrorState.fromError(snap.error);
+          }
           if (snap.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
+            return const LoadingState();
           }
           final docs = snap.data?.docs ?? [];
           if (docs.isEmpty) {
-            return const Center(child: Text('Sin solicitudes pendientes'));
+            return const EmptyState(
+              icon: Icons.local_taxi_outlined,
+              title: 'Sin solicitudes pendientes',
+            );
           }
           return ListView.separated(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(AppSpacing.md),
             itemCount: docs.length,
-            separatorBuilder: (_, _) => const SizedBox(height: 4),
+            separatorBuilder: (_, _) => const SizedBox(height: AppSpacing.xs),
             itemBuilder: (_, i) {
               final r = docs[i].data();
               final estado = r['estado'] ?? 'pendiente';
@@ -73,23 +95,26 @@ class TripRequestsPage extends StatelessWidget {
                         : Icons.schedule,
                     color: estado == 'asignada'
                         ? AppTheme.successColor
-                        : Colors.orange,
+                        : AppTheme.warningColor,
                   ),
                   title: Text(r['clienteNombre'] ?? 'Cliente sin nombre'),
                   subtitle: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       if ((r['clienteTelefono'] ?? '').toString().isNotEmpty)
-                        Text('📞 ${r['clienteTelefono']}'),
-                      Text('📍 ${origen?['address'] ?? '(sin origen)'}'),
+                        _iconLine(Icons.phone, '${r['clienteTelefono']}'),
+                      _iconLine(Icons.location_on,
+                          origen?['address'] ?? '(sin origen)'),
                       if (destino != null && destino['address'] != null)
-                        Text('🏁 ${destino['address']}'),
+                        _iconLine(Icons.flag, '${destino['address']}'),
                       const SizedBox(height: 4),
                       Text(
                         'Solicitada: ${DateFormat('dd MMM HH:mm').format(cuando)}'
                         '${paraCuando != null && paraCuando.isAfter(DateTime.now()) ? ' · Para: ${DateFormat('dd MMM HH:mm').format(paraCuando)}' : ''}',
-                        style: TextStyle(
-                            fontSize: 11, color: Colors.grey.shade600),
+                        style: Theme.of(context)
+                            .textTheme
+                            .labelSmall
+                            ?.copyWith(color: AppTheme.textSecondary),
                       ),
                     ],
                   ),
@@ -366,10 +391,9 @@ class _CreateRequestFormState extends State<_CreateRequestForm> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text('Nueva solicitud',
-                  style:
-                      TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 12),
+              Text('Nueva solicitud',
+                  style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: AppSpacing.md),
               TextFormField(
                 controller: _name,
                 decoration: const InputDecoration(

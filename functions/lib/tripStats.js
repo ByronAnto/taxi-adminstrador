@@ -114,6 +114,9 @@ function localDateHourEC(epochMs) {
   return {
     date: `${yyyy}-${mm}-${dd}`,
     hour: shifted.getUTCHours(),
+    // 0=domingo … 6=sábado (hora local EC). Para heatmap día-de-semana × hora
+    // y comparativas "lunes vs lunes" sin recalcular en el cliente.
+    dayOfWeek: shifted.getUTCDay(),
   };
 }
 

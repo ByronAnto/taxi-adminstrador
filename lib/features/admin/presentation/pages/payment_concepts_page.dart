@@ -2,6 +2,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 
 /// Pantalla del admin para editar los conceptos de pago de la asociación.
@@ -194,11 +195,14 @@ class _PaymentConceptsPageState extends State<PaymentConceptsPage> {
         actions: [
           IconButton(
             icon: _saving
-                ? const SizedBox(
+                ? SizedBox(
                     width: 20,
                     height: 20,
                     child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Colors.white))
+                      strokeWidth: 2,
+                      color: Theme.of(context).colorScheme.onPrimary,
+                    ),
+                  )
                 : const Icon(Icons.save),
             onPressed: _saving ? null : _save,
           ),
@@ -210,23 +214,23 @@ class _PaymentConceptsPageState extends State<PaymentConceptsPage> {
         label: const Text('Nuevo'),
       ),
       body: _loading
-          ? const Center(child: CircularProgressIndicator())
+          ? const LoadingState()
           : Column(
               children: [
                 Container(
-                  padding: const EdgeInsets.all(12),
-                  color: Colors.amber.shade50,
+                  padding: const EdgeInsets.all(AppSpacing.md),
+                  color: AppTheme.infoColor.withValues(alpha: 0.1),
                   child: Row(
                     children: [
-                      Icon(Icons.info_outline,
-                          color: Colors.amber.shade800, size: 20),
-                      const SizedBox(width: 8),
-                      const Expanded(
+                      const Icon(Icons.info_outline,
+                          color: AppTheme.infoColor, size: 20),
+                      const SizedBox(width: AppSpacing.sm),
+                      Expanded(
                         child: Text(
                           'Las cuotas (diaria/semanal/mensual) son protegidas: '
                           'no se pueden borrar porque el cron usa una de ellas '
                           'para validar la membresía mensual del conductor.',
-                          style: TextStyle(fontSize: 12),
+                          style: Theme.of(context).textTheme.bodySmall,
                         ),
                       ),
                     ],
@@ -234,25 +238,29 @@ class _PaymentConceptsPageState extends State<PaymentConceptsPage> {
                 ),
                 Expanded(
                   child: ListView(
-                    padding: const EdgeInsets.symmetric(vertical: 8),
+                    padding:
+                        const EdgeInsets.symmetric(vertical: AppSpacing.sm),
                     children: _concepts.entries.map((e) {
                       final isProtected = _protectedIds.contains(e.key);
                       return Card(
                         margin: const EdgeInsets.symmetric(
-                            horizontal: 12, vertical: 4),
+                            horizontal: AppSpacing.md,
+                            vertical: AppSpacing.xs),
                         child: ListTile(
                           leading: Icon(
                             isProtected
                                 ? Icons.lock
                                 : Icons.attach_money,
                             color: isProtected
-                                ? Colors.grey
-                                : AppTheme.primaryColor,
+                                ? AppTheme.statusOffline
+                                : Theme.of(context).colorScheme.primary,
                           ),
                           title: Text(e.value),
                           subtitle: Text('id: ${e.key}',
-                              style: const TextStyle(
-                                  fontFamily: 'monospace', fontSize: 11)),
+                              style: Theme.of(context)
+                                  .textTheme
+                                  .labelSmall
+                                  ?.copyWith(fontFamily: 'monospace')),
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
@@ -262,9 +270,9 @@ class _PaymentConceptsPageState extends State<PaymentConceptsPage> {
                               ),
                               if (!isProtected)
                                 IconButton(
-                                  icon: Icon(Icons.delete,
+                                  icon: const Icon(Icons.delete,
                                       size: 20,
-                                      color: Colors.red.shade400),
+                                      color: AppTheme.errorColor),
                                   onPressed: () => _remove(e.key),
                                 ),
                             ],

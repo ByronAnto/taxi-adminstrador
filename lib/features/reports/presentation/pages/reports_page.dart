@@ -1,986 +1,406 @@
-import 'package:fl_chart/fl_chart.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
+import 'package:intl/intl.dart';
+
+import '../../../../core/services/current_user_context.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
-import '../../domain/entities/report_data.dart';
-import '../bloc/reports_bloc.dart';
+import '../../data/analytics_report_service.dart';
+import '../../data/drivers_summary_service.dart';
+import '../../data/report_export_service.dart';
+import '../../data/stats_aggregator.dart';
+import '../widgets/analytics_widgets.dart';
 
-/// Obtiene el `associationId` del usuario autenticado.
+/// Reporte analítico de la BASE (admin/operadora).
 ///
-/// El reporte general consulta `trips` filtrando por tenant; sin este id la
-/// consulta sería denegada por las reglas de Firestore. Devuelve cadena vacía
-/// si no hay sesión, y el bloc trata ese caso mostrando un mensaje.
-String _currentAssociationId(BuildContext context) {
-  final auth = context.read<AuthBloc>().state;
-  return auth is AuthAuthenticated ? auth.user.associationId : '';
-}
-
-/// Pagina de reportes y analiticas con graficos fl_chart
-class ReportsPage extends StatelessWidget {
+/// Lee los agregados diarios desplegados (`tripStatsDaily`) en vez de las
+/// carreras crudas: KPIs, heatmap día-de-semana × hora (vista estrella),
+/// barras por hora, línea de tendencia y comparativa vs el periodo anterior.
+/// El `associationId` sale de [CurrentUserContext] (con respaldo del AuthBloc).
+class ReportsPage extends StatefulWidget {
   const ReportsPage({super.key});
 
   @override
-  Widget build(BuildContext context) {
-    return BlocBuilder<ReportsBloc, ReportsState>(
-      builder: (context, state) {
-        return Scaffold(
-          appBar: AppBar(
-            title: const Text('Reportes'),
-            actions: [
-              IconButton(
-                icon: const Icon(Icons.refresh),
-                tooltip: 'Actualizar',
-                onPressed: () {
-                  final period = state is ReportsLoaded
-                      ? state.reportData.period
-                      : 'Hoy';
-                  context.read<ReportsBloc>().add(ReportsLoadRequested(
-                        period: period,
-                        associationId: _currentAssociationId(context),
-                      ));
-                },
-              ),
-            ],
-          ),
-          body: _buildBody(context, state),
-        );
-      },
-    );
-  }
-
-  Widget _buildBody(BuildContext context, ReportsState state) {
-    if (state is ReportsLoading) {
-      return const Center(child: CircularProgressIndicator());
-    }
-    if (state is ReportsError) {
-      return Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Icon(Icons.error_outline, size: 48, color: Colors.red[300]),
-            const SizedBox(height: 12),
-            Text(state.message, textAlign: TextAlign.center),
-            const SizedBox(height: 16),
-            ElevatedButton.icon(
-              onPressed: () => context.read<ReportsBloc>().add(
-                    ReportsLoadRequested(
-                      associationId: _currentAssociationId(context),
-                    ),
-                  ),
-              icon: const Icon(Icons.refresh),
-              label: const Text('Reintentar'),
-            ),
-          ],
-        ),
-      );
-    }
-    if (state is ReportsLoaded) {
-      return _ReportsContent(data: state.reportData);
-    }
-    // Initial state
-    return const Center(child: CircularProgressIndicator());
-  }
+  State<ReportsPage> createState() => _ReportsPageState();
 }
 
-// ================ CONTENIDO DEL REPORTE ================
+class _ReportsPageState extends State<ReportsPage> {
+  ReportCadence _cadence = ReportCadence.week;
+  AnalyticsReport? _report;
+  AssociationRating _rating = AssociationRating.empty;
+  bool _loading = true;
+  String? _error;
 
-class _ReportsContent extends StatelessWidget {
-  final ReportData data;
-  const _ReportsContent({required this.data});
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _loadWhenReady());
+  }
+
+  /// El associationId puede venir del contexto global o, como respaldo, del
+  /// AuthBloc (en cold-start el contexto puede llegar un instante después).
+  Future<void> _loadWhenReady() async {
+    for (var i = 0; i < 25; i++) {
+      if (!mounted) return;
+      if (_resolveAssociationId() != null) {
+        await _load();
+        return;
+      }
+      await Future.delayed(const Duration(milliseconds: 200));
+    }
+    if (!mounted) return;
+    setState(() {
+      _loading = false;
+      _error = 'No se pudo determinar la asociación del usuario.';
+    });
+  }
+
+  String? _resolveAssociationId() {
+    final fromCtx = CurrentUserContext.instance.associationId;
+    if (fromCtx != null && fromCtx.isNotEmpty) return fromCtx;
+    final auth = context.read<AuthBloc>().state;
+    if (auth is AuthAuthenticated && auth.user.associationId.isNotEmpty) {
+      return auth.user.associationId;
+    }
+    return null;
+  }
+
+  Future<void> _load() async {
+    final aid = _resolveAssociationId();
+    if (aid == null) {
+      setState(() {
+        _loading = false;
+        _error = 'No se pudo determinar la asociación del usuario.';
+      });
+      return;
+    }
+    setState(() {
+      _loading = true;
+      _error = null;
+    });
+    try {
+      // El reporte es lo crítico; el rating de la base es secundario y degrada
+      // a vacío por su cuenta (no rompe la carga si falla/permiso).
+      final results = await Future.wait([
+        AnalyticsReportService.instance
+            .buildAssociationReport(associationId: aid, cadence: _cadence),
+        DriversSummaryService.instance.fetchAssociationRating(associationId: aid),
+      ]);
+      if (!mounted) return;
+      setState(() {
+        _report = results[0] as AnalyticsReport;
+        _rating = results[1] as AssociationRating;
+        _loading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _loading = false;
+        _error = e.toString();
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _PeriodSelector(currentPeriod: data.period),
-          const SizedBox(height: 16),
-          _KPISection(data: data),
-          const SizedBox(height: 24),
-          _TripsByHourChart(tripsByHour: data.tripsByHour),
-          const SizedBox(height: 24),
-          _DailyRevenueChart(dailyRevenue: data.dailyRevenue),
-          const SizedBox(height: 24),
-          _TopDriversSection(drivers: data.topDrivers),
-          const SizedBox(height: 24),
-          _PaymentMethodSection(distribution: data.paymentMethodDistribution),
-          const SizedBox(height: 24),
-          _FrequentDestinations(destinations: data.frequentDestinations),
-          const SizedBox(height: 24),
-          _HeatmapSection(tripsByDayAndHour: data.tripsByDayAndHour),
-          const SizedBox(height: 32),
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Reportes'),
+        actions: [
+          _buildExportMenu(),
+          IconButton(
+            icon: const Icon(Icons.refresh),
+            tooltip: 'Actualizar',
+            onPressed: _loading ? null : _load,
+          ),
         ],
       ),
-    );
-  }
-}
-
-// ================ SELECTOR DE PERIODO ================
-
-class _PeriodSelector extends StatelessWidget {
-  final String currentPeriod;
-  const _PeriodSelector({required this.currentPeriod});
-
-  @override
-  Widget build(BuildContext context) {
-    final periods = ['Hoy', 'Semana', 'Mes', 'Ano'];
-    return Row(
-      children: periods.map((period) {
-        final isSelected = period == currentPeriod;
-        return Expanded(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 4),
-            child: ChoiceChip(
-              label: Text(period),
-              selected: isSelected,
-              selectedColor: AppTheme.primaryColor,
-              onSelected: (s) {
-                if (s) {
-                  context.read<ReportsBloc>().add(ReportsLoadRequested(
-                        period: period,
-                        associationId: _currentAssociationId(context),
-                      ));
-                }
+      body: Column(
+        children: [
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+            child: CadenceSelector(
+              value: _cadence,
+              onChanged: (c) {
+                setState(() => _cadence = c);
+                _load();
               },
             ),
           ),
-        );
-      }).toList(),
-    );
-  }
-}
-
-// ================ KPI CARDS ================
-
-class _KPISection extends StatelessWidget {
-  final ReportData data;
-  const _KPISection({required this.data});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: _KPICard(
-                label: 'Total Carreras',
-                value: '${data.totalTrips}',
-                icon: Icons.local_taxi,
-                color: AppTheme.secondaryColor,
-                trend: data.tripsTrend,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _KPICard(
-                label: 'Ingresos',
-                value: '\$${data.totalRevenue.toStringAsFixed(2)}',
-                icon: Icons.attach_money,
-                color: AppTheme.statusFree,
-                trend: data.revenueTrend,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: _KPICard(
-                label: 'Conductores',
-                value: '${data.activeDriversCount}',
-                icon: Icons.people,
-                color: Colors.blue,
-                trend: 0,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: _KPICard(
-                label: 'Canceladas',
-                value: '${data.cancelledTrips}',
-                icon: Icons.cancel,
-                color: AppTheme.errorColor,
-                trend: data.cancelledTrend,
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 12),
-        // Estimado monetario por tarifa mínima de Quito (UTC-5). Independiente
-        // del ingreso real (`fare`); útil cuando no se registra el cobro.
-        Row(
-          children: [
-            Expanded(
-              child: _KPICard(
-                label: 'Estimado (tarifa mín.)',
-                value: '\$${data.estimatedRevenue.toStringAsFixed(2)}',
-                icon: Icons.calculate_outlined,
-                color: AppTheme.primaryColor,
-                trend: 0,
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-class _KPICard extends StatelessWidget {
-  final String label;
-  final String value;
-  final IconData icon;
-  final Color color;
-  final double trend;
-
-  const _KPICard({
-    required this.label,
-    required this.value,
-    required this.icon,
-    required this.color,
-    required this.trend,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isPositive = trend > 0;
-    final isNeutral = trend == 0;
-    final trendStr = isNeutral
-        ? '0%'
-        : '${isPositive ? '+' : ''}${trend.toStringAsFixed(0)}%';
-
-    return Card(
-      child: Padding(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Icon(icon, size: 20, color: color),
-                const Spacer(),
-                Container(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                  decoration: BoxDecoration(
-                    color: isNeutral
-                        ? Colors.grey.withValues(alpha: 0.15)
-                        : isPositive
-                            ? AppTheme.statusFree.withValues(alpha: 0.15)
-                            : AppTheme.errorColor.withValues(alpha: 0.15),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: Text(
-                    trendStr,
-                    style: TextStyle(
-                      fontSize: 11,
-                      fontWeight: FontWeight.w600,
-                      color: isNeutral
-                          ? Colors.grey
-                          : isPositive
-                              ? AppTheme.statusFree
-                              : AppTheme.errorColor,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 8),
-            Text(value,
-                style: TextStyle(
-                    fontWeight: FontWeight.bold, fontSize: 22, color: color)),
-            Text(label,
-                style: const TextStyle(
-                    color: AppTheme.textSecondary, fontSize: 12)),
-          ],
-        ),
+          Expanded(child: _buildBody()),
+        ],
       ),
     );
   }
-}
 
-// ================ GRAFICO: CARRERAS POR HORA ================
-
-class _TripsByHourChart extends StatelessWidget {
-  final Map<int, int> tripsByHour;
-  const _TripsByHourChart({required this.tripsByHour});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Row(
-          children: [
-            Icon(Icons.show_chart, size: 20, color: AppTheme.secondaryColor),
-            SizedBox(width: 8),
-            Text('Carreras por hora',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-          ],
+  /// Menú "Exportar → PDF / CSV". Deshabilitado mientras no haya un reporte
+  /// cargado (no hay datos que exportar).
+  Widget _buildExportMenu() {
+    final canExport = !_loading && _report != null;
+    return PopupMenuButton<String>(
+      icon: const Icon(Icons.ios_share),
+      tooltip: 'Exportar',
+      enabled: canExport,
+      onSelected: (v) => _export(v),
+      itemBuilder: (_) => const [
+        PopupMenuItem(
+          value: 'pdf',
+          child: ListTile(
+            leading: Icon(Icons.picture_as_pdf_outlined),
+            title: Text('Exportar a PDF'),
+            contentPadding: EdgeInsets.zero,
+          ),
         ),
-        const SizedBox(height: 12),
-        SizedBox(
-          height: 200,
-          child: tripsByHour.isEmpty
-              ? _emptyChart('Sin datos de carreras')
-              : BarChart(
-                  BarChartData(
-                    alignment: BarChartAlignment.spaceAround,
-                    maxY: (tripsByHour.values.isEmpty
-                            ? 1
-                            : tripsByHour.values
-                                .reduce((a, b) => a > b ? a : b))
-                        .toDouble() *
-                        1.2,
-                    barTouchData: BarTouchData(
-                      touchTooltipData: BarTouchTooltipData(
-                        getTooltipItem: (group, gIndex, rod, rIndex) {
-                          return BarTooltipItem(
-                            '${group.x}:00\n${rod.toY.toInt()} carreras',
-                            const TextStyle(
-                                color: Colors.white, fontSize: 12),
-                          );
-                        },
-                      ),
-                    ),
-                    titlesData: FlTitlesData(
-                      show: true,
-                      topTitles: const AxisTitles(
-                          sideTitles: SideTitles(showTitles: false)),
-                      rightTitles: const AxisTitles(
-                          sideTitles: SideTitles(showTitles: false)),
-                      leftTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 28,
-                          getTitlesWidget: (value, meta) => Text(
-                            value.toInt().toString(),
-                            style: const TextStyle(fontSize: 10),
-                          ),
-                        ),
-                      ),
-                      bottomTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          getTitlesWidget: (value, meta) => Padding(
-                            padding: const EdgeInsets.only(top: 4),
-                            child: Text(
-                              '${value.toInt()}h',
-                              style: const TextStyle(fontSize: 9),
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                    borderData: FlBorderData(show: false),
-                    gridData: const FlGridData(
-                      show: true,
-                      drawVerticalLine: false,
-                    ),
-                    barGroups: _buildBarGroups(),
-                  ),
-                ),
+        PopupMenuItem(
+          value: 'csv',
+          child: ListTile(
+            leading: Icon(Icons.table_view_outlined),
+            title: Text('Exportar a CSV'),
+            contentPadding: EdgeInsets.zero,
+          ),
         ),
       ],
     );
   }
 
-  List<BarChartGroupData> _buildBarGroups() {
-    final sortedKeys = tripsByHour.keys.toList()..sort();
-    return sortedKeys.map((hour) {
-      return BarChartGroupData(
-        x: hour,
-        barRods: [
-          BarChartRodData(
-            toY: tripsByHour[hour]!.toDouble(),
-            color: AppTheme.secondaryColor,
-            width: 12,
-            borderRadius: const BorderRadius.only(
-              topLeft: Radius.circular(4),
-              topRight: Radius.circular(4),
-            ),
+  Future<void> _export(String kind) async {
+    final r = _report;
+    if (r == null) return;
+    const title = 'Reporte de la base';
+    try {
+      if (kind == 'pdf') {
+        await ReportExportService.instance
+            .sharePdf(report: r, title: title, rating: _rating);
+      } else {
+        await ReportExportService.instance
+            .shareCsv(report: r, title: title, rating: _rating);
+      }
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('No se pudo exportar: $e')),
+      );
+    }
+  }
+
+  Widget _buildBody() {
+    if (_loading) {
+      return const LoadingState(message: 'Generando reporte…');
+    }
+    if (_error != null) {
+      return ErrorState(message: _error!, onRetry: _load);
+    }
+    final r = _report;
+    if (r == null) {
+      return const EmptyState(
+        icon: Icons.bar_chart,
+        title: 'Sin datos en este período',
+      );
+    }
+    return _ReportContent(report: r, rating: _rating);
+  }
+}
+
+// ============================================================================
+
+class _ReportContent extends StatelessWidget {
+  final AnalyticsReport report;
+  final AssociationRating rating;
+  const _ReportContent({required this.report, required this.rating});
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    final c = report.current;
+    final fmt = NumberFormat.currency(symbol: '\$', decimalDigits: 2);
+    // Comparativa WoW/MoM/YoY: solo en Semana/Mes/Año (no en "Hoy") y solo si
+    // hay suficiente data y base de comparación (pct != null).
+    final cmpLabel = comparisonLabelFor(report.cadence);
+    final showTrend = cmpLabel != null && !report.dataInsufficient;
+    final pct = showTrend ? report.comparison.tripsChangePct : null;
+
+    if (c.isEmpty) {
+      return ListView(
+        padding: const EdgeInsets.all(AppSpacing.lg),
+        children: [
+          _RangeLabel(report: report),
+          const SizedBox(height: AppSpacing.xl),
+          const EmptyState(
+            icon: Icons.bar_chart,
+            title: 'Sin datos en este período',
           ),
         ],
       );
-    }).toList();
-  }
-}
+    }
 
-// ================ GRAFICO: INGRESOS DIARIOS ================
-
-class _DailyRevenueChart extends StatelessWidget {
-  final Map<String, double> dailyRevenue;
-  const _DailyRevenueChart({required this.dailyRevenue});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
+    return ListView(
+      padding: const EdgeInsets.all(AppSpacing.lg),
       children: [
-        const Row(
+        _RangeLabel(report: report),
+        const SizedBox(height: AppSpacing.md),
+        if (report.dataInsufficient) ...[
+          InsufficientDataNotice(daysWithTrips: c.daysWithTrips),
+          const SizedBox(height: AppSpacing.lg),
+        ],
+        // KPIs
+        Row(
           children: [
-            Icon(Icons.bar_chart, size: 20, color: AppTheme.statusFree),
-            SizedBox(width: 8),
-            Text('Ingresos diarios',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-          ],
-        ),
-        const SizedBox(height: 12),
-        SizedBox(
-          height: 200,
-          child: dailyRevenue.isEmpty
-              ? _emptyChart('Sin datos de ingresos')
-              : LineChart(
-                  LineChartData(
-                    lineTouchData: LineTouchData(
-                      touchTooltipData: LineTouchTooltipData(
-                        getTooltipItems: (spots) {
-                          final keys = dailyRevenue.keys.toList();
-                          return spots.map((spot) {
-                            final label = spot.x.toInt() < keys.length
-                                ? keys[spot.x.toInt()]
-                                : '';
-                            return LineTooltipItem(
-                              '$label\n\$${spot.y.toStringAsFixed(2)}',
-                              const TextStyle(
-                                  color: Colors.white, fontSize: 12),
-                            );
-                          }).toList();
-                        },
-                      ),
-                    ),
-                    gridData: const FlGridData(
-                      show: true,
-                      drawVerticalLine: false,
-                    ),
-                    titlesData: FlTitlesData(
-                      show: true,
-                      topTitles: const AxisTitles(
-                          sideTitles: SideTitles(showTitles: false)),
-                      rightTitles: const AxisTitles(
-                          sideTitles: SideTitles(showTitles: false)),
-                      leftTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          reservedSize: 40,
-                          getTitlesWidget: (value, meta) => Text(
-                            '\$${value.toInt()}',
-                            style: const TextStyle(fontSize: 9),
-                          ),
-                        ),
-                      ),
-                      bottomTitles: AxisTitles(
-                        sideTitles: SideTitles(
-                          showTitles: true,
-                          interval: 1,
-                          getTitlesWidget: (value, meta) {
-                            final keys = dailyRevenue.keys.toList();
-                            final idx = value.toInt();
-                            if (idx >= 0 && idx < keys.length) {
-                              return Padding(
-                                padding: const EdgeInsets.only(top: 4),
-                                child: Text(keys[idx],
-                                    style: const TextStyle(fontSize: 9)),
-                              );
-                            }
-                            return const SizedBox.shrink();
-                          },
-                        ),
-                      ),
-                    ),
-                    borderData: FlBorderData(show: false),
-                    lineBarsData: [
-                      LineChartBarData(
-                        spots: _buildSpots(),
-                        isCurved: true,
-                        color: AppTheme.statusFree,
-                        barWidth: 3,
-                        isStrokeCapRound: true,
-                        dotData: FlDotData(
-                          show: dailyRevenue.length <= 7,
-                        ),
-                        belowBarData: BarAreaData(
-                          show: true,
-                          color: AppTheme.statusFree.withValues(alpha: 0.15),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-        ),
-      ],
-    );
-  }
-
-  List<FlSpot> _buildSpots() {
-    final values = dailyRevenue.values.toList();
-    return List.generate(values.length, (i) {
-      return FlSpot(i.toDouble(), values[i]);
-    });
-  }
-}
-
-// ================ TOP CONDUCTORES ================
-
-class _TopDriversSection extends StatelessWidget {
-  final List<DriverReportItem> drivers;
-  const _TopDriversSection({required this.drivers});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Row(
-          children: [
-            Icon(Icons.emoji_events, size: 20, color: AppTheme.primaryDark),
-            SizedBox(width: 8),
-            Text('Top Conductores',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-          ],
-        ),
-        const SizedBox(height: 12),
-        if (drivers.isEmpty)
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Center(
-                child: Text('Sin datos de conductores',
-                    style: TextStyle(color: Colors.grey[500])),
+            Expanded(
+              child: AnalyticsKpiCard(
+                label: 'Total carreras',
+                value: '${c.totalTrips}',
+                icon: Icons.local_taxi,
+                color: scheme.secondary,
+                changePct: pct,
+                changeLabel: cmpLabel,
               ),
             ),
-          )
-        else
-          ...List.generate(drivers.length, (index) {
-            final driver = drivers[index];
-            final medalColors = [
-              AppTheme.primaryColor,
-              Colors.grey[400]!,
-              Colors.brown[300]!,
-            ];
-
-            // Calcular los 2 sources con más carreras
-            final sortedSources = driver.bySource.entries.toList()
-              ..sort((a, b) => b.value.compareTo(a.value));
-            final top2 = sortedSources.take(2).toList();
-
-            String sourceLabel(String src) {
-              switch (src) {
-                case 'standQueue': return 'Cola';
-                case 'street': return 'Calle';
-                case 'manual': return '+1';
-                case 'apkOperadora': return 'Op';
-                case 'walkieTalkie': return 'Radio';
-                case 'webCliente': return 'Web';
-                default: return src;
-              }
-            }
-
-            final sourceSummary = top2
-                .map((e) => '${sourceLabel(e.key)}: ${e.value}')
-                .join(' · ');
-
-            return Card(
-              margin: const EdgeInsets.only(bottom: 8),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                child: Row(
-                  children: [
-                    CircleAvatar(
-                      backgroundColor:
-                          index < 3 ? medalColors[index] : Colors.grey[200],
-                      child: Text(
-                        '${index + 1}',
-                        style: TextStyle(
-                          fontWeight: FontWeight.bold,
-                          color: index < 3 ? Colors.white : Colors.grey[600],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(driver.name,
-                              style: const TextStyle(fontWeight: FontWeight.w600)),
-                          Row(
-                            children: [
-                              Text('${driver.tripCount} carreras',
-                                  style: const TextStyle(fontSize: 12, color: Colors.grey)),
-                              if (driver.peakHourCount > 0) ...[
-                                const SizedBox(width: 8),
-                                Text(
-                                  'Pico: ${driver.peakHour}h (${driver.peakHourCount})',
-                                  style: TextStyle(
-                                      fontSize: 11,
-                                      color: Colors.orange.shade700,
-                                      fontWeight: FontWeight.w600),
-                                ),
-                              ],
-                            ],
-                          ),
-                          if (sourceSummary.isNotEmpty)
-                            Text(sourceSummary,
-                                style: TextStyle(
-                                    fontSize: 11, color: Colors.grey[500])),
-                        ],
-                      ),
-                    ),
-                    Text(
-                      '\$${driver.income.toStringAsFixed(2)}',
-                      style: const TextStyle(
-                        fontWeight: FontWeight.bold,
-                        color: AppTheme.secondaryColor,
-                      ),
-                    ),
-                  ],
-                ),
+            const SizedBox(width: AppSpacing.md),
+            Expanded(
+              child: AnalyticsKpiCard(
+                label: 'Ingreso estimado',
+                value: fmt.format(c.estimatedRevenue),
+                icon: Icons.calculate_outlined,
+                color: AppTheme.categorical[0],
               ),
-            );
-          }),
-      ],
-    );
-  }
-}
-
-// ================ METODOS DE PAGO (PIE CHART) ================
-
-class _PaymentMethodSection extends StatelessWidget {
-  final Map<String, double> distribution;
-  const _PaymentMethodSection({required this.distribution});
-
-  @override
-  Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Row(
-          children: [
-            Icon(Icons.payment, size: 20, color: AppTheme.secondaryColor),
-            SizedBox(width: 8),
-            Text('Metodos de Pago',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+            ),
           ],
         ),
-        const SizedBox(height: 12),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: distribution.isEmpty
-                ? Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Text('Sin datos de pagos',
-                          style: TextStyle(color: Colors.grey[500])),
-                    ),
-                  )
-                : Row(
-                    children: [
-                      SizedBox(
-                        width: 100,
-                        height: 100,
-                        child: PieChart(
-                          PieChartData(
-                            sectionsSpace: 2,
-                            centerSpaceRadius: 20,
-                            sections: _buildSections(),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 24),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: distribution.entries.map((e) {
-                            final color = _methodColor(e.key);
-                            return Padding(
-                              padding:
-                                  const EdgeInsets.symmetric(vertical: 4),
-                              child: Row(
-                                children: [
-                                  Container(
-                                    width: 12,
-                                    height: 12,
-                                    decoration: BoxDecoration(
-                                      color: color,
-                                      shape: BoxShape.circle,
-                                    ),
-                                  ),
-                                  const SizedBox(width: 8),
-                                  Expanded(
-                                    child: Text(e.key,
-                                        style:
-                                            const TextStyle(fontSize: 13)),
-                                  ),
-                                  Text(
-                                    '${(e.value * 100).toInt()}%',
-                                    style: TextStyle(
-                                      fontWeight: FontWeight.w600,
-                                      color: color,
-                                      fontSize: 13,
-                                    ),
-                                  ),
-                                ],
-                              ),
-                            );
-                          }).toList(),
-                        ),
-                      ),
-                    ],
-                  ),
+        const SizedBox(height: AppSpacing.md),
+        Row(
+          children: [
+            Expanded(
+              child: AnalyticsKpiCard(
+                label: 'Carreras/día (prom.)',
+                value: c.averageTripsPerDay.toStringAsFixed(1),
+                icon: Icons.trending_up,
+                color: AppTheme.statusFree,
+              ),
+            ),
+            const SizedBox(width: AppSpacing.md),
+            Expanded(
+              child: AnalyticsKpiCard(
+                label: 'Días con carreras',
+                value: '${c.daysWithTrips}',
+                icon: Icons.calendar_today,
+                color: AppTheme.infoColor,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: AppSpacing.md),
+        // Rating promedio ponderado de la base (solo reporte de BASE).
+        Row(
+          children: [
+            Expanded(
+              child: AnalyticsKpiCard(
+                label: rating.hasRatings
+                    ? '${rating.ratingCount} calificaciones'
+                    : 'Sin calificaciones aún',
+                value: rating.hasRatings
+                    ? 'Rating ⭐ ${rating.average!.toStringAsFixed(1)}'
+                    : '⭐ —',
+                icon: Icons.star_outline,
+                color: AppTheme.warningColor,
+              ),
+            ),
+            const SizedBox(width: AppSpacing.md),
+            const Expanded(child: SizedBox.shrink()),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          'El "ingreso estimado" es un proxy de demanda (tarifa mínima), '
+          'no el ingreso real.',
+          style: Theme.of(context)
+              .textTheme
+              .labelSmall
+              ?.copyWith(color: AppTheme.textSecondary),
+        ),
+        const SizedBox(height: 20),
+
+        // Embudo de solicitudes web (recibidas → asignadas → finalizadas)
+        if (report.funnel != null) ...[
+          const SectionTitle(
+              icon: Icons.filter_alt_outlined,
+              text: 'Embudo de solicitudes web',
+              color: AppTheme.infoColor),
+          const SizedBox(height: AppSpacing.sm),
+          RequestFunnelSection(funnel: report.funnel!),
+          const SizedBox(height: AppSpacing.xl),
+        ],
+
+        // Heatmap (vista estrella)
+        const SectionTitle(
+            icon: Icons.grid_on,
+            text: 'Mapa de calor (día × hora)',
+            color: AppTheme.warningColor),
+        const SizedBox(height: AppSpacing.sm),
+        DowHourHeatmap(heatmap: c.heatmap),
+        const SizedBox(height: AppSpacing.xl),
+
+        // Horas pico
+        const SectionTitle(
+            icon: Icons.schedule,
+            text: 'Horas pico',
+            color: AppTheme.warningColor),
+        const SizedBox(height: AppSpacing.sm),
+        PeakHoursChips(peaks: report.peaks),
+        const SizedBox(height: AppSpacing.xl),
+
+        // Carreras por hora
+        SectionTitle(
+            icon: Icons.show_chart,
+            text: 'Carreras por hora',
+            color: scheme.secondary),
+        const SizedBox(height: AppSpacing.md),
+        TripsByHourBars(tripsByHour: c.tripsByHour),
+        const SizedBox(height: AppSpacing.xl),
+
+        // Tendencia diaria
+        const SectionTitle(
+            icon: Icons.bar_chart,
+            text: 'Tendencia de carreras por día',
+            color: AppTheme.statusFree),
+        const SizedBox(height: AppSpacing.md),
+        DailyTrendLine(series: c.dailySeries),
+        const SizedBox(height: AppSpacing.xl),
+
+        // Comparativa por día de semana (solo en vista semanal)
+        if (report.cadence == ReportCadence.week) ...[
+          SectionTitle(
+              icon: Icons.compare_arrows,
+              text: 'Mismo día vs semana anterior',
+              color: AppTheme.categorical[0]),
+          const SizedBox(height: AppSpacing.md),
+          DayOfWeekComparison(
+            current: report.tripsByDayOfWeek,
+            previous: report.previousTripsByDayOfWeek,
           ),
-        ),
+          const SizedBox(height: AppSpacing.xl),
+        ],
       ],
     );
   }
-
-  List<PieChartSectionData> _buildSections() {
-    return distribution.entries.map((e) {
-      return PieChartSectionData(
-        color: _methodColor(e.key),
-        value: e.value * 100,
-        radius: 25,
-        showTitle: false,
-      );
-    }).toList();
-  }
-
-  Color _methodColor(String method) {
-    switch (method) {
-      case 'Efectivo':
-        return AppTheme.statusFree;
-      case 'Transferencia':
-        return Colors.blue;
-      default:
-        return Colors.grey;
-    }
-  }
 }
 
-// ================ DESTINOS FRECUENTES ================
-
-class _FrequentDestinations extends StatelessWidget {
-  final List<DestinationReportItem> destinations;
-  const _FrequentDestinations({required this.destinations});
+class _RangeLabel extends StatelessWidget {
+  final AnalyticsReport report;
+  const _RangeLabel({required this.report});
 
   @override
   Widget build(BuildContext context) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Row(
-          children: [
-            Icon(Icons.place, size: 20, color: AppTheme.errorColor),
-            SizedBox(width: 8),
-            Text('Destinos Frecuentes',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-          ],
-        ),
-        const SizedBox(height: 12),
-        if (destinations.isEmpty)
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Center(
-                child: Text('Sin datos de destinos',
-                    style: TextStyle(color: Colors.grey[500])),
-              ),
-            ),
-          )
-        else
-          ...destinations.map((dest) => Card(
-                margin: const EdgeInsets.only(bottom: 4),
-                child: ListTile(
-                  dense: true,
-                  leading: const Icon(Icons.location_on,
-                      color: AppTheme.errorColor, size: 20),
-                  title: Text(dest.address),
-                  trailing: Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: AppTheme.secondaryColor.withValues(alpha: 0.1),
-                      borderRadius: BorderRadius.circular(8),
-                    ),
-                    child: Text(
-                      '${dest.count} viajes',
-                      style: const TextStyle(
-                        fontSize: 12,
-                        color: AppTheme.secondaryColor,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
-                  ),
-                ),
-              )),
-      ],
+    final df = DateFormat('dd MMM', 'es');
+    // dateTs es 05:00 UTC; el día EC es -5h.
+    DateTime ec(DateTime ts) => ts.toUtc().subtract(const Duration(hours: 5));
+    final from = df.format(ec(report.range.fromTs));
+    final to = df.format(ec(report.range.toTs));
+    return Text(
+      '${report.range.label} · $from – $to',
+      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+          color: AppTheme.textSecondary, fontWeight: FontWeight.w600),
     );
   }
 }
 
-// ================ HEATMAP DÍAS × HORAS ================
-
-class _HeatmapSection extends StatelessWidget {
-  final Map<int, Map<int, int>> tripsByDayAndHour;
-  const _HeatmapSection({required this.tripsByDayAndHour});
-
-  static const _dayLabels = ['Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb', 'Dom'];
-
-  @override
-  Widget build(BuildContext context) {
-    // Calcular máximo global para escalar colores
-    int maxVal = 1;
-    for (final hourMap in tripsByDayAndHour.values) {
-      for (final v in hourMap.values) {
-        if (v > maxVal) maxVal = v;
-      }
-    }
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        const Row(
-          children: [
-            Icon(Icons.grid_on, size: 20, color: Colors.deepOrange),
-            SizedBox(width: 8),
-            Text('Mapa de calor (días × horas)',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-          ],
-        ),
-        const SizedBox(height: 8),
-        if (tripsByDayAndHour.isEmpty)
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Center(
-                child: Text('Sin datos para el mapa de calor',
-                    style: TextStyle(color: Colors.grey[500])),
-              ),
-            ),
-          )
-        else
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                // Header de horas
-                Row(
-                  children: [
-                    const SizedBox(width: 36), // espacio para labels de días
-                    ...List.generate(24, (h) => _HeatCell(
-                      size: 16,
-                      color: Colors.transparent,
-                      child: Text(
-                        h % 3 == 0 ? '$h' : '',
-                        style: const TextStyle(fontSize: 7, color: Colors.grey),
-                        textAlign: TextAlign.center,
-                      ),
-                    )),
-                  ],
-                ),
-                // Filas por día de la semana (1=Lun..7=Dom)
-                ...List.generate(7, (di) {
-                  final dow = di + 1;
-                  final hourMap = tripsByDayAndHour[dow] ?? {};
-                  return Row(
-                    children: [
-                      SizedBox(
-                        width: 36,
-                        child: Text(
-                          _dayLabels[di],
-                          style: const TextStyle(fontSize: 10, fontWeight: FontWeight.w600),
-                          textAlign: TextAlign.right,
-                        ),
-                      ),
-                      const SizedBox(width: 2),
-                      ...List.generate(24, (h) {
-                        final count = hourMap[h] ?? 0;
-                        final intensity = maxVal > 0 ? count / maxVal : 0.0;
-                        final color = _heatColor(intensity);
-                        return Tooltip(
-                          message: count > 0
-                              ? '${_dayLabels[di]} ${h}h: $count carreras'
-                              : '',
-                          child: _HeatCell(size: 16, color: color),
-                        );
-                      }),
-                    ],
-                  );
-                }),
-                // Leyenda
-                const SizedBox(height: 6),
-                Row(
-                  children: [
-                    const SizedBox(width: 38),
-                    const Text('0', style: TextStyle(fontSize: 9, color: Colors.grey)),
-                    const SizedBox(width: 4),
-                    ...List.generate(5, (i) {
-                      return _HeatCell(size: 12, color: _heatColor(i / 4));
-                    }),
-                    const SizedBox(width: 4),
-                    const Text('máx', style: TextStyle(fontSize: 9, color: Colors.grey)),
-                  ],
-                ),
-              ],
-            ),
-          ),
-      ],
-    );
-  }
-
-  static Color _heatColor(double intensity) {
-    if (intensity <= 0) return Colors.grey.shade100;
-    // Gradiente: gris claro → naranja → rojo
-    if (intensity < 0.5) {
-      return Color.lerp(Colors.grey.shade200, Colors.orange.shade400,
-          intensity * 2)!;
-    }
-    return Color.lerp(
-        Colors.orange.shade400, Colors.red.shade700, (intensity - 0.5) * 2)!;
-  }
-}
-
-class _HeatCell extends StatelessWidget {
-  final double size;
-  final Color color;
-  final Widget? child;
-
-  const _HeatCell({required this.size, required this.color, this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: size,
-      height: size,
-      margin: const EdgeInsets.all(1),
-      decoration: BoxDecoration(
-        color: color,
-        borderRadius: BorderRadius.circular(2),
-      ),
-      child: child,
-    );
-  }
-}
-
-// ================ HELPERS ================
-
-Widget _emptyChart(String msg) {
-  return Center(
-    child: Column(
-      mainAxisAlignment: MainAxisAlignment.center,
-      children: [
-        Icon(Icons.insert_chart_outlined, size: 40, color: Colors.grey[400]),
-        const SizedBox(height: 8),
-        Text(msg,
-            style: TextStyle(color: Colors.grey[500], fontSize: 13)),
-      ],
-    ),
-  );
-}

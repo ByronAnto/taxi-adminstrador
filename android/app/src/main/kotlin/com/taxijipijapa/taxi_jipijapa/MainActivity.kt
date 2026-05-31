@@ -12,6 +12,15 @@ class MainActivity : FlutterActivity() {
 
     private val OVERLAY_CHANNEL = "com.taxijipijapa/overlay"
 
+    // NOTA: la "Parte B" (FlutterEngine cacheado + shouldDestroyEngineWithHost
+    // = false) se revirtió porque desacoplar el engine de la actividad rompía
+    // el PlatformView de Google Maps (el mapa quedaba en blanco). El engine
+    // vuelve a estar atado a la actividad (comportamiento estándar de Flutter).
+    // El overlay flotante sigue funcionando mientras la app está en background
+    // (el FGS mantiene vivo el proceso); con la app totalmente cerrada el
+    // botón flotante deja de transmitir hasta reabrir — paridad Zello pendiente
+    // de una solución que no dependa de cachear el engine.
+
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
 
@@ -50,6 +59,9 @@ class MainActivity : FlutterActivity() {
     }
 
     override fun cleanUpFlutterEngine(flutterEngine: FlutterEngine) {
+        // El canal del overlay se ata al engine de la actividad; al destruirse
+        // la actividad limpiamos la referencia para no dejar un MethodChannel
+        // colgando de un engine muerto.
         PttBridge.methodChannel = null
         super.cleanUpFlutterEngine(flutterEngine)
     }

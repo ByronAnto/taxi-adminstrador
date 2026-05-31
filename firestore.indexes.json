@@ -340,6 +340,30 @@
         { "fieldPath": "associationId", "order": "ASCENDING" },
         { "fieldPath": "dateTs", "order": "ASCENDING" }
       ]
+    },
+    {
+      "collectionGroup": "driverStatsDaily",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "driverId", "order": "ASCENDING" },
+        { "fieldPath": "dateTs", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "driverStatsDaily",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "associationId", "order": "ASCENDING" },
+        { "fieldPath": "dateTs", "order": "ASCENDING" }
+      ]
+    },
+    {
+      "collectionGroup": "tripRequestStatsDaily",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "associationId", "order": "ASCENDING" },
+        { "fieldPath": "dateTs", "order": "ASCENDING" }
+      ]
     }
   ],
   "fieldOverrides": []

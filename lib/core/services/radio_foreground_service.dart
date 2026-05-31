@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:logger/logger.dart';
 import 'package:permission_handler/permission_handler.dart';
 
 import 'connectivity_service.dart';
+import 'driver_location_service.dart';
 
 /// Servicio singleton que gestiona el foreground service para el Radio
 /// (walkie-talkie) en segundo plano, similar a Zello.
@@ -11,6 +14,11 @@ import 'connectivity_service.dart';
 /// Cuando un canal está activo, muestra una notificación persistente
 /// y evita que Android mate la app, permitiendo recibir audio
 /// en tiempo real (Agora) en background.
+/// Señal que el isolate del servicio (task handler) manda al isolate principal
+/// en cada tick periódico nativo, para pedir un pulso de ubicación. Es un
+/// `String` simple porque cruza el límite entre isolates (debe serializar).
+const String _kLocationTickSignal = 'location_heartbeat_tick';
+
 class RadioForegroundService {
   RadioForegroundService._();
   static final RadioForegroundService instance = RadioForegroundService._();
@@ -27,6 +35,21 @@ class RadioForegroundService {
   bool _locationActive = false;
   VoidCallback? _connListener;
   bool _showingOfflineNotif = false;
+
+  /// Intervalo del tick periódico nativo del FGS. Debe ser claramente menor
+  /// que la ventana del cron de presencia (markStaleDriversOffline = 6 min)
+  /// para que un conductor online pero quieto y en background profundo siga
+  /// reportando ubicación a tiempo. Ver `eventAction` en [init].
+  static const Duration _nativeTickInterval = Duration(minutes: 2);
+
+  /// Convierte un tick recibido desde el isolate del servicio en un pulso de
+  /// ubicación real en el isolate principal. Filtra por la señal conocida para
+  /// no reaccionar a otros mensajes inter-isolate.
+  static void _onTaskData(Object data) {
+    if (data == _kLocationTickSignal) {
+      unawaited(DriverLocationService.instance.nativeHeartbeatPulse());
+    }
+  }
 
   bool get isRunning => _isRunning;
   String? get activeChannelName => _activeChannelName;
@@ -48,13 +71,27 @@ class RadioForegroundService {
         playSound: false,
       ),
       foregroundTaskOptions: ForegroundTaskOptions(
-        eventAction: ForegroundTaskEventAction.nothing(),
+        // Tick periódico NATIVO cada 2 min. El servicio nativo mantiene un
+        // wakelock, por eso este `onRepeatEvent` SIGUE disparando en background
+        // profundo (Doze/OEM) — a diferencia de los `Timer` de Dart del isolate
+        // principal, que el SO congela. Lo usamos como red de seguridad para
+        // garantizar un push de ubicación dentro de la ventana del cron de
+        // presencia (markStaleDriversOffline = 6 min). 2 min < 6 min con margen,
+        // y no infla la batería (un getCurrentPosition cada 2 min).
+        eventAction: ForegroundTaskEventAction.repeat(
+            _nativeTickInterval.inMilliseconds),
         autoRunOnBoot: false,
         autoRunOnMyPackageReplaced: false,
         allowWakeLock: true,
         allowWifiLock: true,
       ),
     );
+    // Recibir los ticks del isolate del servicio en el isolate PRINCIPAL
+    // (donde viven Firebase y DriverLocationService). El task handler corre en
+    // un isolate aparte y NO puede tocar el singleton ni Firestore; solo manda
+    // la señal y aquí la convertimos en un pulso de ubicación real.
+    FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
+    FlutterForegroundTask.addTaskDataCallback(_onTaskData);
     _attachConnectivityMonitor();
     _recoverIfZombie();
     _logger.i('RadioForegroundService initialized');
@@ -401,7 +438,16 @@ class _RadioTaskHandler extends TaskHandler {
 
   @override
   void onRepeatEvent(DateTime timestamp) {
-    // No usamos repeat events — Firestore push ya maneja los updates.
+    // Tick periódico NATIVO del servicio (cada _nativeTickInterval). Corre en
+    // ESTE isolate del servicio, que NO tiene Firebase ni el singleton de
+    // ubicación inicializados — por eso solo mandamos una señal al isolate
+    // principal, que la convierte en un push de ubicación real
+    // (RadioForegroundService._onTaskData → DriverLocationService.nativeHeartbeatPulse).
+    //
+    // Esta es la red de seguridad anti-Doze: el FGS nativo mantiene un wakelock
+    // y este callback sigue disparando en background profundo, donde los `Timer`
+    // de Dart del isolate principal quedan congelados.
+    FlutterForegroundTask.sendDataToMain(_kLocationTickSignal);
   }
 
   @override

@@ -71,19 +71,19 @@ class _RequestVehicleChangePageState extends State<RequestVehicleChangePage> {
       navigator.pop();
       messenger.showSnackBar(const SnackBar(
         content: Text('Solicitud enviada. Espera la aprobación.'),
-        backgroundColor: Colors.green,
+        backgroundColor: AppTheme.successColor,
       ));
     } on FirebaseFunctionsException catch (e) {
       if (!mounted) return;
       messenger.showSnackBar(SnackBar(
         content: Text('Error: ${e.message ?? e.code}'),
-        backgroundColor: Colors.red,
+        backgroundColor: AppTheme.errorColor,
       ));
     } catch (e) {
       if (!mounted) return;
       messenger.showSnackBar(SnackBar(
         content: Text('Error: $e'),
-        backgroundColor: Colors.red,
+        backgroundColor: AppTheme.errorColor,
       ));
     } finally {
       if (mounted) setState(() => _submitting = false);
@@ -99,32 +99,32 @@ class _RequestVehicleChangePageState extends State<RequestVehicleChangePage> {
     return Scaffold(
       appBar: AppBar(title: const Text('Solicitar cambio de unidad')),
       body: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         child: Form(
           key: _formKey,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               Card(
-                color: Colors.grey.shade100,
+                color: AppTheme.neutralBg,
                 child: Padding(
-                  padding: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.all(AppSpacing.md),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('Unidad actual',
-                          style: TextStyle(fontWeight: FontWeight.bold)),
-                      const SizedBox(height: 4),
+                      Text('Unidad actual',
+                          style: Theme.of(context).textTheme.titleMedium),
+                      const SizedBox(height: AppSpacing.xs),
                       Text('Placa: ${user.placa.isNotEmpty ? user.placa : "Sin registrar"}'),
                       Text('Número: ${user.numeroVehiculo.isNotEmpty ? "#${user.numeroVehiculo}" : "Sin registrar"}'),
                     ],
                   ),
                 ),
               ),
-              const SizedBox(height: 16),
-              const Text('Nueva unidad',
-                  style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.lg),
+              Text('Nueva unidad',
+                  style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: AppSpacing.sm),
               TextFormField(
                 controller: _plate,
                 decoration: const InputDecoration(labelText: 'Placa nueva'),
@@ -155,12 +155,15 @@ class _RequestVehicleChangePageState extends State<RequestVehicleChangePage> {
                   return null;
                 },
               ),
-              const SizedBox(height: 16),
-              const Text(
+              const SizedBox(height: AppSpacing.lg),
+              Text(
                 'Foto del nuevo vehículo (opcional pero recomendada)',
-                style: TextStyle(fontSize: 12, color: Colors.grey),
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: AppTheme.textSecondary),
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               OutlinedButton.icon(
                 onPressed: _pickPhoto,
                 icon: const Icon(Icons.camera_alt),
@@ -169,38 +172,35 @@ class _RequestVehicleChangePageState extends State<RequestVehicleChangePage> {
                     : 'Foto cargada — Volver a tomar'),
               ),
               if (_photo != null) ...[
-                const SizedBox(height: 8),
+                const SizedBox(height: AppSpacing.sm),
                 Image.file(_photo!, height: 150, fit: BoxFit.cover),
               ],
-              const SizedBox(height: 24),
+              const SizedBox(height: AppSpacing.xl),
               ElevatedButton(
                 onPressed: _submitting ? null : _submit,
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: AppTheme.primaryColor,
-                  padding: const EdgeInsets.symmetric(vertical: 14),
-                ),
                 child: _submitting
-                    ? const SizedBox(
+                    ? SizedBox(
                         width: 22,
                         height: 22,
                         child: CircularProgressIndicator(
-                            strokeWidth: 2, color: Colors.white),
+                            strokeWidth: 2,
+                            color: Theme.of(context).colorScheme.onPrimary),
                       )
-                    : const Text('Enviar solicitud',
-                        style: TextStyle(color: Colors.white)),
+                    : const Text('Enviar solicitud'),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: Colors.amber.shade50,
-                  border: Border.all(color: Colors.amber.shade300),
+                  color: AppTheme.warningColor.withValues(alpha: 0.08),
+                  border: Border.all(
+                      color: AppTheme.warningColor.withValues(alpha: 0.4)),
                   borderRadius: BorderRadius.circular(8),
                 ),
-                child: const Text(
+                child: Text(
                   'Mientras se aprueba, seguís operando con tu unidad actual. '
                   'Máximo 2 cambios aprobados en los últimos 30 días.',
-                  style: TextStyle(fontSize: 12),
+                  style: Theme.of(context).textTheme.bodySmall,
                 ),
               ),
             ],

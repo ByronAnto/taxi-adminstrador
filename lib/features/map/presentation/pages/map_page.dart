@@ -11,6 +11,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../associations/data/models/association_model.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
@@ -84,6 +85,10 @@ class _MapPageState extends State<MapPage>
     // el stream y re-obtenemos la posición para recentrar el mapa.
     if (state == AppLifecycleState.resumed) {
       _recoverLocationOnResume();
+      // Re-suscribir la lista de conductores/paradas de Firestore: en background
+      // el listener pudo quedar con un snapshot vacío/viejo y el mapa mostraba 0
+      // unidades (hasta el propio conductor "desaparecía"). Sin parpadeo.
+      if (mounted) context.read<MapBloc>().add(MapWatchersRefreshed());
     }
   }
 
@@ -735,7 +740,7 @@ class _MapPageState extends State<MapPage>
         icon:
             BitmapDescriptor.defaultMarkerWithHue(BitmapDescriptor.hueOrange),
         infoWindow: InfoWindow(
-          title: '📍 ${stand.name}',
+          title: stand.name,
           snippet: stand.address ?? 'Parada',
         ),
       ));
@@ -752,7 +757,7 @@ class _MapPageState extends State<MapPage>
         anchor: const Offset(0.5, 0.5),
         flat: true,
         zIndexInt: 10,
-        infoWindow: const InfoWindow(title: '🚕 Mi ubicación'),
+        infoWindow: const InfoWindow(title: 'Mi ubicación'),
       ));
     }
 
@@ -812,9 +817,9 @@ class _MapPageState extends State<MapPage>
                     (auth.user.role == AppConstants.roleOperator ||
                         auth.user.role == AppConstants.roleAdmin);
                 return Positioned(
-                  top: 12,
-                  left: 12,
-                  right: 12,
+                  top: AppSpacing.md,
+                  left: AppSpacing.md,
+                  right: AppSpacing.md,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -825,21 +830,21 @@ class _MapPageState extends State<MapPage>
                             children: [
                               _buildFilterChip(AppConstants.statusFree,
                                   'Libre', AppTheme.statusFree),
-                              const SizedBox(width: 8),
+                              const SizedBox(width: AppSpacing.sm),
                               _buildFilterChip(AppConstants.statusBusy,
                                   'Con pasajero', AppTheme.statusBusy),
-                              const SizedBox(width: 8),
+                              const SizedBox(width: AppSpacing.sm),
                               _buildFilterChip(
                                   AppConstants.statusReturning,
                                   'En camino',
                                   AppTheme.statusReturning),
-                              const SizedBox(width: 8),
+                              const SizedBox(width: AppSpacing.sm),
                               _buildStandLegendChip(
                                   taxiStands.where((s) => s.isActive).length),
                             ],
                           ),
                         ),
-                      if (isOpOrAdmin) const SizedBox(height: 8),
+                      if (isOpOrAdmin) const SizedBox(height: AppSpacing.sm),
                       _buildDestinationSelector(taxiStands),
                     ],
                   ),
@@ -855,7 +860,7 @@ class _MapPageState extends State<MapPage>
                   backgroundColor: Colors.white,
                   onPressed: _goToMyLocation,
                   child: const Icon(Icons.my_location,
-                      color: Colors.blue),
+                      color: AppTheme.infoColor),
                 ),
               ),
 
@@ -877,14 +882,13 @@ class _MapPageState extends State<MapPage>
                       ),
                     );
                   },
-                  child: const Icon(Icons.home,
-                      color: AppTheme.primaryColor),
+                  child: Icon(Icons.home,
+                      color: Theme.of(context).colorScheme.primary),
                 ),
               ),
 
               // Loading indicator
-              if (state is MapLoading)
-                const Center(child: CircularProgressIndicator()),
+              if (state is MapLoading) const LoadingState(),
 
               // Error
               if (state is MapError)
@@ -904,12 +908,13 @@ class _MapPageState extends State<MapPage>
                 snap: true,
                 snapSizes: const [_sheetMin, _sheetMid, _sheetMax],
                 builder: (context, scrollController) {
+                  final primary = Theme.of(context).colorScheme.primary;
                   return Container(
-                    decoration: const BoxDecoration(
-                      color: Colors.white,
-                      borderRadius:
-                          BorderRadius.vertical(top: Radius.circular(16)),
-                      boxShadow: [
+                    decoration: BoxDecoration(
+                      color: Theme.of(context).colorScheme.surface,
+                      borderRadius: const BorderRadius.vertical(
+                          top: Radius.circular(16)),
+                      boxShadow: const [
                         BoxShadow(
                           color: Colors.black12,
                           blurRadius: 8,
@@ -926,13 +931,14 @@ class _MapPageState extends State<MapPage>
                           behavior: HitTestBehavior.opaque,
                           onTap: _toggleSheet,
                           child: Padding(
-                            padding: const EdgeInsets.only(top: 8, bottom: 4),
+                            padding: const EdgeInsets.only(
+                                top: AppSpacing.sm, bottom: AppSpacing.xs),
                             child: Center(
                               child: Container(
                                 width: 48,
                                 height: 5,
                                 decoration: BoxDecoration(
-                                  color: Colors.grey[400],
+                                  color: AppTheme.dividerColor,
                                   borderRadius: BorderRadius.circular(3),
                                 ),
                               ),
@@ -944,36 +950,35 @@ class _MapPageState extends State<MapPage>
                           onTap: _toggleSheet,
                           child: Padding(
                             padding: const EdgeInsets.symmetric(
-                                horizontal: 16, vertical: 8),
+                                horizontal: AppSpacing.lg,
+                                vertical: AppSpacing.sm),
                             child: Row(
                               children: [
-                                const Text(
+                                Text(
                                   'Conductores Cercanos',
-                                  style: TextStyle(
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 16),
+                                  style:
+                                      Theme.of(context).textTheme.titleMedium,
                                 ),
                                 const Spacer(),
                                 Container(
                                   padding: const EdgeInsets.symmetric(
-                                      horizontal: 8, vertical: 2),
+                                      horizontal: AppSpacing.sm, vertical: 2),
                                   decoration: BoxDecoration(
-                                    color: AppTheme.primaryColor
-                                        .withValues(alpha: 0.1),
+                                    color: primary.withValues(alpha: 0.1),
                                     borderRadius: BorderRadius.circular(12),
                                   ),
                                   child: Text(
                                     '${drivers.length}',
-                                    style: const TextStyle(
-                                        color: AppTheme.primaryColor,
+                                    style: TextStyle(
+                                        color: primary,
                                         fontWeight: FontWeight.bold),
                                   ),
                                 ),
-                                const SizedBox(width: 8),
-                                Icon(
+                                const SizedBox(width: AppSpacing.sm),
+                                const Icon(
                                   Icons.keyboard_arrow_up,
                                   size: 20,
-                                  color: Colors.grey[600],
+                                  color: AppTheme.textSecondary,
                                 ),
                               ],
                             ),
@@ -982,11 +987,10 @@ class _MapPageState extends State<MapPage>
                         const Divider(height: 1),
                         Expanded(
                           child: drivers.isEmpty
-                              ? Center(
-                                  child: Text(
-                                    'Sin conductores con los filtros seleccionados',
-                                    style: TextStyle(color: Colors.grey[500]),
-                                  ),
+                              ? const EmptyState(
+                                  icon: Icons.directions_car_outlined,
+                                  title:
+                                      'Sin conductores con los filtros seleccionados',
                                 )
                               : ListView.builder(
                                   controller: scrollController,
@@ -1060,9 +1064,10 @@ class _MapPageState extends State<MapPage>
     return GestureDetector(
       onTap: () => _showDestinationPicker(stands),
       child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+        padding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.md, vertical: AppSpacing.xs + 2),
         decoration: BoxDecoration(
-          color: Colors.white,
+          color: Theme.of(context).colorScheme.surface,
           borderRadius: BorderRadius.circular(20),
           boxShadow: const [
             BoxShadow(color: Colors.black12, blurRadius: 4),
@@ -1072,18 +1077,18 @@ class _MapPageState extends State<MapPage>
           mainAxisSize: MainAxisSize.min,
           children: [
             Icon(Icons.flag, color: Colors.amber[700], size: 18),
-            const SizedBox(width: 6),
+            const SizedBox(width: AppSpacing.xs + 2),
             Flexible(
               child: Text(
                 'Destino: $_selectedDestinationName',
-                style: const TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w600,
-                ),
+                style: Theme.of(context)
+                    .textTheme
+                    .bodyMedium
+                    ?.copyWith(fontWeight: FontWeight.w600),
                 overflow: TextOverflow.ellipsis,
               ),
             ),
-            const SizedBox(width: 4),
+            const SizedBox(width: AppSpacing.xs),
             const Icon(Icons.arrow_drop_down, size: 20),
           ],
         ),
@@ -1103,22 +1108,19 @@ class _MapPageState extends State<MapPage>
             mainAxisSize: MainAxisSize.min,
             children: [
               Container(
-                margin: const EdgeInsets.symmetric(vertical: 8),
+                margin: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
                 width: 40,
                 height: 4,
                 decoration: BoxDecoration(
-                  color: Colors.grey[300],
+                  color: AppTheme.dividerColor,
                   borderRadius: BorderRadius.circular(2),
                 ),
               ),
-              const Padding(
-                padding: EdgeInsets.all(12),
+              Padding(
+                padding: const EdgeInsets.all(AppSpacing.md),
                 child: Text(
                   'Seleccionar Destino',
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
-                  ),
+                  style: Theme.of(ctx).textTheme.titleMedium,
                 ),
               ),
               const Divider(height: 1),
@@ -1128,8 +1130,8 @@ class _MapPageState extends State<MapPage>
               // de prueba.
               if (_associationStand != null && _associationStand!.isConfigured)
                 ListTile(
-                  leading:
-                      const Icon(Icons.home, color: AppTheme.primaryColor),
+                  leading: Icon(Icons.home,
+                      color: Theme.of(ctx).colorScheme.primary),
                   title: Text(
                     _associationStand!.label?.isNotEmpty == true
                         ? _associationStand!.label!
@@ -1139,8 +1141,10 @@ class _MapPageState extends State<MapPage>
                       'Radio: ${_associationStand!.radiusKm.toStringAsFixed(1)} km'),
                   selected: _selectedDestinationName ==
                       (_associationStand!.label ?? 'Parada principal'),
-                  selectedTileColor:
-                      AppTheme.primaryColor.withValues(alpha: 0.08),
+                  selectedTileColor: Theme.of(ctx)
+                      .colorScheme
+                      .primary
+                      .withValues(alpha: 0.08),
                   onTap: () {
                     setState(() {
                       _selectedDestination = LatLng(
@@ -1173,7 +1177,7 @@ class _MapPageState extends State<MapPage>
                     ),
                   ),
               ListTile(
-                leading: const Icon(Icons.block, color: Colors.grey),
+                leading: const Icon(Icons.block, color: AppTheme.statusOffline),
                 title: const Text('Sin destino'),
                 subtitle: const Text('Ocultar ruta'),
                 selected: _selectedDestinationName == '',
@@ -1197,6 +1201,7 @@ class _MapPageState extends State<MapPage>
     final stands = state is MapLoaded ? state.taxiStands : <TaxiStandModel>[];
     final color = _statusColor(driver.status);
     final label = _statusLabel(driver.status);
+    final textTheme = Theme.of(context).textTheme;
     final displayName = driver.vehicleNumber.isNotEmpty
         ? 'Unidad ${driver.vehicleNumber}'
         : 'Conductor ${driver.licenseNumber}';
@@ -1225,25 +1230,41 @@ class _MapPageState extends State<MapPage>
       ),
       title: Text(
         displayName,
-        style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14),
+        style: textTheme.bodyMedium?.copyWith(fontWeight: FontWeight.w600),
       ),
-      subtitle: Text(
-        '$label${driver.plate.isNotEmpty ? " • ${driver.plate}" : ""} • ★ ${driver.rating.toStringAsFixed(1)}',
-        style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+      subtitle: Row(
+        children: [
+          Flexible(
+            child: Text(
+              '$label${driver.plate.isNotEmpty ? " • ${driver.plate}" : ""} • ',
+              overflow: TextOverflow.ellipsis,
+              style: textTheme.bodySmall
+                  ?.copyWith(color: AppTheme.textSecondary),
+            ),
+          ),
+          const Icon(Icons.star, size: 12, color: AppTheme.warningColor),
+          const SizedBox(width: 2),
+          Text(
+            driver.rating.toStringAsFixed(1),
+            style: textTheme.bodySmall
+                ?.copyWith(color: AppTheme.textSecondary),
+          ),
+        ],
       ),
       trailing: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+            padding: const EdgeInsets.symmetric(
+                horizontal: AppSpacing.sm, vertical: 2),
             decoration: BoxDecoration(
               color: color.withValues(alpha: 0.15),
               borderRadius: BorderRadius.circular(8),
             ),
             child: Text(
               label,
-              style: TextStyle(
-                  fontSize: 11, fontWeight: FontWeight.w600, color: color),
+              style: textTheme.labelSmall
+                  ?.copyWith(fontWeight: FontWeight.w600, color: color),
             ),
           ),
         ],
@@ -1329,9 +1350,11 @@ class _MapPageState extends State<MapPage>
       ),
       builder: (ctx) {
         final color = _statusColor(driver.status);
+        final textTheme = Theme.of(ctx).textTheme;
         return SafeArea(
           child: Padding(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 20),
+            padding: const EdgeInsets.fromLTRB(AppSpacing.lg, AppSpacing.md,
+                AppSpacing.lg, AppSpacing.xl),
             child: Column(
               mainAxisSize: MainAxisSize.min,
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1340,9 +1363,9 @@ class _MapPageState extends State<MapPage>
                   child: Container(
                     width: 40,
                     height: 4,
-                    margin: const EdgeInsets.only(bottom: 12),
+                    margin: const EdgeInsets.only(bottom: AppSpacing.md),
                     decoration: BoxDecoration(
-                      color: Colors.grey.shade300,
+                      color: AppTheme.dividerColor,
                       borderRadius: BorderRadius.circular(2),
                     ),
                   ),
@@ -1353,7 +1376,7 @@ class _MapPageState extends State<MapPage>
                       backgroundColor: color.withValues(alpha: 0.15),
                       child: Icon(Icons.directions_car, color: color),
                     ),
-                    const SizedBox(width: 12),
+                    const SizedBox(width: AppSpacing.md),
                     Expanded(
                       child: Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -1362,19 +1385,17 @@ class _MapPageState extends State<MapPage>
                             driver.vehicleNumber.isNotEmpty
                                 ? 'Unidad #${driver.vehicleNumber}'
                                 : 'Conductor',
-                            style: const TextStyle(
-                                fontWeight: FontWeight.bold, fontSize: 17),
+                            style: textTheme.titleLarge,
                           ),
                           if (driver.driverName.isNotEmpty)
                             Text(
                               driver.driverName,
-                              style: const TextStyle(fontSize: 14),
+                              style: textTheme.bodyMedium,
                             ),
                           if (driver.plate.isNotEmpty)
                             Text(
                               'Placa: ${driver.plate}',
-                              style: const TextStyle(
-                                fontSize: 13,
+                              style: textTheme.bodySmall?.copyWith(
                                 color: AppTheme.textSecondary,
                               ),
                             ),
@@ -1383,28 +1404,26 @@ class _MapPageState extends State<MapPage>
                     ),
                     Container(
                       padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 4),
+                          horizontal: AppSpacing.sm + 2, vertical: AppSpacing.xs),
                       decoration: BoxDecoration(
                         color: color.withValues(alpha: 0.15),
                         borderRadius: BorderRadius.circular(10),
                       ),
                       child: Text(
                         _statusLabel(driver.status),
-                        style: TextStyle(
+                        style: textTheme.bodySmall?.copyWith(
                           fontWeight: FontWeight.w600,
                           color: color,
-                          fontSize: 13,
                         ),
                       ),
                     ),
                   ],
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 Text(
                   'Mantén presionado sobre la unidad en el mapa para ver "Ir aquí" con Google Maps.',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.grey.shade600,
+                  style: textTheme.labelSmall?.copyWith(
+                    color: AppTheme.textSecondary,
                     fontStyle: FontStyle.italic,
                   ),
                 ),
@@ -1440,9 +1459,10 @@ class _MapPageState extends State<MapPage>
             }
 
             final color = _statusColor(driver.status);
+            final textTheme = Theme.of(ctx).textTheme;
             return SafeArea(
               child: SingleChildScrollView(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(AppSpacing.lg),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1450,11 +1470,11 @@ class _MapPageState extends State<MapPage>
                     // Handle
                     Center(
                       child: Container(
-                        margin: const EdgeInsets.only(bottom: 12),
+                        margin: const EdgeInsets.only(bottom: AppSpacing.md),
                         width: 40,
                         height: 4,
                         decoration: BoxDecoration(
-                          color: Colors.grey[300],
+                          color: AppTheme.dividerColor,
                           borderRadius: BorderRadius.circular(2),
                         ),
                       ),
@@ -1466,7 +1486,7 @@ class _MapPageState extends State<MapPage>
                           backgroundColor: color.withValues(alpha: 0.15),
                           child: Icon(Icons.directions_car, color: color),
                         ),
-                        const SizedBox(width: 12),
+                        const SizedBox(width: AppSpacing.md),
                         Expanded(
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
@@ -1475,46 +1495,42 @@ class _MapPageState extends State<MapPage>
                                 driver.vehicleNumber.isNotEmpty
                                     ? 'Unidad #${driver.vehicleNumber}'
                                     : 'Conductor ${driver.licenseNumber}',
-                                style: const TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  fontSize: 16,
-                                ),
+                                style: textTheme.titleMedium,
                               ),
                               if (driver.plate.isNotEmpty)
                                 Text(
                                   'Placa: ${driver.plate}',
-                                  style: const TextStyle(
-                                    fontSize: 13,
+                                  style: textTheme.bodySmall?.copyWith(
                                     color: AppTheme.textSecondary,
                                   ),
                                 ),
                               if (driver.driverName.isNotEmpty)
                                 Text(
                                   driver.driverName,
-                                  style: const TextStyle(fontSize: 13),
+                                  style: textTheme.bodySmall,
                                 ),
                             ],
                           ),
                         ),
                         Container(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 10, vertical: 4),
+                              horizontal: AppSpacing.sm + 2,
+                              vertical: AppSpacing.xs),
                           decoration: BoxDecoration(
                             color: color.withValues(alpha: 0.15),
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: Text(
                             _statusLabel(driver.status),
-                            style: TextStyle(
+                            style: textTheme.bodySmall?.copyWith(
                               fontWeight: FontWeight.w600,
                               color: color,
-                              fontSize: 13,
                             ),
                           ),
                         ),
                       ],
                     ),
-                    const SizedBox(height: 12),
+                    const SizedBox(height: AppSpacing.md),
                     // Acción "Ir" — abre Google Maps con direcciones a este conductor.
                     SizedBox(
                       width: double.infinity,
@@ -1529,21 +1545,22 @@ class _MapPageState extends State<MapPage>
                         icon: const Icon(Icons.directions),
                         label: const Text('Ir aquí (Google Maps)'),
                         style: ElevatedButton.styleFrom(
-                          backgroundColor: AppTheme.primaryColor,
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          backgroundColor: Theme.of(ctx).colorScheme.primary,
+                          foregroundColor: Theme.of(ctx).colorScheme.onPrimary,
+                          padding:
+                              const EdgeInsets.symmetric(vertical: AppSpacing.md),
                         ),
                       ),
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: AppSpacing.lg),
                     const Divider(),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: AppSpacing.sm),
                     // Distancias a bases
-                    const Text(
+                    Text(
                       'Distancia a bases:',
-                      style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+                      style: textTheme.titleMedium,
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: AppSpacing.sm),
                     // Distancia a la parada de la asociación (configurada).
                     if (_associationStand != null &&
                         _associationStand!.isConfigured)
@@ -1587,32 +1604,35 @@ class _MapPageState extends State<MapPage>
     if ((user.fotoLicenciaTrasera ?? '').isNotEmpty) {
       photos.add(_LabeledPhoto('Licencia trasera', user.fotoLicenciaTrasera!));
     }
+    final textTheme = Theme.of(context).textTheme;
     if (photos.isEmpty) {
-      return const Padding(
-        padding: EdgeInsets.symmetric(vertical: 8),
+      return Padding(
+        padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
         child: Text(
           'Sin fotos registradas para este conductor',
-          style: TextStyle(fontStyle: FontStyle.italic, color: Colors.grey),
+          style: textTheme.bodyMedium?.copyWith(
+              fontStyle: FontStyle.italic, color: AppTheme.textSecondary),
         ),
       );
     }
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const SizedBox(height: 12),
+        const SizedBox(height: AppSpacing.md),
         const Divider(),
-        const SizedBox(height: 8),
-        const Text(
+        const SizedBox(height: AppSpacing.sm),
+        Text(
           'Fotos del vehículo y licencia',
-          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+          style: textTheme.titleMedium,
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: AppSpacing.sm),
         SizedBox(
           height: 110,
           child: ListView.separated(
             scrollDirection: Axis.horizontal,
             itemCount: photos.length,
-            separatorBuilder: (ctx2, idx) => const SizedBox(width: 8),
+            separatorBuilder: (ctx2, idx) =>
+                const SizedBox(width: AppSpacing.sm),
             itemBuilder: (ctx2, i) {
               final p = photos[i];
               return GestureDetector(
@@ -1635,9 +1655,9 @@ class _MapPageState extends State<MapPage>
                         ),
                       ),
                     ),
-                    const SizedBox(height: 4),
+                    const SizedBox(height: AppSpacing.xs),
                     Text(p.label,
-                        style: const TextStyle(fontSize: 10),
+                        style: textTheme.labelSmall,
                         overflow: TextOverflow.ellipsis),
                   ],
                 ),
@@ -1708,21 +1728,21 @@ class _MapPageState extends State<MapPage>
   }
 
   Widget _buildDistanceRow(IconData icon, String name, double distKm) {
+    final textTheme = Theme.of(context).textTheme;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs),
       child: Row(
         children: [
           Icon(icon, size: 18, color: Colors.orange[700]),
-          const SizedBox(width: 8),
+          const SizedBox(width: AppSpacing.sm),
           Expanded(
-            child: Text(name, style: const TextStyle(fontSize: 13)),
+            child: Text(name, style: textTheme.bodySmall),
           ),
           Text(
             _formatDistance(distKm),
-            style: const TextStyle(
+            style: textTheme.bodySmall?.copyWith(
               fontWeight: FontWeight.bold,
-              fontSize: 13,
-              color: AppTheme.primaryColor,
+              color: Theme.of(context).colorScheme.primary,
             ),
           ),
         ],

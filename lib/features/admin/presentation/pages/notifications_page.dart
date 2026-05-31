@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 import 'package:uuid/uuid.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 
 /// Pantalla de notificaciones del admin.
@@ -46,6 +47,12 @@ class NotificationsPage extends StatelessWidget {
             .limit(50)
             .snapshots(),
         builder: (context, snap) {
+          if (snap.hasError) {
+            return ErrorState.fromError(snap.error);
+          }
+          if (snap.connectionState == ConnectionState.waiting) {
+            return const LoadingState();
+          }
           final docs = snap.data?.docs ?? [];
           final now = DateTime.now();
           // Filtrar por audiencia y TTL (expiresAt > now, client-side)
@@ -68,24 +75,15 @@ class NotificationsPage extends StatelessWidget {
           }).toList();
 
           if (visible.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.notifications_off,
-                      size: 64, color: Colors.grey[300]),
-                  const SizedBox(height: 16),
-                  Text('Sin notificaciones',
-                      style:
-                          TextStyle(color: Colors.grey[600], fontSize: 15)),
-                ],
-              ),
+            return const EmptyState(
+              icon: Icons.notifications_off,
+              title: 'Sin notificaciones',
             );
           }
           return ListView.separated(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(AppSpacing.md),
             itemCount: visible.length,
-            separatorBuilder: (_, _) => const SizedBox(height: 4),
+            separatorBuilder: (_, _) => const SizedBox(height: AppSpacing.xs),
             itemBuilder: (_, i) {
               final n = visible[i].data();
               final created =
@@ -104,8 +102,10 @@ class NotificationsPage extends StatelessWidget {
                       const SizedBox(height: 4),
                       Text(
                         '${_audLabel(aud)} · ${DateFormat('dd MMM HH:mm').format(created)} · $status',
-                        style: TextStyle(
-                            fontSize: 11, color: Colors.grey.shade600),
+                        style: Theme.of(context)
+                            .textTheme
+                            .labelSmall
+                            ?.copyWith(color: AppTheme.textSecondary),
                       ),
                     ],
                   ),
@@ -235,10 +235,9 @@ class _CreateNotificationFormState extends State<_CreateNotificationForm> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Text('Nueva notificación',
-                  style:
-                      TextStyle(fontSize: 18, fontWeight: FontWeight.w700)),
-              const SizedBox(height: 12),
+              Text('Nueva notificación',
+                  style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: AppSpacing.md),
               TextFormField(
                 controller: _title,
                 decoration: const InputDecoration(

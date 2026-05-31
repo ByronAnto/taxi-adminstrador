@@ -1,24 +1,16 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
-import '../../config/injection/injection.dart';
 import '../../features/auth/presentation/bloc/auth_bloc.dart';
-import '../../features/reports/presentation/bloc/reports_bloc.dart';
 import '../../features/auth/presentation/pages/login_page.dart';
 import '../../features/auth/presentation/pages/register_page.dart';
 import '../../features/auth/presentation/pages/pending_approval_page.dart';
 import '../../features/auth/presentation/pages/account_blocked_page.dart';
 import '../../features/home/presentation/pages/home_page.dart';
 import '../../features/users/presentation/pages/profile_page.dart';
-import '../../features/payments/presentation/pages/payments_page.dart';
 import '../../features/payments/presentation/pages/expenses_page.dart';
 import '../../features/reports/presentation/pages/reports_page.dart';
 import '../../features/reports/presentation/pages/driver_report_page.dart';
 import '../../features/reports/presentation/pages/operator_validations_page.dart';
-// Pantalla vieja de gestión de usuarios reemplazada por MembersPage,
-// que sí filtra por status (pendingApproval/active/suspended/rejected).
-// import '../../features/users/presentation/pages/user_management_page.dart';
-import '../../features/trips/presentation/pages/assign_trip_page.dart';
 import '../../features/trips/presentation/pages/trips_page.dart';
 import '../../features/emergency/presentation/pages/emergency_page.dart';
 import '../../features/map/presentation/pages/taxi_stand_config_page.dart';
@@ -124,11 +116,6 @@ class AppRouter {
           builder: (context, state) => const ProfilePage(),
         ),
         GoRoute(
-          path: '/payments',
-          name: 'payments',
-          builder: (context, state) => const PaymentsPage(),
-        ),
-        GoRoute(
           path: '/expenses',
           name: 'expenses',
           builder: (context, state) => const ExpensesPage(),
@@ -136,20 +123,10 @@ class AppRouter {
         GoRoute(
           path: '/reports',
           name: 'reports',
-          builder: (context, state) {
-            // El reporte general consulta `trips` filtrando por tenant; le
-            // pasamos el associationId del usuario autenticado en la carga
-            // inicial (sin él la query sería denegada por reglas Firestore).
-            final authState = authBloc.state;
-            final aid = authState is AuthAuthenticated
-                ? authState.user.associationId
-                : '';
-            return BlocProvider(
-              create: (_) => sl<ReportsBloc>()
-                ..add(ReportsLoadRequested(associationId: aid)),
-              child: const ReportsPage(),
-            );
-          },
+          // ReportsPage es autónoma: lee los agregados `tripStatsDaily` vía
+          // AnalyticsReportService y resuelve el tenant desde CurrentUserContext
+          // (con respaldo del AuthBloc), por lo que ya no requiere ReportsBloc.
+          builder: (context, state) => const ReportsPage(),
         ),
         GoRoute(
           path: '/driver-report',
@@ -167,22 +144,6 @@ class AppRouter {
           path: '/operator-validations',
           name: 'operator-validations',
           builder: (context, state) => const OperatorValidationsPage(),
-        ),
-        GoRoute(
-          path: '/users',
-          name: 'users',
-          // Redirige a la nueva MembersPage con filtros por status.
-          // /users → MembersPage usa associationId del JWT (admin de la suya).
-          // /users?aid=X → super-admin gestiona otra asociación.
-          builder: (context, state) {
-            final aid = state.uri.queryParameters['aid'];
-            return MembersPage(associationId: aid);
-          },
-        ),
-        GoRoute(
-          path: '/assign-trip',
-          name: 'assign-trip',
-          builder: (context, state) => const AssignTripPage(),
         ),
         GoRoute(
           path: '/emergency',

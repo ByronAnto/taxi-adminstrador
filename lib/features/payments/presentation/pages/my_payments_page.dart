@@ -11,6 +11,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
 
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../associations/data/models/association_model.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
@@ -40,8 +41,6 @@ class MyPaymentsPage extends StatelessWidget {
         return Scaffold(
           appBar: AppBar(
             title: const Text('Mis pagos'),
-            backgroundColor: AppTheme.primaryColor,
-            foregroundColor: Colors.white,
             leading: IconButton(
               icon: const Icon(Icons.arrow_back),
               onPressed: () =>
@@ -59,14 +58,19 @@ class MyPaymentsPage extends StatelessWidget {
                 .snapshots(),
             builder: (_, snap) {
               if (snap.hasError) {
-                return _errorState(context, snap.error);
+                return ErrorState.fromError(snap.error);
               }
               if (snap.connectionState == ConnectionState.waiting) {
-                return const Center(child: CircularProgressIndicator());
+                return const LoadingState();
               }
               final docs = snap.data?.docs ?? [];
               if (docs.isEmpty) {
-                return _emptyState(context);
+                return const EmptyState(
+                  icon: Icons.receipt_long,
+                  title: 'Aún no has reportado pagos.',
+                  subtitle:
+                      'Toca "Reportar pago" para registrar tu primera cuota.',
+                );
               }
               final payments =
                   docs.map(PaymentModel.fromFirestore).toList();
@@ -79,9 +83,10 @@ class MyPaymentsPage extends StatelessWidget {
                 return b.reportedAt.compareTo(a.reportedAt);
               });
               return ListView.separated(
-                padding: const EdgeInsets.all(16),
+                padding: const EdgeInsets.all(AppSpacing.lg),
                 itemCount: payments.length,
-                separatorBuilder: (_, _) => const SizedBox(height: 8),
+                separatorBuilder: (_, _) =>
+                    const SizedBox(height: AppSpacing.sm),
                 itemBuilder: (_, i) => _PaymentTile(
                   payment: payments[i],
                   onPayCharge: () => _openReportDialog(
@@ -100,61 +105,6 @@ class MyPaymentsPage extends StatelessWidget {
           ),
         );
       },
-    );
-  }
-
-  Widget _errorState(BuildContext context, Object? error) {
-    final msg = error?.toString() ?? '';
-    final isIndex = msg.contains('failed-precondition') ||
-        msg.contains('requires an index');
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.error_outline,
-                size: 64, color: AppTheme.errorColor),
-            const SizedBox(height: 16),
-            const Text('No pudimos cargar tus pagos',
-                style: TextStyle(
-                    fontSize: 16, fontWeight: FontWeight.w800)),
-            const SizedBox(height: 8),
-            Text(
-              isIndex
-                  ? 'El administrador necesita desplegar el índice nuevo de Firestore. Avísale para que ejecute "firebase deploy --only firestore:indexes".'
-                  : 'Error: $msg',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 13, color: Colors.grey.shade700),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _emptyState(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.receipt_long, size: 64, color: Colors.grey[300]),
-            const SizedBox(height: 16),
-            const Text(
-              'Aún no has reportado pagos.',
-              style: TextStyle(fontSize: 16, color: Colors.black54),
-            ),
-            const SizedBox(height: 8),
-            const Text(
-              'Toca "Reportar pago" para registrar tu primera cuota.',
-              textAlign: TextAlign.center,
-              style: TextStyle(fontSize: 12, color: Colors.black45),
-            ),
-          ],
-        ),
-      ),
     );
   }
 
@@ -223,15 +173,16 @@ class _PaymentTile extends StatelessWidget {
     }
 
     final statusColor = switch (payment.status) {
-      PaymentStatus.pending => Colors.orange,
-      PaymentStatus.validated => Colors.green,
-      PaymentStatus.rejected => Colors.red,
+      PaymentStatus.pending => AppTheme.warningColor,
+      PaymentStatus.validated => AppTheme.successColor,
+      PaymentStatus.rejected => AppTheme.errorColor,
     };
     final statusLabel = switch (payment.status) {
       PaymentStatus.pending => 'Pendiente',
       PaymentStatus.validated => 'Validado',
       PaymentStatus.rejected => 'Rechazado',
     };
+    final textTheme = Theme.of(context).textTheme;
     final df = DateFormat('dd/MM/yyyy');
 
     return Card(
@@ -249,7 +200,7 @@ class _PaymentTile extends StatelessWidget {
         ),
         title: Text(
           '\$${payment.amount.toStringAsFixed(2)} · ${PaymentConcepts.label(payment.concept)}',
-          style: const TextStyle(fontWeight: FontWeight.w600),
+          style: textTheme.titleMedium,
         ),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -257,21 +208,19 @@ class _PaymentTile extends StatelessWidget {
             Text(
               'Pagado el ${df.format(payment.paymentDate)} · '
               '${_methodLabel(payment.proof?.method)}',
-              style: const TextStyle(fontSize: 12),
+              style: textTheme.bodySmall,
             ),
             Text(
               statusLabel,
-              style: TextStyle(
-                  fontSize: 11,
-                  color: statusColor,
-                  fontWeight: FontWeight.bold),
+              style: textTheme.labelSmall?.copyWith(
+                  color: statusColor, fontWeight: FontWeight.bold),
             ),
             if (payment.status == PaymentStatus.rejected &&
                 payment.rejectionReason != null)
               Text(
                 'Motivo: ${payment.rejectionReason}',
-                style:
-                    const TextStyle(fontSize: 11, color: Colors.black54),
+                style: textTheme.labelSmall
+                    ?.copyWith(color: AppTheme.textSecondary),
               ),
           ],
         ),
@@ -303,15 +252,17 @@ class _UnpaidChargeTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
     final df = DateFormat('dd/MM/yyyy');
     final overdue = payment.dueDate != null &&
         payment.dueDate!.isBefore(DateTime.now());
-    final orange = overdue ? Colors.red.shade700 : Colors.orange.shade700;
+    // Vencido → error (rojo), por pagar → aviso (naranja).
+    final accent = overdue ? AppTheme.errorColor : AppTheme.warningColor;
 
     return Card(
       elevation: 3,
       shape: RoundedRectangleBorder(
-        side: BorderSide(color: orange, width: 1.5),
+        side: BorderSide(color: accent, width: 1.5),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Padding(
@@ -323,9 +274,9 @@ class _UnpaidChargeTile extends StatelessWidget {
               children: [
                 Container(
                   padding: const EdgeInsets.symmetric(
-                      horizontal: 8, vertical: 3),
+                      horizontal: AppSpacing.sm, vertical: 3),
                   decoration: BoxDecoration(
-                    color: orange,
+                    color: accent,
                     borderRadius: BorderRadius.circular(6),
                   ),
                   child: Text(
@@ -341,27 +292,24 @@ class _UnpaidChargeTile extends StatelessWidget {
                 const Spacer(),
                 Text(
                   '\$${payment.amount.toStringAsFixed(2)}',
-                  style: TextStyle(
-                    fontSize: 22,
+                  style: textTheme.headlineMedium?.copyWith(
                     fontWeight: FontWeight.w900,
-                    color: orange,
+                    color: accent,
                   ),
                 ),
               ],
             ),
-            const SizedBox(height: 4),
+            const SizedBox(height: AppSpacing.xs),
             Text(
               PaymentConcepts.label(payment.concept),
-              style: const TextStyle(
-                  fontSize: 15, fontWeight: FontWeight.w700),
+              style: textTheme.titleMedium,
             ),
             if (payment.notes != null && payment.notes!.isNotEmpty) ...[
-              const SizedBox(height: 4),
+              const SizedBox(height: AppSpacing.xs),
               Text(
                 payment.notes!,
-                style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade800,
+                style: textTheme.bodySmall?.copyWith(
+                    color: AppTheme.textSecondary,
                     fontStyle: FontStyle.italic),
               ),
             ],
@@ -369,13 +317,13 @@ class _UnpaidChargeTile extends StatelessWidget {
             Row(
               children: [
                 if (payment.dueDate != null) ...[
-                  Icon(Icons.event,
-                      size: 14, color: Colors.grey.shade700),
-                  const SizedBox(width: 4),
+                  const Icon(Icons.event,
+                      size: 14, color: AppTheme.textSecondary),
+                  const SizedBox(width: AppSpacing.xs),
                   Text(
                     'Vence ${df.format(payment.dueDate!)}',
-                    style: TextStyle(
-                        fontSize: 11, color: Colors.grey.shade800),
+                    style: textTheme.labelSmall
+                        ?.copyWith(color: AppTheme.textSecondary),
                   ),
                   const SizedBox(width: 10),
                 ],
@@ -383,8 +331,8 @@ class _UnpaidChargeTile extends StatelessWidget {
                   Expanded(
                     child: Text(
                       'Emitido por ${payment.emittedByName}',
-                      style: TextStyle(
-                          fontSize: 11, color: Colors.grey.shade600),
+                      style: textTheme.labelSmall
+                          ?.copyWith(color: AppTheme.textSecondary),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ),
@@ -398,7 +346,7 @@ class _UnpaidChargeTile extends StatelessWidget {
                 icon: const Icon(Icons.payments),
                 label: const Text('Pagar este cobro'),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: orange,
+                  backgroundColor: accent,
                   foregroundColor: Colors.white,
                 ),
               ),
@@ -442,7 +390,6 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
   DateTime _paymentDate = DateTime.now();
   DateTime? _transactionDate;
   File? _photo;
-  String? _photoUploadedUrl;
   bool _saving = false;
   bool _uploadingPhoto = false;
 
@@ -537,9 +484,10 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
                   Container(
                     padding: const EdgeInsets.all(12),
                     decoration: BoxDecoration(
-                      border: Border.all(color: Colors.orange, width: 1.5),
+                      border: Border.all(
+                          color: AppTheme.warningColor, width: 1.5),
                       borderRadius: BorderRadius.circular(8),
-                      color: Colors.orange.shade50,
+                      color: AppTheme.warningColor.withValues(alpha: 0.08),
                     ),
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -547,14 +495,14 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
                         const Row(
                           children: [
                             Icon(Icons.warning_amber_rounded,
-                                size: 16, color: Colors.orange),
+                                size: 16, color: AppTheme.warningColor),
                             SizedBox(width: 6),
                             Text(
                               'Atraso detectado',
                               style: TextStyle(
                                 fontWeight: FontWeight.bold,
                                 fontSize: 13,
-                                color: Colors.orange,
+                                color: AppTheme.warningColor,
                               ),
                             ),
                           ],
@@ -675,10 +623,7 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
                       if (_photo != null)
                         IconButton(
                           icon: const Icon(Icons.close, size: 18),
-                          onPressed: () => setState(() {
-                            _photo = null;
-                            _photoUploadedUrl = null;
-                          }),
+                          onPressed: () => setState(() => _photo = null),
                         ),
                     ],
                   ),
@@ -829,9 +774,7 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
       final ref = FirebaseStorage.instance
           .ref('payment_proofs/$uid/proof_$ts.jpg');
       await ref.putFile(_photo!);
-      final url = await ref.getDownloadURL();
-      _photoUploadedUrl = url;
-      return url;
+      return await ref.getDownloadURL();
     } finally {
       if (mounted) setState(() => _uploadingPhoto = false);
     }
@@ -878,7 +821,7 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
         const SnackBar(
           content:
               Text('Pago reportado. Espera la validación del administrador.'),
-          backgroundColor: Colors.green,
+          backgroundColor: AppTheme.successColor,
         ),
       );
       Navigator.pop(context);
@@ -887,13 +830,15 @@ class _ReportPaymentDialogState extends State<_ReportPaymentDialog> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error: ${e.message ?? e.code}'),
-          backgroundColor: Colors.red,
+          backgroundColor: AppTheme.errorColor,
         ),
       );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e'), backgroundColor: Colors.red),
+        SnackBar(
+            content: Text('Error: $e'),
+            backgroundColor: AppTheme.errorColor),
       );
     } finally {
       if (mounted) setState(() => _saving = false);

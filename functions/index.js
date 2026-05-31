@@ -1,5 +1,5 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
-const { onDocumentWritten, onDocumentUpdated } = require("firebase-functions/v2/firestore");
+const { onDocumentWritten, onDocumentUpdated, onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
 const { defineSecret } = require("firebase-functions/params");
 const { initializeApp } = require("firebase-admin/app");
@@ -2580,7 +2580,7 @@ exports.enforcePayments = onSchedule(
 );
 
 /// Helper interno para enviar FCM a un uid usando el fcmToken guardado.
-async function _sendFcmToUid(uid, payload) {
+async function _sendFcmToUid(uid, payload, data = {}) {
   const u = await db.collection("users").doc(uid).get();
   const token = u.data()?.fcmToken;
   if (!token) return;
@@ -2588,6 +2588,9 @@ async function _sendFcmToUid(uid, payload) {
   await getMessaging().send({
     token,
     notification: { title: payload.title, body: payload.body },
+    data: Object.fromEntries(
+      Object.entries(data).map(([k, v]) => [k, String(v)]),
+    ),
     // android.priority=high + android.notification.sound=default fuerza
     // que el push suene y vibre en el shade aún si el shade está
     // silenciado a nivel "low priority". Combinado con el canal
@@ -2607,6 +2610,94 @@ async function _sendFcmToUid(uid, payload) {
       payload: { aps: { sound: "default" } },
     },
   });
+}
+
+/// Helper: envía la MISMA push a todos los usuarios de una asociación que
+/// tengan alguno de los `roles` indicados y estén `active`. Lee tokens de
+/// `users/{uid}.fcmToken` y manda un multicast. `data` opcional viaja como
+/// payload de datos (para enrutar el tap en el cliente). Devuelve cuántos
+/// tokens se intentaron. Silencioso ante ausencia de tokens (no rompe el
+/// flujo que lo invoca).
+async function _sendFcmToRoles(associationId, roles, payload, data = {}) {
+  if (!associationId || !Array.isArray(roles) || roles.length === 0) return 0;
+  // Filtramos por associationId + status en la query y el rol en código
+  // (mismo patrón que dispatchScheduledNotifications) para no depender de un
+  // índice compuesto con `role in`.
+  const snap = await db
+    .collection("users")
+    .where("associationId", "==", associationId)
+    .where("status", "==", "active")
+    .get();
+  const tokens = [];
+  for (const u of snap.docs) {
+    const d = u.data();
+    if (!roles.includes(d.role)) continue;
+    const t = d.fcmToken;
+    if (typeof t === "string" && t.length > 0) tokens.push(t);
+  }
+  if (tokens.length === 0) return 0;
+  const { getMessaging } = require("firebase-admin/messaging");
+  await getMessaging().sendEachForMulticast({
+    tokens,
+    notification: { title: payload.title, body: payload.body },
+    data: Object.fromEntries(
+      Object.entries(data).map(([k, v]) => [k, String(v)]),
+    ),
+    android: {
+      priority: "high",
+      notification: {
+        sound: "default",
+        channelId: "taxi_default",
+        defaultSound: true,
+        defaultVibrateTimings: true,
+      },
+    },
+    apns: { payload: { aps: { sound: "default" } } },
+  });
+  return tokens.length;
+}
+
+/// Helper: envía la MISMA push a TODOS los usuarios activos de la plataforma
+/// (todas las asociaciones) cuyo rol esté en `roles`. Usado para avisos
+/// globales como los eventos de Quito. Trocea en lotes de 500 tokens (límite
+/// de sendEachForMulticast). Devuelve cuántos tokens se intentaron.
+async function _sendFcmGlobalToRoles(roles, payload, data = {}) {
+  if (!Array.isArray(roles) || roles.length === 0) return 0;
+  const snap = await db
+    .collection("users")
+    .where("status", "==", "active")
+    .get();
+  const tokens = [];
+  for (const u of snap.docs) {
+    const d = u.data();
+    if (!roles.includes(d.role)) continue;
+    const t = d.fcmToken;
+    if (typeof t === "string" && t.length > 0) tokens.push(t);
+  }
+  if (tokens.length === 0) return 0;
+  const { getMessaging } = require("firebase-admin/messaging");
+  const dataStr = Object.fromEntries(
+    Object.entries(data).map(([k, v]) => [k, String(v)]),
+  );
+  for (let i = 0; i < tokens.length; i += 500) {
+    const chunk = tokens.slice(i, i + 500);
+    await getMessaging().sendEachForMulticast({
+      tokens: chunk,
+      notification: { title: payload.title, body: payload.body },
+      data: dataStr,
+      android: {
+        priority: "high",
+        notification: {
+          sound: "default",
+          channelId: "taxi_default",
+          defaultSound: true,
+          defaultVibrateTimings: true,
+        },
+      },
+      apns: { payload: { aps: { sound: "default" } } },
+    });
+  }
+  return tokens.length;
 }
 
 /// Último pago validado y NO anulado del conductor.
@@ -3075,7 +3166,36 @@ async function _runFetchQuitoEvents(apiKey) {
     expireAt,
   });
 
-  return { ok: true, dateKey, count: events.length };
+  // Push a TODA la cooperativa (conductores + admins + operadoras) cuando hay
+  // eventos. Si no hay eventos no se notifica (no spamear "hoy no hay nada").
+  let notified = 0;
+  if (events.length > 0) {
+    const names = events
+      .map((e) => e && e.name)
+      .filter((n) => typeof n === "string" && n.length > 0)
+      .slice(0, 3);
+    const title =
+      events.length === 1
+        ? "Evento hoy en Quito"
+        : `${events.length} eventos hoy en Quito`;
+    let body = names.join(" · ");
+    if (events.length > names.length && body) body += " y más…";
+    if (!body) body = "Hay eventos con demanda de taxi hoy. Toca para ver.";
+    try {
+      notified = await _sendFcmGlobalToRoles(
+        ["conductor", "admin", "operadora"],
+        { title, body },
+        { type: "quito_events", date: dateKey },
+      );
+      console.log(
+        `fetchQuitoEvents: push de eventos enviado a ${notified} dispositivos`,
+      );
+    } catch (e) {
+      console.warn(`fetchQuitoEvents: error enviando push: ${e.message}`);
+    }
+  }
+
+  return { ok: true, dateKey, count: events.length, notified };
 }
 
 exports.fetchQuitoEvents = onSchedule(
@@ -4176,6 +4296,75 @@ exports.markStaleDriversOfflineNow = onCall({}, async (request) => {
 });
 
 // ───────────────────────────────────────────────────────────────────
+//  computeDriverPercentiles — ranking de conductores por asociación.
+//  Para cada asociación, ordena los conductores por `totalTrips` y
+//  escribe en CADA driver: tripsRank (1=más carreras), tripsTotalDrivers,
+//  tripsTopPercent (rank/total*100 → "estás en el top X%"). El conductor
+//  lee SOLO su propio doc → ve su posición sin exponer datos de otros.
+//  Diario 00:45 EC. Idempotente (sobrescribe).
+// ───────────────────────────────────────────────────────────────────
+async function _runComputeDriverPercentiles() {
+  const snap = await db.collection("drivers").get();
+  // Agrupar por asociación.
+  const byAssoc = {};
+  for (const d of snap.docs) {
+    const data = d.data();
+    if (data.archivedAt || data.deletedAt) continue;
+    const aid = data.associationId;
+    if (!aid) continue;
+    (byAssoc[aid] = byAssoc[aid] || []).push({
+      ref: d.ref,
+      trips: Number(data.totalTrips) || 0,
+    });
+  }
+  let writes = 0;
+  for (const aid of Object.keys(byAssoc)) {
+    const list = byAssoc[aid];
+    // Orden descendente por carreras (más carreras = rank 1).
+    list.sort((a, b) => b.trips - a.trips);
+    const total = list.length;
+    const batch = db.batch();
+    list.forEach((item, i) => {
+      const rank = i + 1;
+      const topPercent = Math.max(1, Math.ceil((rank / total) * 100));
+      batch.set(
+        item.ref,
+        {
+          tripsRank: rank,
+          tripsTotalDrivers: total,
+          tripsTopPercent: topPercent,
+          percentileUpdatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+      writes++;
+    });
+    await batch.commit();
+  }
+  return { ok: true, associations: Object.keys(byAssoc).length, writes };
+}
+
+exports.computeDriverPercentiles = onSchedule(
+  {
+    schedule: "45 0 * * *", // 00:45 America/Guayaquil
+    timeZone: "America/Guayaquil",
+    timeoutSeconds: 120,
+    memory: "256MiB",
+    retryCount: 1,
+  },
+  async () => {
+    const summary = await _runComputeDriverPercentiles();
+    console.log("computeDriverPercentiles:", JSON.stringify(summary));
+    return summary;
+  },
+);
+
+exports.computeDriverPercentilesNow = onCall({}, async (request) => {
+  requireSuperAdmin(request);
+  return _runComputeDriverPercentiles();
+});
+
+// ───────────────────────────────────────────────────────────────────
 //  onTripFinalized — al finalizar una carrera, sumar totales y
 //  propagar el estado al pedido (tripRequest) para que el cliente web
 //  pueda calificar.
@@ -4227,6 +4416,168 @@ function resolveTripEpochMs(after) {
   }
   return Date.now();
 }
+
+// ───────────────────────────────────────────────────────────────────
+//  onTripRequestCreated — push a operadoras + admins cuando entra una
+//  nueva solicitud de carrera desde el portal web del cliente.
+//
+//  Trigger: create de tripRequests/{reqId}. La crea el portal web con
+//  estado='pendiente' (ver client_web/.../home/page.tsx). Solo avisamos
+//  para solicitudes nuevas en estado 'pendiente'.
+// ───────────────────────────────────────────────────────────────────
+// Helper: incrementa un contador del embudo de solicitudes web en el
+// agregado diario `tripRequestStatsDaily/{aid}_{date}`. La fecha es la de
+// la SOLICITUD (cohorte): así el embudo de un día refleja cuántas de las
+// solicitudes recibidas ese día terminaron asignadas/finalizadas/canceladas.
+async function _incrTripRequestStat(aid, epochMs, field) {
+  if (!aid) return;
+  try {
+    const { date, dayOfWeek } = localDateHourEC(epochMs);
+    const statsId = `${aid}_${date}`;
+    const dateTs = Timestamp.fromMillis(Date.parse(`${date}T05:00:00.000Z`));
+    await db
+      .collection("tripRequestStatsDaily")
+      .doc(statsId)
+      .set(
+        {
+          associationId: aid,
+          date,
+          dateTs,
+          dayOfWeek,
+          [field]: FieldValue.increment(1),
+          updatedAt: FieldValue.serverTimestamp(),
+        },
+        { merge: true },
+      );
+  } catch (e) {
+    console.warn(`[tripRequestStats] no pude incrementar ${field}: ${e.message}`);
+  }
+}
+
+exports.onTripRequestCreated = onDocumentCreated(
+  { document: "tripRequests/{reqId}", region: "us-central1" },
+  async (event) => {
+    const req = event.data?.data();
+    if (!req) return;
+    if (req.estado && req.estado !== "pendiente") return;
+    const aid = req.associationId;
+    if (!aid) {
+      console.warn(
+        `[onTripRequestCreated] req ${event.params.reqId} sin associationId; omito push.`,
+      );
+      return;
+    }
+    // Embudo: +1 recibida en la fecha de la solicitud.
+    await _incrTripRequestStat(aid, resolveTripEpochMs(req), "recibidas");
+    const cliente = req.clienteNombre || "Cliente";
+    const origen = req.origen?.address || req.destinoTexto || "";
+    try {
+      const n = await _sendFcmToRoles(
+        aid,
+        ["operadora", "admin"],
+        {
+          title: "Nueva solicitud de carrera",
+          body: origen ? `${cliente} · ${origen}` : cliente,
+        },
+        { type: "trip_request", reqId: event.params.reqId },
+      );
+      console.log(
+        `[onTripRequestCreated] req ${event.params.reqId} (${aid}) → push a ${n} operadoras/admins`,
+      );
+    } catch (e) {
+      console.warn(
+        `[onTripRequestCreated] error enviando push: ${e.message}`,
+      );
+    }
+  },
+);
+
+// ───────────────────────────────────────────────────────────────────
+//  onTripAssignmentChanged — push al CONDUCTOR cuando una carrera:
+//   • se le ASIGNA (create de trips/{id} con driverId)
+//   • se REASIGNA (update con cambio de driverId) → avisa al nuevo y al
+//     anterior
+//   • se CANCELA (update status → 'cancelado') → avisa al conductor
+//
+//  Trigger: write de trips/{tripId} (create+update). Convive con
+//  onTripFinalized (onDocumentUpdated) que sigue a cargo de totales y de
+//  propagar el estado al tripRequest. Aquí SOLO se envían push.
+// ───────────────────────────────────────────────────────────────────
+exports.onTripAssignmentChanged = onDocumentWritten(
+  { document: "trips/{tripId}", region: "us-central1" },
+  async (event) => {
+    const before = event.data?.before?.data();
+    const after = event.data?.after?.data();
+    if (!after) return; // borrado → nada
+    const tripId = event.params.tripId;
+    const cliente = after.clienteNombre || "Cliente";
+    const origen = after.pickupAddress || "";
+    const bodyAsignada = origen ? `${cliente} · ${origen}` : cliente;
+
+    // CREATE → asignación inicial.
+    if (!before) {
+      if (after.driverId && after.status !== "cancelado") {
+        await _sendFcmToUid(
+          after.driverId,
+          { title: "Carrera asignada", body: bodyAsignada },
+          { type: "trip_assigned", tripId },
+        ).catch((e) =>
+          console.warn(`[onTripAssignmentChanged] asignación: ${e.message}`),
+        );
+        console.log(
+          `[onTripAssignmentChanged] trip ${tripId} asignado → push a ${after.driverId}`,
+        );
+      }
+      return;
+    }
+
+    // UPDATE → cancelación (transición a cancelado).
+    if (before.status !== "cancelado" && after.status === "cancelado") {
+      const target = after.driverId || before.driverId;
+      if (target) {
+        await _sendFcmToUid(
+          target,
+          { title: "Carrera cancelada", body: bodyAsignada },
+          { type: "trip_cancelled", tripId },
+        ).catch((e) =>
+          console.warn(`[onTripAssignmentChanged] cancelación: ${e.message}`),
+        );
+        console.log(
+          `[onTripAssignmentChanged] trip ${tripId} cancelado → push a ${target}`,
+        );
+      }
+      return;
+    }
+
+    // UPDATE → reasignación (cambió el conductor).
+    if (
+      before.driverId &&
+      after.driverId &&
+      before.driverId !== after.driverId
+    ) {
+      await _sendFcmToUid(
+        after.driverId,
+        { title: "Carrera asignada", body: bodyAsignada },
+        { type: "trip_assigned", tripId },
+      ).catch((e) =>
+        console.warn(`[onTripAssignmentChanged] reasign nuevo: ${e.message}`),
+      );
+      await _sendFcmToUid(
+        before.driverId,
+        {
+          title: "Carrera reasignada",
+          body: "Esta carrera se asignó a otra unidad.",
+        },
+        { type: "trip_reassigned_away", tripId },
+      ).catch((e) =>
+        console.warn(`[onTripAssignmentChanged] reasign previo: ${e.message}`),
+      );
+      console.log(
+        `[onTripAssignmentChanged] trip ${tripId} reasignado ${before.driverId} → ${after.driverId}`,
+      );
+    }
+  },
+);
 
 exports.onTripFinalized = onDocumentUpdated(
   {
@@ -4349,7 +4700,8 @@ exports.onTripFinalized = onDocumentUpdated(
     if (aid) {
       try {
         const epochMs = resolveTripEpochMs(after);
-        const { date, hour } = localDateHourEC(epochMs);
+        const { date, hour, dayOfWeek } = localDateHourEC(epochMs);
+        const fare = fareForHour(hour);
         const statsId = `${aid}_${date}`;
         // Inicio del día en UTC-5 → 00:00 local = 05:00 UTC del mismo día.
         // Lo guardamos como Timestamp para poder hacer range queries por fecha.
@@ -4367,17 +4719,48 @@ exports.onTripFinalized = onDocumentUpdated(
               associationId: aid,
               date,
               dateTs,
+              // dayOfWeek (0=dom..6=sáb, hora local EC): para heatmap DoW×hora
+              // y comparativas "lunes vs lunes" sin recalcular en cliente.
+              dayOfWeek,
               tripsByHour: { [String(hour)]: FieldValue.increment(1) },
               totalTrips: FieldValue.increment(1),
-              estimatedRevenue: FieldValue.increment(fareForHour(hour)),
+              estimatedRevenue: FieldValue.increment(fare),
               updatedAt: FieldValue.serverTimestamp(),
             },
             { merge: true },
           );
         console.log(
           `[onTripFinalized] trip ${tripId}: agregado diario ${statsId} ` +
-            `(hora ${hour}, +${fareForHour(hour)} estimado).`,
+            `(hora ${hour}, +${fare} estimado).`,
         );
+
+        // Agregado diario POR CONDUCTOR (driverStatsDaily): mismo esquema que
+        // el de base, pero por driverId. Habilita el reporte personal del
+        // conductor (sus carreras, sus horas pico, su estimado) y métricas de
+        // productividad por conductor. driverId aquí es el UID del usuario.
+        if (driverId) {
+          const dStatsId = `${driverId}_${date}`;
+          await db
+            .collection("driverStatsDaily")
+            .doc(dStatsId)
+            .set(
+              {
+                driverId,
+                associationId: aid,
+                date,
+                dateTs,
+                dayOfWeek,
+                tripsByHour: { [String(hour)]: FieldValue.increment(1) },
+                totalTrips: FieldValue.increment(1),
+                estimatedRevenue: FieldValue.increment(fare),
+                updatedAt: FieldValue.serverTimestamp(),
+              },
+              { merge: true },
+            );
+          console.log(
+            `[onTripFinalized] trip ${tripId}: agregado diario conductor ${dStatsId}.`,
+          );
+        }
       } catch (e) {
         console.warn(
           `[onTripFinalized] no pude actualizar agregado diario de ` +
@@ -4410,6 +4793,35 @@ exports.onTripFinalized = onDocumentUpdated(
             `${after.tripRequestId}: ${e.message}`,
         );
       }
+    }
+  },
+);
+
+// ───────────────────────────────────────────────────────────────────
+//  onTripRequestStatusChanged — embudo de solicitudes web (calidad de
+//  servicio). Cuenta las transiciones de estado de cada solicitud en el
+//  agregado diario por COHORTE (fecha de la solicitud), para medir, de
+//  las recibidas un día, cuántas se asignaron / finalizaron / cancelaron.
+//  Trigger: update de tripRequests/{reqId}. Idempotente por flanco.
+// ───────────────────────────────────────────────────────────────────
+exports.onTripRequestStatusChanged = onDocumentUpdated(
+  { document: "tripRequests/{reqId}", region: "us-central1" },
+  async (event) => {
+    const before = event.data?.before?.data();
+    const after = event.data?.after?.data();
+    if (!after) return;
+    const aid = after.associationId;
+    if (!aid) return;
+    const b = before?.estado;
+    const a = after.estado;
+    if (b === a) return; // sin cambio de estado
+    const epochMs = resolveTripEpochMs(after); // cohorte = fecha solicitud
+    if (b !== "asignada" && a === "asignada") {
+      await _incrTripRequestStat(aid, epochMs, "asignadas");
+    } else if (b !== "finalizada" && a === "finalizada") {
+      await _incrTripRequestStat(aid, epochMs, "finalizadas");
+    } else if (b !== "cancelada" && a === "cancelada") {
+      await _incrTripRequestStat(aid, epochMs, "canceladas");
     }
   },
 );

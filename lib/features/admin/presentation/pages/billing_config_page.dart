@@ -2,9 +2,10 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
-import 'package:go_router/go_router.dart';
 
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/app_scaffold.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../associations/data/models/association_model.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 
@@ -86,46 +87,33 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+      return const Scaffold(body: LoadingState());
     }
     if (_aid == null) {
-      return Scaffold(
-        appBar: AppBar(title: const Text('Configuración de pagos')),
-        body: const Center(
-          child: Padding(
-            padding: EdgeInsets.all(24),
-            child: Text(
-              'No se pudo determinar la asociación.',
-              textAlign: TextAlign.center,
-            ),
-          ),
+      return const AppScaffold(
+        title: 'Configuración de pagos',
+        body: EmptyState(
+          icon: Icons.business_outlined,
+          title: 'No se pudo determinar la asociación.',
         ),
       );
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Configuración de pagos'),
-        backgroundColor: AppTheme.primaryColor,
-        foregroundColor: Colors.white,
-        leading: IconButton(
-          icon: const Icon(Icons.arrow_back),
-          onPressed: () =>
-              context.canPop() ? context.pop() : context.go('/home'),
-        ),
-      ),
+    return AppScaffold(
+      title: 'Configuración de pagos',
       body: Form(
         key: _formKey,
         child: ListView(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(AppSpacing.lg),
           children: [
-            const Text(
+            Text(
               'Define cómo se cobran las cuotas a los conductores de tu asociación.',
-              style: TextStyle(color: Colors.black54),
+              style: Theme.of(context)
+                  .textTheme
+                  .bodyMedium
+                  ?.copyWith(color: AppTheme.textSecondary),
             ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             _section('Cuota base'),
             TextFormField(
               controller: _amount,
@@ -172,10 +160,13 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
             ),
             const SizedBox(height: 16),
             _section('Periodicidad'),
-            const Text(
+            Text(
               'Cada cuántas unidades vence la cuota. Ej: cada 1 mes (mensual), '
               'cada 2 semanas (quincenal), cada 1 día (diario).',
-              style: TextStyle(fontSize: 12, color: Colors.black54),
+              style: Theme.of(context)
+                  .textTheme
+                  .bodySmall
+                  ?.copyWith(color: AppTheme.textSecondary),
             ),
             Row(
               children: [
@@ -258,22 +249,24 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
               keyboardType: TextInputType.number,
               validator: _validatePositiveInt,
             ),
-            const SizedBox(height: 24),
+            const SizedBox(height: AppSpacing.xl),
             ElevatedButton(
               onPressed: _saving ? null : _save,
               style: ElevatedButton.styleFrom(
                 padding: const EdgeInsets.symmetric(vertical: 14),
               ),
               child: _saving
-                  ? const SizedBox(
+                  ? SizedBox(
                       width: 18,
                       height: 18,
                       child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white),
+                        strokeWidth: 2,
+                        color: Theme.of(context).colorScheme.onPrimary,
+                      ),
                     )
                   : const Text('GUARDAR CONFIGURACIÓN'),
             ),
-            const SizedBox(height: 32),
+            const SizedBox(height: AppSpacing.xxl),
           ],
         ),
       ),
@@ -282,10 +275,10 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
 
   Widget _section(String title) {
     return Padding(
-      padding: const EdgeInsets.only(top: 8, bottom: 8),
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
       child: Text(
         title,
-        style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+        style: Theme.of(context).textTheme.titleMedium,
       ),
     );
   }
@@ -351,7 +344,7 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Configuración guardada.'),
-          backgroundColor: Colors.green,
+          backgroundColor: AppTheme.successColor,
         ),
       );
     } on FirebaseFunctionsException catch (e) {
@@ -359,7 +352,7 @@ class _BillingConfigPageState extends State<BillingConfigPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error: ${e.message ?? e.code}'),
-          backgroundColor: Colors.red,
+          backgroundColor: AppTheme.errorColor,
         ),
       );
     } finally {

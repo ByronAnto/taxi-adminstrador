@@ -403,6 +403,55 @@ class DriverLocationService extends ChangeNotifier {
     }
   }
 
+  /// Pulso de ubicación disparado por el **tick periódico NATIVO** del
+  /// foreground service (`onRepeatEvent` → `sendDataToMain`), NO por un
+  /// `Timer` de Dart.
+  ///
+  /// Por qué existe: en background profundo Android congela los `Timer`
+  /// de Dart del isolate principal (Doze / restricciones OEM). Eso dejaba
+  /// sin disparar el heartbeat estacionario (un `Timer.periodic`), el
+  /// conductor parado dejaba de pushear y el cron `markStaleDriversOffline`
+  /// (6 min) lo marcaba `desconectado` aunque el radio siguiera vivo. El
+  /// FGS nativo mantiene un wakelock y su `onRepeatEvent` SÍ sigue
+  /// disparando bajo Doze, así que lo usamos como red de seguridad para
+  /// garantizar un push dentro de la ventana del cron (< 6 min).
+  ///
+  /// Es idempotente y barato: si el conductor no está online no hace nada.
+  /// Pide un fix fresco; si no lo logra, repushea la última posición
+  /// conocida para refrescar `updatedAt`. Convive con los timers de Dart
+  /// (cuando NO están congelados, ellos hacen el trabajo fino; este tick
+  /// es el seguro que nunca se congela).
+  Future<void> nativeHeartbeatPulse() async {
+    if (!_isOnline || _driverId == null) return;
+    debugPrint('📍 [LocationService] native FGS tick → pulso de ubicación '
+        '(stationary=$_isStationary)');
+    try {
+      final pos = await Geolocator.getCurrentPosition(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.bestForNavigation,
+          timeLimit: Duration(seconds: 8),
+        ),
+      );
+      // Forzar el push: este tick es nuestro pulso garantizado, no puede
+      // quedar bloqueado por el throttle adaptativo de _onFix.
+      _lastPush = null;
+      _onFix(pos, source: 'native-tick');
+    } catch (_) {
+      // Sin fix nuevo en este intento (interior/cell). Repushear lo último
+      // conocido para que la operadora siga viendo la unidad viva y el cron
+      // no la marque stale.
+      if (_lastLatitude != null && _lastLongitude != null) {
+        _lastPush = DateTime.now();
+        await _pushLocation(
+          _lastLatitude!,
+          _lastLongitude!,
+          accuracy: _lastAccuracy,
+          stationary: _isStationary ? true : null,
+        );
+      }
+    }
+  }
+
   // ─── GPS interno ─────────────────────────────────────────
 
   Future<void> _requestPermissionAndStartGps() async {

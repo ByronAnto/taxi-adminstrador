@@ -43,7 +43,13 @@ class AgoraService implements VoiceProvider {
   /// está al máximo pero la voz remota se oye muy baja (caso típico en
   /// taxis con ruido ambiente y bocinas pequeñas).
   static const int playbackVolumeMin = 100;
-  static const int playbackVolumeMax = 400;
+  // 600 = ganancia 6x (tope del slider, compartido por ambos providers). El
+  // control nativo de volumen por pista de LiveKit (WebRTC AudioTrack.setVolume)
+  // admite hasta 10x → 6x da más amplificación con el mismo botón. Agora solo
+  // soporta hasta 400 en `adjustPlaybackSignalVolume`, así que su aplicación se
+  // acota a 400 más abajo (sin recortar el valor guardado del slider).
+  static const int playbackVolumeMax = 600;
+  static const int _agoraHardwareVolumeMax = 400; // límite real de Agora
   static const int playbackVolumeDefault = 200;
   int _playbackVolume = playbackVolumeDefault;
   @override
@@ -105,6 +111,10 @@ class AgoraService implements VoiceProvider {
   // Agora cobra por minuto → sí usamos park por inactividad.
   @override
   bool get supportsPark => true;
+  // Agora cobra por minuto → conexión efímera. El overlay sigue usando el
+  // ciclo clásico destroy/rejoin del engine (no reusar conexión).
+  @override
+  bool get hasPersistentConnection => false;
   @override
   String? get parkedChannelId => _parkedChannelId;
 
@@ -161,8 +171,11 @@ class AgoraService implements VoiceProvider {
   Future<void> setPlaybackVolume(int volume) async {
     final v = volume.clamp(playbackVolumeMin, playbackVolumeMax);
     _playbackVolume = v;
+    // Agora solo admite hasta 400; acotamos lo APLICADO al engine sin recortar
+    // el valor guardado del slider (que puede llegar a 600 para LiveKit).
+    final applied = v.clamp(playbackVolumeMin, _agoraHardwareVolumeMax);
     try {
-      await _engine?.adjustPlaybackSignalVolume(v);
+      await _engine?.adjustPlaybackSignalVolume(applied);
     } catch (e) {
       _log('Error setPlaybackVolume: $e');
     }
@@ -170,7 +183,7 @@ class AgoraService implements VoiceProvider {
       final prefs = await SharedPreferences.getInstance();
       await prefs.setInt(_kPrefsPlaybackVolume, v);
     } catch (_) {}
-    _log('🔊 Volumen reproducción = $v (rango 100-400)');
+    _log('🔊 Volumen reproducción = $v (aplicado a Agora: $applied)');
   }
 
   /// Persiste appId + token de un canal a SharedPreferences.

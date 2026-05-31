@@ -7,6 +7,7 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../associations/data/models/association_model.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 
@@ -185,11 +186,10 @@ class _StandLocationSettingsPageState extends State<StandLocationSettingsPage> {
   @override
   Widget build(BuildContext context) {
     if (_loading) {
-      return const Scaffold(
-        body: Center(child: CircularProgressIndicator()),
-      );
+      return const Scaffold(body: LoadingState());
     }
     final initial = _selected ?? _quito;
+    final primary = Theme.of(context).colorScheme.primary;
     return Scaffold(
       appBar: AppBar(
         title: const Text('Ubicación de la parada'),
@@ -236,9 +236,8 @@ class _StandLocationSettingsPageState extends State<StandLocationSettingsPage> {
                             center: _selected!,
                             radius: _radiusKm * 1000, // metros
                             strokeWidth: 2,
-                            strokeColor: AppTheme.primaryColor,
-                            fillColor: AppTheme.primaryColor
-                                .withValues(alpha: 0.15),
+                            strokeColor: primary,
+                            fillColor: primary.withValues(alpha: 0.15),
                           )
                         }
                       : {},
@@ -267,10 +266,11 @@ class _StandLocationSettingsPageState extends State<StandLocationSettingsPage> {
             ),
           ),
           Container(
-            padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-            decoration: const BoxDecoration(
-              color: Colors.white,
-              boxShadow: [
+            padding: const EdgeInsets.fromLTRB(
+                AppSpacing.lg, AppSpacing.md, AppSpacing.lg, AppSpacing.lg),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.surface,
+              boxShadow: const [
                 BoxShadow(
                   color: Colors.black12,
                   blurRadius: 6,
@@ -291,19 +291,19 @@ class _StandLocationSettingsPageState extends State<StandLocationSettingsPage> {
                   ),
                   onChanged: (_) => setState(() {}),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 Row(
                   children: [
                     const Icon(Icons.adjust, size: 18),
-                    const SizedBox(width: 6),
+                    const SizedBox(width: AppSpacing.xs),
                     Text('Radio permitido: ',
-                        style:
-                            const TextStyle(fontWeight: FontWeight.w600)),
+                        style: Theme.of(context).textTheme.titleMedium),
                     Text(
                       _formatRadius(_radiusKm),
-                      style: TextStyle(
-                          fontWeight: FontWeight.w800,
-                          color: AppTheme.primaryColor),
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                            fontWeight: FontWeight.w800,
+                            color: primary,
+                          ),
                     ),
                   ],
                 ),
@@ -319,13 +319,12 @@ class _StandLocationSettingsPageState extends State<StandLocationSettingsPage> {
                   _selected == null
                       ? 'Sin parada configurada → cualquier conductor puede entrar a la cola desde cualquier lugar.'
                       : 'Conductores fuera de este radio verán el mensaje "Estás a X km de la parada".',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.grey.shade700,
-                    fontStyle: FontStyle.italic,
-                  ),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: AppTheme.textSecondary,
+                        fontStyle: FontStyle.italic,
+                      ),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 Row(
                   children: [
                     if (_selected != null)
@@ -340,7 +339,7 @@ class _StandLocationSettingsPageState extends State<StandLocationSettingsPage> {
                           ),
                         ),
                       ),
-                    if (_selected != null) const SizedBox(width: 12),
+                    if (_selected != null) const SizedBox(width: AppSpacing.md),
                     Expanded(
                       flex: 2,
                       child: ElevatedButton.icon(

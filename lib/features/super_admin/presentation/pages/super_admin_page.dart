@@ -6,6 +6,7 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../associations/data/models/association_model.dart';
 import '../../../associations/data/models/pricing_tier_model.dart';
@@ -58,8 +59,6 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Super-Admin'),
-        backgroundColor: AppTheme.primaryColor,
-        foregroundColor: Colors.white,
         leading: IconButton(
           icon: const Icon(Icons.home),
           onPressed: () => context.go('/home'),
@@ -75,9 +74,9 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
               children: [
                 const Text(
                   'Ejecuta estas acciones UNA SOLA VEZ al estrenar el SaaS.',
-                  style: TextStyle(color: Colors.black54),
+                  style: TextStyle(color: AppTheme.textSecondary),
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: AppSpacing.md),
                 ElevatedButton.icon(
                   onPressed: _seedingDefaults ? null : _seedDefaults,
                   icon: _seedingDefaults
@@ -127,11 +126,12 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
                   const SizedBox(height: 12),
                   Container(
                     width: double.infinity,
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(AppSpacing.md),
                     decoration: BoxDecoration(
-                      color: Colors.green.shade50,
+                      color: AppTheme.successColor.withValues(alpha: 0.08),
                       borderRadius: BorderRadius.circular(8),
-                      border: Border.all(color: Colors.green.shade200),
+                      border: Border.all(
+                          color: AppTheme.successColor.withValues(alpha: 0.4)),
                     ),
                     child: Text(
                       _lastResult!,
@@ -201,10 +201,7 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
                 Expanded(
                   child: Text(
                     title,
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
+                    style: Theme.of(context).textTheme.titleLarge,
                   ),
                 ),
                 ?trailing,
@@ -225,20 +222,26 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
           .orderBy('createdAt', descending: true)
           .snapshots(),
       builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return Padding(
+            padding: const EdgeInsets.all(AppSpacing.lg),
+            child: ErrorState.fromError(snapshot.error),
+          );
+        }
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Padding(
-            padding: EdgeInsets.all(16),
-            child: Center(child: CircularProgressIndicator()),
+            padding: EdgeInsets.all(AppSpacing.lg),
+            child: LoadingState(),
           );
         }
 
         final docs = snapshot.data?.docs ?? [];
         if (docs.isEmpty) {
           return const Padding(
-            padding: EdgeInsets.all(16),
+            padding: EdgeInsets.all(AppSpacing.lg),
             child: Text(
               'Aún no hay asociaciones. Siembra los datos default o crea una nueva.',
-              style: TextStyle(color: Colors.black54),
+              style: TextStyle(color: AppTheme.textSecondary),
             ),
           );
         }
@@ -256,10 +259,10 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
 
   Widget _buildAssociationTile(AssociationModel a) {
     final statusColor = switch (a.status) {
-      AssociationStatus.active => Colors.green,
-      AssociationStatus.trial => Colors.orange,
-      AssociationStatus.suspended => Colors.red,
-      AssociationStatus.cancelled => Colors.grey,
+      AssociationStatus.active => AppTheme.successColor,
+      AssociationStatus.trial => AppTheme.warningColor,
+      AssociationStatus.suspended => AppTheme.errorColor,
+      AssociationStatus.cancelled => AppTheme.statusOffline,
     };
 
     return ListTile(
@@ -312,10 +315,10 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
           const PopupMenuItem(
             value: 'delete',
             child: Row(children: [
-              Icon(Icons.delete, size: 18, color: Colors.red),
+              Icon(Icons.delete, size: 18, color: AppTheme.errorColor),
               SizedBox(width: 8),
               Text('Borrar definitivo',
-                  style: TextStyle(color: Colors.red)),
+                  style: TextStyle(color: AppTheme.errorColor)),
             ]),
           ),
         ],
@@ -330,20 +333,26 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
           .orderBy('sortOrder')
           .snapshots(),
       builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return Padding(
+            padding: const EdgeInsets.all(AppSpacing.lg),
+            child: ErrorState.fromError(snapshot.error),
+          );
+        }
         if (snapshot.connectionState == ConnectionState.waiting) {
           return const Padding(
-            padding: EdgeInsets.all(16),
-            child: Center(child: CircularProgressIndicator()),
+            padding: EdgeInsets.all(AppSpacing.lg),
+            child: LoadingState(),
           );
         }
 
         final docs = snapshot.data?.docs ?? [];
         if (docs.isEmpty) {
           return const Padding(
-            padding: EdgeInsets.all(16),
+            padding: EdgeInsets.all(AppSpacing.lg),
             child: Text(
               'Sin planes. Siembra los datos default arriba.',
-              style: TextStyle(color: Colors.black54),
+              style: TextStyle(color: AppTheme.textSecondary),
             ),
           );
         }
@@ -407,9 +416,9 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
                   const PopupMenuItem(
                     value: 'delete',
                     child: Row(children: [
-                      Icon(Icons.delete, size: 18, color: Colors.red),
+                      Icon(Icons.delete, size: 18, color: AppTheme.errorColor),
                       SizedBox(width: 8),
-                      Text('Eliminar', style: TextStyle(color: Colors.red)),
+                      Text('Eliminar', style: TextStyle(color: AppTheme.errorColor)),
                     ]),
                   ),
                 ],
@@ -437,10 +446,10 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
     try {
       final result = await _functions.httpsCallable('seedDefaults').call();
       setState(() => _lastResult = 'seedDefaults OK: ${result.data}');
-      _showSnack('Planes y asociación Jipijapa sembrados.', Colors.green);
+      _showSnack('Planes y asociación Jipijapa sembrados.', AppTheme.successColor);
     } on FirebaseFunctionsException catch (e) {
       setState(() => _lastResult = 'Error: ${e.code} ${e.message}');
-      _showSnack('Error: ${e.message}', Colors.red);
+      _showSnack('Error: ${e.message}', AppTheme.errorColor);
     } finally {
       if (mounted) setState(() => _seedingDefaults = false);
     }
@@ -457,10 +466,10 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
       );
       setState(() =>
           _lastResult = 'migrateToMultitenant OK: ${result.data}');
-      _showSnack('Migración completada.', Colors.green);
+      _showSnack('Migración completada.', AppTheme.successColor);
     } on FirebaseFunctionsException catch (e) {
       setState(() => _lastResult = 'Error: ${e.code} ${e.message}');
-      _showSnack('Error: ${e.message}', Colors.red);
+      _showSnack('Error: ${e.message}', AppTheme.errorColor);
     } finally {
       if (mounted) setState(() => _migrating = false);
     }
@@ -478,11 +487,11 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
       setState(() => _lastResult = 'Purga manual: ${data ?? result.data}');
       _showSnack(
         'Purga ejecutada. Borrados: ${data?["blobsDeleted"] ?? "?"}',
-        Colors.green,
+        AppTheme.successColor,
       );
     } on FirebaseFunctionsException catch (e) {
       setState(() => _lastResult = 'Error: ${e.code} ${e.message}');
-      _showSnack('Error: ${e.message}', Colors.red);
+      _showSnack('Error: ${e.message}', AppTheme.errorColor);
     } finally {
       if (mounted) setState(() => _purging = false);
     }
@@ -513,28 +522,28 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
     switch (action) {
       case 'copy_id':
         await Clipboard.setData(ClipboardData(text: a.id));
-        _showSnack('ID copiado: ${a.id}', Colors.blue);
+        _showSnack('ID copiado: ${a.id}', AppTheme.infoColor);
         break;
       case 'suspend':
         await _firestore
             .collection('associations')
             .doc(a.id)
             .update({'status': 'suspended', 'updatedAt': FieldValue.serverTimestamp()});
-        _showSnack('Suspendida.', Colors.orange);
+        _showSnack('Suspendida.', AppTheme.warningColor);
         break;
       case 'activate':
         await _firestore
             .collection('associations')
             .doc(a.id)
             .update({'status': 'active', 'updatedAt': FieldValue.serverTimestamp()});
-        _showSnack('Activada.', Colors.green);
+        _showSnack('Activada.', AppTheme.successColor);
         break;
       case 'cancel':
         await _firestore
             .collection('associations')
             .doc(a.id)
             .update({'status': 'cancelled', 'updatedAt': FieldValue.serverTimestamp()});
-        _showSnack('Cancelada.', Colors.red);
+        _showSnack('Cancelada.', AppTheme.errorColor);
         break;
       case 'change_plan':
         await _showChangePlanDialog(a);
@@ -621,9 +630,9 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
         'phone': phoneCtrl.text.trim().isEmpty ? null : phoneCtrl.text.trim(),
         'updatedAt': FieldValue.serverTimestamp(),
       });
-      if (mounted) _showSnack('Asociación actualizada', Colors.green);
+      if (mounted) _showSnack('Asociación actualizada', AppTheme.successColor);
     } catch (e) {
-      if (mounted) _showSnack('Error: $e', Colors.red);
+      if (mounted) _showSnack('Error: $e', AppTheme.errorColor);
     }
   }
 
@@ -636,9 +645,19 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
         content: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Text(
-              '⚠️ Esto eliminará el doc associations/${a.id}. Los usuarios, viajes, pagos, canales y demás docs etiquetados con associationId="${a.id}" NO se borran automáticamente.',
-              style: const TextStyle(fontSize: 13),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(Icons.warning_amber_rounded,
+                    size: 18, color: AppTheme.warningColor),
+                const SizedBox(width: 6),
+                Expanded(
+                  child: Text(
+                    'Esto eliminará el doc associations/${a.id}. Los usuarios, viajes, pagos, canales y demás docs etiquetados con associationId="${a.id}" NO se borran automáticamente.',
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             const Text(
@@ -662,7 +681,7 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
           ),
           ElevatedButton(
             style:
-                ElevatedButton.styleFrom(backgroundColor: Colors.red.shade700),
+                ElevatedButton.styleFrom(backgroundColor: AppTheme.errorColor),
             onPressed: () {
               if (ctrl.text.trim().toUpperCase() == a.code.toUpperCase()) {
                 Navigator.pop(ctx, true);
@@ -676,9 +695,9 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
     if (ok != true) return;
     try {
       await _firestore.collection('associations').doc(a.id).delete();
-      if (mounted) _showSnack('Asociación borrada', Colors.red);
+      if (mounted) _showSnack('Asociación borrada', AppTheme.errorColor);
     } catch (e) {
-      if (mounted) _showSnack('Error: $e', Colors.red);
+      if (mounted) _showSnack('Error: $e', AppTheme.errorColor);
     }
   }
 
@@ -700,7 +719,7 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
     if (tiers.isEmpty) {
       _showSnack(
         'No hay planes disponibles. Siembra los datos default primero.',
-        Colors.orange,
+        AppTheme.warningColor,
       );
       return;
     }
@@ -721,7 +740,7 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
                 children: [
                   Text(
                     'Plan actual: ${a.pricingTierId}',
-                    style: const TextStyle(color: Colors.black54),
+                    style: const TextStyle(color: AppTheme.textSecondary),
                   ),
                   const SizedBox(height: 12),
                   RadioGroup<String>(
@@ -804,10 +823,10 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
       });
       _showSnack(
         'Plan cambiado a ${newTier.name} (\$${newTier.monthlyPriceUsd}/mes)',
-        Colors.green,
+        AppTheme.successColor,
       );
     } catch (e) {
-      _showSnack('Error al cambiar plan: $e', Colors.red);
+      _showSnack('Error al cambiar plan: $e', AppTheme.errorColor);
     }
   }
 
@@ -845,7 +864,7 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
         });
         _showSnack(
           action == 'publish' ? 'Plan publicado.' : 'Plan ocultado.',
-          Colors.blue,
+          AppTheme.infoColor,
         );
         break;
 
@@ -859,7 +878,7 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
         if (inUse.docs.isNotEmpty) {
           _showSnack(
             'No se puede eliminar: hay asociaciones usando este plan. Cámbialas primero.',
-            Colors.red,
+            AppTheme.errorColor,
           );
           return;
         }
@@ -880,7 +899,7 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
               ),
               ElevatedButton(
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.red,
+                  backgroundColor: AppTheme.errorColor,
                   foregroundColor: Colors.white,
                 ),
                 onPressed: () => Navigator.pop(ctx, true),
@@ -892,7 +911,7 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
 
         if (ok == true) {
           await ref.delete();
-          _showSnack('Plan eliminado.', Colors.red);
+          _showSnack('Plan eliminado.', AppTheme.errorColor);
         }
         break;
     }
@@ -925,7 +944,7 @@ class _SuperAdminPageState extends State<SuperAdminPage> {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             const Text('Placeholders soportados:\n{amount}, {dueDate}',
-                style: TextStyle(fontSize: 12, color: Colors.grey)),
+                style: TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
             const SizedBox(height: 8),
             TextField(controller: ctrl, maxLines: 4),
           ],
@@ -1136,7 +1155,7 @@ class _CreateAssociationDialogState extends State<_CreateAssociationDialog> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Icon(Icons.check_circle, color: Colors.green, size: 48),
+        const Icon(Icons.check_circle, color: AppTheme.successColor, size: 48),
         const SizedBox(height: 12),
         const Text(
           'Asociación creada con éxito.',
@@ -1151,16 +1170,27 @@ class _CreateAssociationDialogState extends State<_CreateAssociationDialog> {
               copyable: true, highlight: true),
         const SizedBox(height: 12),
         Container(
-          padding: const EdgeInsets.all(12),
+          padding: const EdgeInsets.all(AppSpacing.md),
           decoration: BoxDecoration(
-            color: Colors.amber.shade50,
+            color: AppTheme.warningColor.withValues(alpha: 0.10),
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: Colors.amber.shade200),
+            border: Border.all(
+                color: AppTheme.warningColor.withValues(alpha: 0.4)),
           ),
-          child: const Text(
-            '⚠️ COPIA Y ENVÍA estos datos al admin AHORA. '
-            'El password temporal solo se muestra una vez.',
-            style: TextStyle(fontSize: 12),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Icon(Icons.warning_amber_rounded,
+                  size: 16, color: AppTheme.warningColor),
+              const SizedBox(width: 6),
+              const Expanded(
+                child: Text(
+                  'COPIA Y ENVÍA estos datos al admin AHORA. '
+                  'El password temporal solo se muestra una vez.',
+                  style: TextStyle(fontSize: 12),
+                ),
+              ),
+            ],
           ),
         ),
       ],
@@ -1184,7 +1214,7 @@ class _CreateAssociationDialogState extends State<_CreateAssociationDialog> {
               value,
               style: TextStyle(
                 fontFamily: 'monospace',
-                color: highlight ? Colors.red.shade700 : null,
+                color: highlight ? AppTheme.errorColor : null,
                 fontWeight: highlight ? FontWeight.bold : null,
               ),
             ),
@@ -1228,7 +1258,7 @@ class _CreateAssociationDialogState extends State<_CreateAssociationDialog> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error: ${e.message ?? e.code}'),
-            backgroundColor: Colors.red,
+            backgroundColor: AppTheme.errorColor,
           ),
         );
       }
@@ -1520,7 +1550,7 @@ class _PricingTierDialogState extends State<_PricingTierDialog> {
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
                 content: Text('Ya existe un plan con id "$id".'),
-                backgroundColor: Colors.red,
+                backgroundColor: AppTheme.errorColor,
               ),
             );
           }
@@ -1555,7 +1585,7 @@ class _PricingTierDialogState extends State<_PricingTierDialog> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(_isEdit ? 'Plan actualizado.' : 'Plan creado.'),
-            backgroundColor: Colors.green,
+            backgroundColor: AppTheme.successColor,
           ),
         );
         Navigator.pop(context);
@@ -1565,7 +1595,7 @@ class _PricingTierDialogState extends State<_PricingTierDialog> {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('Error: $e'),
-            backgroundColor: Colors.red,
+            backgroundColor: AppTheme.errorColor,
           ),
         );
       }

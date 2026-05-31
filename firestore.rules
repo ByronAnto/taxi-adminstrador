@@ -540,6 +540,21 @@ service cloud.firestore {
       allow write: if false; // solo Cloud Functions (admin SDK)
     }
 
+    // Agregado diario POR CONDUCTOR: lo lee el propio conductor (su reporte
+    // personal) y el admin/operadora de la misma asociación (productividad).
+    match /driverStatsDaily/{statId} {
+      allow read: if sameTenant(resource.data)
+        && (isOperatorOrAdmin() || isOwner(resource.data.driverId));
+      allow write: if false; // solo Cloud Functions (admin SDK)
+    }
+
+    // Embudo diario de solicitudes web (calidad de servicio): lo leen
+    // admin/operadora de la asociación. Escritura solo Cloud Functions.
+    match /tripRequestStatsDaily/{statId} {
+      allow read: if isActive() && sameTenant(resource.data);
+      allow write: if false;
+    }
+
     // ===== APP CONFIG (versionamiento por plataforma) =====
     // Doc por plataforma: `app_config/android`, `app_config/ios`.
     // Estructura:

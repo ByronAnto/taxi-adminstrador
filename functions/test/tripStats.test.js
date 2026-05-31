@@ -109,15 +109,15 @@ describe("localDateHourEC (zona America/Guayaquil UTC-5)", () => {
   test("medio día UTC → mañana en Ecuador, mismo día", () => {
     // 2026-05-29T12:00:00Z = 07:00 hora EC
     const ms = Date.parse("2026-05-29T12:00:00.000Z");
-    expect(localDateHourEC(ms)).toEqual({ date: "2026-05-29", hour: 7 });
+    expect(localDateHourEC(ms)).toEqual({ date: "2026-05-29", hour: 7, dayOfWeek: 5 });
   });
   test("madrugada UTC retrocede al día anterior en Ecuador", () => {
     // 2026-05-29T03:00:00Z = 2026-05-28 22:00 hora EC (cambio de día)
     const ms = Date.parse("2026-05-29T03:00:00.000Z");
-    expect(localDateHourEC(ms)).toEqual({ date: "2026-05-28", hour: 22 });
+    expect(localDateHourEC(ms)).toEqual({ date: "2026-05-28", hour: 22, dayOfWeek: 4 });
   });
   test("05:00Z marca el inicio del día local EC (00:00)", () => {
     const ms = Date.parse("2026-05-29T05:00:00.000Z");
-    expect(localDateHourEC(ms)).toEqual({ date: "2026-05-29", hour: 0 });
+    expect(localDateHourEC(ms)).toEqual({ date: "2026-05-29", hour: 0, dayOfWeek: 5 });
   });
 });

@@ -9,6 +9,7 @@ import 'package:uuid/uuid.dart';
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/services/driver_location_service.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/models/trip_model.dart';
 import '../../domain/usecases/trip_usecases.dart';
@@ -27,6 +28,21 @@ class _TripsPageState extends State<TripsPage>
     with SingleTickerProviderStateMixin {
   late TabController _tabController;
   String _filterStatus = 'Todos';
+
+  /// Línea de detalle con icono Material + texto (reemplaza emojis en UI).
+  Widget _iconLine(IconData icon, String text) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(icon, size: 14, color: AppTheme.textSecondary),
+          const SizedBox(width: AppSpacing.xs),
+          Expanded(child: Text(text)),
+        ],
+      ),
+    );
+  }
 
   /// Mapeo de los chips válidos por tab. Evita combinaciones imposibles
   /// como "Historial + Asignado" (asignado nunca está en historial).
@@ -160,11 +176,11 @@ class _TripsPageState extends State<TripsPage>
             children: [
               _buildQuickTripBar(),
             Container(
-              color: AppTheme.secondaryColor,
+              color: Theme.of(context).colorScheme.secondary,
               child: TabBar(
                 controller: _tabController,
-                indicatorColor: AppTheme.primaryColor,
-                labelColor: AppTheme.primaryColor,
+                indicatorColor: Theme.of(context).colorScheme.primary,
+                labelColor: Theme.of(context).colorScheme.primary,
                 unselectedLabelColor: Colors.white70,
                 tabs: const [
                   Tab(text: 'Activas', icon: Icon(Icons.directions_car, size: 20)),
@@ -175,7 +191,7 @@ class _TripsPageState extends State<TripsPage>
             _buildFilterBar(),
             Expanded(
               child: state is TripLoading
-                  ? const Center(child: CircularProgressIndicator())
+                  ? const LoadingState(message: 'Cargando carreras...')
                   : TabBarView(
                       controller: _tabController,
                       children: [
@@ -205,8 +221,9 @@ class _TripsPageState extends State<TripsPage>
 
     return Container(
       width: double.infinity,
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      color: Colors.white,
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.md, vertical: AppSpacing.sm),
+      color: Theme.of(context).colorScheme.surface,
       child: Row(
         children: [
           Expanded(
@@ -217,11 +234,11 @@ class _TripsPageState extends State<TripsPage>
                 authState.user.associationId,
               ),
               icon: const Icon(Icons.add_circle_outline),
-              label: const Text('+1 carrera',
-                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+              label: Text('+1 carrera',
+                  style: Theme.of(context).textTheme.titleMedium),
               style: ElevatedButton.styleFrom(
-                backgroundColor: AppTheme.primaryColor,
-                foregroundColor: Colors.white,
+                backgroundColor: Theme.of(context).colorScheme.primary,
+                foregroundColor: Theme.of(context).colorScheme.onPrimary,
                 padding: const EdgeInsets.symmetric(vertical: 14),
                 shape: RoundedRectangleBorder(
                   borderRadius: BorderRadius.circular(12),
@@ -303,9 +320,8 @@ class _TripsPageState extends State<TripsPage>
                 'Si dejas en blanco, registra solo la carrera sin datos. '
                 'Pero llenarlos hace que los reportes muestren tus '
                 'ingresos reales.',
-                style: TextStyle(
-                    fontSize: 11,
-                    color: Colors.grey.shade600,
+                style: Theme.of(ctx).textTheme.labelSmall?.copyWith(
+                    color: AppTheme.textSecondary,
                     fontStyle: FontStyle.italic),
               ),
             ],
@@ -391,9 +407,10 @@ class _TripsPageState extends State<TripsPage>
           return Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4),
             child: FilterChip(
-              label: Text(status, style: const TextStyle(fontSize: 12)),
+              label: Text(status,
+                  style: Theme.of(context).textTheme.bodySmall),
               selected: isSelected,
-              selectedColor: AppTheme.primaryColor,
+              selectedColor: Theme.of(context).colorScheme.primary,
               onSelected: (selected) {
                 setState(() => _filterStatus = selected ? status : 'Todos');
               },
@@ -456,59 +473,51 @@ class _TripsPageState extends State<TripsPage>
             t.scheduledFor == null || !t.scheduledFor!.isAfter(now))
         .toList();
 
+    final textTheme = Theme.of(context).textTheme;
     return ListView(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(AppSpacing.md),
       children: [
         // Sección "Por asignar": solicitudes pendientes del tenant. Visible a
         // TODOS los roles (lectura); el botón "Asignar" se restringe dentro
         // del widget a operadora/admin.
         _buildPendingRequestsSection(),
         if (activeTrips.isEmpty)
-          Padding(
-            padding: const EdgeInsets.symmetric(vertical: 32),
-            child: Center(
-              child: Column(
-                children: [
-                  Icon(Icons.local_taxi, size: 64, color: Colors.grey[300]),
-                  const SizedBox(height: 16),
-                  Text('No hay carreras web por ahora',
-                      style:
-                          TextStyle(color: Colors.grey[500], fontSize: 16)),
-                ],
-              ),
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: AppSpacing.xl),
+            child: EmptyState(
+              icon: Icons.local_taxi,
+              title: 'No hay carreras web por ahora',
             ),
           ),
         if (scheduled.isNotEmpty) ...[
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
+            padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs + 2),
             child: Row(
               children: [
                 Icon(Icons.schedule,
-                    size: 16, color: Colors.deepPurple),
-                const SizedBox(width: 6),
+                    size: 16, color: AppTheme.categorical[2]),
+                const SizedBox(width: AppSpacing.xs + 2),
                 Text(
                   'CARRERAS PROGRAMADAS (${scheduled.length})',
-                  style: TextStyle(
-                    fontSize: 11,
+                  style: textTheme.labelSmall?.copyWith(
                     fontWeight: FontWeight.w900,
                     letterSpacing: 0.6,
-                    color: Colors.deepPurple,
+                    color: AppTheme.categorical[2],
                   ),
                 ),
               ],
             ),
           ),
           for (final t in scheduled) _buildScheduledCard(t),
-          const SizedBox(height: 16),
+          const SizedBox(height: AppSpacing.lg),
           Padding(
-            padding: const EdgeInsets.symmetric(vertical: 6),
+            padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs + 2),
             child: Text(
               'CARRERAS INMEDIATAS',
-              style: TextStyle(
-                fontSize: 11,
+              style: textTheme.labelSmall?.copyWith(
                 fontWeight: FontWeight.w900,
                 letterSpacing: 0.6,
-                color: Colors.grey.shade700,
+                color: AppTheme.textSecondary,
               ),
             ),
           ),
@@ -542,23 +551,23 @@ class _TripsPageState extends State<TripsPage>
       builder: (context, snap) {
         final docs = snap.data?.docs ?? [];
         if (docs.isEmpty) return const SizedBox.shrink();
+        final textTheme = Theme.of(context).textTheme;
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6),
+              padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs + 2),
               child: Row(
                 children: [
-                  Icon(Icons.assignment_late,
-                      size: 16, color: Colors.orange.shade800),
-                  const SizedBox(width: 6),
+                  const Icon(Icons.assignment_late,
+                      size: 16, color: AppTheme.warningColor),
+                  const SizedBox(width: AppSpacing.xs + 2),
                   Text(
                     'POR ASIGNAR (${docs.length})',
-                    style: TextStyle(
-                      fontSize: 11,
+                    style: textTheme.labelSmall?.copyWith(
                       fontWeight: FontWeight.w900,
                       letterSpacing: 0.6,
-                      color: Colors.orange.shade800,
+                      color: AppTheme.warningColor,
                     ),
                   ),
                 ],
@@ -572,16 +581,15 @@ class _TripsPageState extends State<TripsPage>
                 user: user,
                 aid: aid,
               ),
-            const SizedBox(height: 16),
+            const SizedBox(height: AppSpacing.lg),
             Padding(
-              padding: const EdgeInsets.symmetric(vertical: 6),
+              padding: const EdgeInsets.symmetric(vertical: AppSpacing.xs + 2),
               child: Text(
                 'CARRERAS ASIGNADAS',
-                style: TextStyle(
-                  fontSize: 11,
+                style: textTheme.labelSmall?.copyWith(
                   fontWeight: FontWeight.w900,
                   letterSpacing: 0.6,
-                  color: Colors.grey.shade700,
+                  color: AppTheme.textSecondary,
                 ),
               ),
             ),
@@ -603,34 +611,36 @@ class _TripsPageState extends State<TripsPage>
     final cuando = (r['cuandoSolicitado'] as Timestamp?)?.toDate();
     final origen = r['origen'] as Map<String, dynamic>?;
     final destino = r['destino'] as Map<String, dynamic>?;
+    final textTheme = Theme.of(context).textTheme;
     return Card(
       elevation: 1,
       shape: RoundedRectangleBorder(
-        side: BorderSide(color: Colors.orange.shade200),
+        side: BorderSide(color: AppTheme.warningColor.withValues(alpha: 0.4)),
         borderRadius: BorderRadius.circular(10),
       ),
       child: ListTile(
         leading: CircleAvatar(
-          backgroundColor: Colors.orange.withValues(alpha: 0.15),
-          child: Icon(Icons.schedule, color: Colors.orange.shade800),
+          backgroundColor: AppTheme.warningColor.withValues(alpha: 0.15),
+          child: const Icon(Icons.schedule, color: AppTheme.warningColor),
         ),
         title: Text(
           r['clienteNombre'] ?? 'Cliente sin nombre',
-          style: const TextStyle(fontWeight: FontWeight.w700),
+          style: textTheme.titleMedium,
         ),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if ((r['clienteTelefono'] ?? '').toString().isNotEmpty)
-              Text('📞 ${r['clienteTelefono']}'),
-            Text('📍 ${origen?['address'] ?? '(sin origen)'}'),
+              _iconLine(Icons.phone, '${r['clienteTelefono']}'),
+            _iconLine(
+                Icons.location_on, origen?['address'] ?? '(sin origen)'),
             if (destino != null && destino['address'] != null)
-              Text('🏁 ${destino['address']}'),
+              _iconLine(Icons.flag, '${destino['address']}'),
             if (cuando != null)
               Text(
                 'Solicitada: ${DateFormat('dd MMM HH:mm').format(cuando)}',
-                style:
-                    TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                style: textTheme.labelSmall
+                    ?.copyWith(color: AppTheme.textSecondary),
               ),
           ],
         ),
@@ -654,13 +664,13 @@ class _TripsPageState extends State<TripsPage>
     Color color;
     if (diff.inMinutes < 60) {
       label = 'En ${diff.inMinutes} min';
-      color = Colors.red.shade700;
+      color = AppTheme.errorColor;
     } else if (diff.inHours < 24) {
       label = 'En ${diff.inHours} h ${diff.inMinutes.remainder(60)} min';
-      color = Colors.deepOrange;
+      color = AppTheme.warningColor;
     } else {
       label = DateFormat('dd MMM HH:mm').format(dt);
-      color = Colors.deepPurple;
+      color = AppTheme.categorical[2];
     }
     return Card(
       elevation: 2,
@@ -675,17 +685,17 @@ class _TripsPageState extends State<TripsPage>
         ),
         title: Text(
           trip.clienteNombre ?? 'Carrera programada',
-          style: const TextStyle(fontWeight: FontWeight.w800),
+          style: Theme.of(context).textTheme.titleMedium,
         ),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if ((trip.clienteTelefono ?? '').isNotEmpty)
-              Text('📞 ${trip.clienteTelefono}'),
+              _iconLine(Icons.phone, '${trip.clienteTelefono}'),
             if (trip.pickupAddress.isNotEmpty)
-              Text('📍 ${trip.pickupAddress}'),
+              _iconLine(Icons.location_on, trip.pickupAddress),
             if ((trip.dropoffAddress ?? '').isNotEmpty)
-              Text('🏁 ${trip.dropoffAddress}'),
+              _iconLine(Icons.flag, '${trip.dropoffAddress}'),
           ],
         ),
         trailing: Container(
@@ -710,8 +720,10 @@ class _TripsPageState extends State<TripsPage>
 
   Widget _buildTripHistory(TripState state) {
     final historyTrips = _getHistoryTrips(state);
+    final primary = Theme.of(context).colorScheme.primary;
     final reportsButton = Padding(
-      padding: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      padding: const EdgeInsets.fromLTRB(
+          AppSpacing.md, AppSpacing.sm, AppSpacing.md, AppSpacing.xs),
       child: SizedBox(
         width: double.infinity,
         child: OutlinedButton.icon(
@@ -719,10 +731,9 @@ class _TripsPageState extends State<TripsPage>
           icon: const Icon(Icons.bar_chart, size: 18),
           label: const Text('Ver reportes completos'),
           style: OutlinedButton.styleFrom(
-            foregroundColor: AppTheme.primaryColor,
-            side: BorderSide(
-                color: AppTheme.primaryColor.withValues(alpha: 0.4)),
-            padding: const EdgeInsets.symmetric(vertical: 10),
+            foregroundColor: primary,
+            side: BorderSide(color: primary.withValues(alpha: 0.4)),
+            padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
           ),
         ),
       ),
@@ -732,18 +743,10 @@ class _TripsPageState extends State<TripsPage>
       return Column(
         children: [
           reportsButton,
-          Expanded(
-            child: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.history, size: 64, color: Colors.grey[300]),
-                  const SizedBox(height: 16),
-                  Text('No hay carreras web en el historial',
-                      style: TextStyle(
-                          color: Colors.grey[500], fontSize: 16)),
-                ],
-              ),
+          const Expanded(
+            child: EmptyState(
+              icon: Icons.history,
+              title: 'No hay carreras web en el historial',
             ),
           ),
         ],
@@ -754,7 +757,8 @@ class _TripsPageState extends State<TripsPage>
         reportsButton,
         Expanded(
           child: ListView.builder(
-            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            padding: const EdgeInsets.fromLTRB(
+                AppSpacing.md, 0, AppSpacing.md, AppSpacing.md),
             itemCount: historyTrips.length,
             itemBuilder: (context, index) =>
                 _buildTripCard(historyTrips[index]),
@@ -779,11 +783,11 @@ class _TripsPageState extends State<TripsPage>
         statusLabel = 'Asignado';
         statusIcon = Icons.assignment;
       case 'finalizado':
-        statusColor = Colors.blue;
+        statusColor = AppTheme.infoColor;
         statusLabel = 'Finalizado';
         statusIcon = Icons.flag;
       case 'completado':
-        statusColor = Colors.blue;
+        statusColor = AppTheme.infoColor;
         statusLabel = 'Completado';
         statusIcon = Icons.check_circle;
       case 'cancelado':
@@ -791,27 +795,29 @@ class _TripsPageState extends State<TripsPage>
         statusLabel = 'Cancelado';
         statusIcon = Icons.cancel;
       default:
-        statusColor = Colors.grey;
+        statusColor = AppTheme.statusOffline;
         statusLabel = 'Desconocido';
         statusIcon = Icons.help;
     }
 
     final timeStr = DateFormat('HH:mm').format(trip.startTime);
 
+    final textTheme = Theme.of(context).textTheme;
     return Card(
-      margin: const EdgeInsets.only(bottom: 12),
+      margin: const EdgeInsets.only(bottom: AppSpacing.md),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
         onTap: () => _showTripDetails(trip),
         child: Padding(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(AppSpacing.lg),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 children: [
                   Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: AppSpacing.sm, vertical: AppSpacing.xs),
                     decoration: BoxDecoration(
                       color: statusColor.withValues(alpha: 0.15),
                       borderRadius: BorderRadius.circular(8),
@@ -820,22 +826,21 @@ class _TripsPageState extends State<TripsPage>
                       mainAxisSize: MainAxisSize.min,
                       children: [
                         Icon(statusIcon, size: 14, color: statusColor),
-                        const SizedBox(width: 4),
+                        const SizedBox(width: AppSpacing.xs),
                         Text(statusLabel,
-                            style: TextStyle(
+                            style: textTheme.bodySmall?.copyWith(
                                 color: statusColor,
-                                fontWeight: FontWeight.w600,
-                                fontSize: 12)),
+                                fontWeight: FontWeight.w600)),
                       ],
                     ),
                   ),
                   const Spacer(),
                   Text(timeStr,
-                      style: const TextStyle(
-                          color: AppTheme.textSecondary, fontSize: 12)),
+                      style: textTheme.bodySmall
+                          ?.copyWith(color: AppTheme.textSecondary)),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               Row(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -846,7 +851,8 @@ class _TripsPageState extends State<TripsPage>
                         decoration: const BoxDecoration(
                             shape: BoxShape.circle, color: AppTheme.statusFree),
                       ),
-                      Container(width: 2, height: 20, color: Colors.grey[300]),
+                      Container(
+                          width: 2, height: 20, color: AppTheme.dividerColor),
                       Container(
                         width: 10, height: 10,
                         decoration: const BoxDecoration(
@@ -854,23 +860,23 @@ class _TripsPageState extends State<TripsPage>
                       ),
                     ],
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: AppSpacing.md),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(trip.pickupAddress, style: const TextStyle(fontSize: 14)),
-                        const SizedBox(height: 10),
+                        Text(trip.pickupAddress, style: textTheme.bodyMedium),
+                        const SizedBox(height: AppSpacing.sm),
                         Text(trip.dropoffAddress ?? 'Destino pendiente',
-                            style: const TextStyle(fontSize: 14)),
+                            style: textTheme.bodyMedium),
                       ],
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               const Divider(height: 1),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               // Carrera web: lo relevante es el cliente. Mostramos su nombre
               // de forma prominente (+ teléfono si hay) y el conductor por
               // NOMBRE denormalizado, nunca por UID crudo.
@@ -883,24 +889,31 @@ class _TripsPageState extends State<TripsPage>
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(trip.clienteNombre ?? 'Cliente',
-                            style: const TextStyle(
-                                fontSize: 14, fontWeight: FontWeight.w600)),
+                            style: textTheme.bodyMedium
+                                ?.copyWith(fontWeight: FontWeight.w600)),
                         if ((trip.clienteTelefono ?? '').trim().isNotEmpty)
-                          Text('📞 ${trip.clienteTelefono!.trim()}',
-                              style: const TextStyle(
-                                  fontSize: 12, color: AppTheme.textSecondary)),
+                          Row(
+                            children: [
+                              const Icon(Icons.phone,
+                                  size: 12, color: AppTheme.textSecondary),
+                              const SizedBox(width: AppSpacing.xs),
+                              Text(trip.clienteTelefono!.trim(),
+                                  style: textTheme.bodySmall?.copyWith(
+                                      color: AppTheme.textSecondary)),
+                            ],
+                          ),
                         Text('Conductor: ${trip.driverName ?? 'Conductor'}',
-                            style: const TextStyle(
-                                fontSize: 12, color: AppTheme.textSecondary)),
+                            style: textTheme.bodySmall
+                                ?.copyWith(color: AppTheme.textSecondary)),
                       ],
                     ),
                   ),
                   if (trip.fare != null && trip.fare! > 0)
                     Text('\$${trip.fare!.toStringAsFixed(2)}',
-                        style: const TextStyle(
+                        style: textTheme.titleMedium?.copyWith(
                             fontWeight: FontWeight.bold,
-                            fontSize: 16,
-                            color: AppTheme.secondaryColor)),
+                            color:
+                                Theme.of(context).colorScheme.secondary)),
                 ],
               ),
               if (isActive) _buildActiveCardActions(trip),
@@ -934,14 +947,16 @@ class _TripsPageState extends State<TripsPage>
       // enterrada en la hoja de detalle y la operadora no la encontraba).
       // Reutiliza el flujo existente `_reassignTrip` (selector de activos +
       // auditoría en trips/{id}/reassignments).
+      final secondary = Theme.of(context).colorScheme.secondary;
       buttons.add(OutlinedButton.icon(
         onPressed: () => _reassignTrip(trip),
         icon: const Icon(Icons.swap_horiz, size: 16),
         label: const Text('Reasignar'),
         style: OutlinedButton.styleFrom(
-          foregroundColor: AppTheme.secondaryColor,
-          side: const BorderSide(color: AppTheme.secondaryColor),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          foregroundColor: secondary,
+          side: BorderSide(color: secondary),
+          padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.md, vertical: AppSpacing.xs),
         ),
       ));
       buttons.add(OutlinedButton.icon(
@@ -951,7 +966,8 @@ class _TripsPageState extends State<TripsPage>
         style: OutlinedButton.styleFrom(
           foregroundColor: AppTheme.errorColor,
           side: const BorderSide(color: AppTheme.errorColor),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.md, vertical: AppSpacing.xs),
         ),
       ));
     }
@@ -965,9 +981,10 @@ class _TripsPageState extends State<TripsPage>
         icon: const Icon(Icons.flag, size: 16),
         label: const Text('Viaje finalizado'),
         style: ElevatedButton.styleFrom(
-          backgroundColor: AppTheme.primaryColor,
-          foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          backgroundColor: Theme.of(context).colorScheme.primary,
+          foregroundColor: Theme.of(context).colorScheme.onPrimary,
+          padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.md, vertical: AppSpacing.xs),
         ),
       ));
     }
@@ -980,18 +997,19 @@ class _TripsPageState extends State<TripsPage>
         style: ElevatedButton.styleFrom(
           backgroundColor: AppTheme.statusFree,
           foregroundColor: Colors.white,
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(
+              horizontal: AppSpacing.md, vertical: AppSpacing.xs),
         ),
       ));
     }
 
     if (buttons.isEmpty) return const SizedBox.shrink();
     return Padding(
-      padding: const EdgeInsets.only(top: 12),
+      padding: const EdgeInsets.only(top: AppSpacing.md),
       child: Wrap(
         alignment: WrapAlignment.end,
-        spacing: 8,
-        runSpacing: 8,
+        spacing: AppSpacing.sm,
+        runSpacing: AppSpacing.sm,
         children: buttons,
       ),
     );
@@ -1070,7 +1088,7 @@ class _TripsPageState extends State<TripsPage>
         expand: false,
         builder: (ctx, scrollController) => SingleChildScrollView(
           controller: scrollController,
-          padding: const EdgeInsets.all(20),
+          padding: const EdgeInsets.all(AppSpacing.xl),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
@@ -1078,13 +1096,14 @@ class _TripsPageState extends State<TripsPage>
                 child: Container(
                   width: 40, height: 4,
                   decoration: BoxDecoration(
-                      color: Colors.grey[300], borderRadius: BorderRadius.circular(2)),
+                      color: AppTheme.dividerColor,
+                      borderRadius: BorderRadius.circular(2)),
                 ),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: AppSpacing.lg),
               Text('Carrera ${trip.uid.length > 8 ? trip.uid.substring(0, 8) : trip.uid}',
-                  style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 20)),
-              const SizedBox(height: 16),
+                  style: Theme.of(ctx).textTheme.titleLarge),
+              const SizedBox(height: AppSpacing.lg),
               // Mostramos nombres legibles, nunca UIDs crudos.
               _detailRow(Icons.account_circle, 'Cliente',
                   trip.clienteNombre ?? 'Cliente'),
@@ -1163,8 +1182,8 @@ class _TripsPageState extends State<TripsPage>
             icon: const Icon(Icons.flag, size: 18),
             label: const Text('Viaje finalizado'),
             style: ElevatedButton.styleFrom(
-              backgroundColor: AppTheme.primaryColor,
-              foregroundColor: Colors.white,
+              backgroundColor: Theme.of(sheetCtx).colorScheme.primary,
+              foregroundColor: Theme.of(sheetCtx).colorScheme.onPrimary,
             ),
           ),
         if (isDriverOwner && hasPickupLocation)
@@ -1183,7 +1202,7 @@ class _TripsPageState extends State<TripsPage>
             icon: const Icon(Icons.phone, size: 18),
             label: const Text('Llamar al cliente'),
             style: ElevatedButton.styleFrom(
-              backgroundColor: AppTheme.secondaryColor,
+              backgroundColor: Theme.of(context).colorScheme.secondary,
               foregroundColor: Colors.white,
             ),
           ),
@@ -1205,8 +1224,8 @@ class _TripsPageState extends State<TripsPage>
             icon: const Icon(Icons.swap_horiz, size: 18),
             label: const Text('Reasignar'),
             style: OutlinedButton.styleFrom(
-              foregroundColor: AppTheme.secondaryColor,
-              side: const BorderSide(color: AppTheme.secondaryColor),
+              foregroundColor: Theme.of(context).colorScheme.secondary,
+              side: BorderSide(color: Theme.of(context).colorScheme.secondary),
             ),
           ),
         if (canCancel)
@@ -1218,8 +1237,8 @@ class _TripsPageState extends State<TripsPage>
             icon: const Icon(Icons.cancel_outlined, size: 18),
             label: const Text('Cancelar viaje'),
             style: OutlinedButton.styleFrom(
-              foregroundColor: Colors.orange.shade800,
-              side: BorderSide(color: Colors.orange.shade800),
+              foregroundColor: AppTheme.warningColor,
+              side: const BorderSide(color: AppTheme.warningColor),
             ),
           ),
         if (canDelete)
@@ -1445,8 +1464,8 @@ class _TripsPageState extends State<TripsPage>
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text('Se reasignará a $toDriverName.',
-                style: const TextStyle(fontSize: 13)),
-            const SizedBox(height: 12),
+                style: Theme.of(ctx).textTheme.bodyMedium),
+            const SizedBox(height: AppSpacing.md),
             TextField(
               controller: reasonCtrl,
               decoration: const InputDecoration(
@@ -1632,11 +1651,10 @@ class _TripsPageState extends State<TripsPage>
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            const Padding(
-              padding: EdgeInsets.all(16),
+            Padding(
+              padding: const EdgeInsets.all(AppSpacing.lg),
               child: Text('Navegar con…',
-                  style:
-                      TextStyle(fontSize: 16, fontWeight: FontWeight.w700)),
+                  style: Theme.of(ctx).textTheme.titleMedium),
             ),
             ListTile(
               leading: const Icon(Icons.map, color: AppTheme.statusFree),
@@ -1644,11 +1662,11 @@ class _TripsPageState extends State<TripsPage>
               onTap: () => Navigator.pop(ctx, 'gmaps'),
             ),
             ListTile(
-              leading: const Icon(Icons.navigation, color: Colors.blue),
+              leading: const Icon(Icons.navigation, color: AppTheme.infoColor),
               title: const Text('Waze'),
               onTap: () => Navigator.pop(ctx, 'waze'),
             ),
-            const SizedBox(height: 8),
+            const SizedBox(height: AppSpacing.sm),
           ],
         ),
       ),
@@ -1720,17 +1738,20 @@ class _TripsPageState extends State<TripsPage>
   }
 
   Widget _detailRow(IconData icon, String label, String value) {
+    final textTheme = Theme.of(context).textTheme;
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 8),
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
       child: Row(
         children: [
           Icon(icon, size: 20, color: AppTheme.textSecondary),
-          const SizedBox(width: 12),
+          const SizedBox(width: AppSpacing.md),
           Text('$label: ',
-              style: const TextStyle(color: AppTheme.textSecondary, fontSize: 14)),
+              style: textTheme.bodyMedium
+                  ?.copyWith(color: AppTheme.textSecondary)),
           Expanded(
             child: Text(value,
-                style: const TextStyle(fontWeight: FontWeight.w600, fontSize: 14)),
+                style: textTheme.bodyMedium
+                    ?.copyWith(fontWeight: FontWeight.w600)),
           ),
         ],
       ),

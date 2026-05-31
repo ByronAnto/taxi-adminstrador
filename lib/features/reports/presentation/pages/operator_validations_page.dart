@@ -5,6 +5,7 @@ import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../payments/data/models/payment_model.dart';
 
@@ -135,7 +136,7 @@ class _OperatorValidationsPageState extends State<OperatorValidationsPage> {
       body: Column(
         children: [
           Padding(
-            padding: const EdgeInsets.all(12),
+            padding: const EdgeInsets.all(AppSpacing.md),
             child: SegmentedButton<_OpPeriod>(
               segments: const [
                 ButtonSegment(value: _OpPeriod.day, label: Text('Hoy')),
@@ -152,7 +153,7 @@ class _OperatorValidationsPageState extends State<OperatorValidationsPage> {
           ),
           if (!_loading && _error == null)
             Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
+              padding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg),
               child: Row(
                 children: [
                   Expanded(
@@ -160,7 +161,7 @@ class _OperatorValidationsPageState extends State<OperatorValidationsPage> {
                         'Validados',
                         '${_items.length}',
                         Icons.fact_check_outlined,
-                        AppTheme.primaryColor),
+                        Theme.of(context).colorScheme.secondary),
                   ),
                   const SizedBox(width: 10),
                   Expanded(
@@ -168,33 +169,37 @@ class _OperatorValidationsPageState extends State<OperatorValidationsPage> {
                         'Total \$',
                         fmtMoney.format(total),
                         Icons.attach_money,
-                        Colors.green.shade700),
+                        AppTheme.successColor),
                   ),
                 ],
               ),
             ),
-          const SizedBox(height: 8),
+          const SizedBox(height: AppSpacing.sm),
           Expanded(
             child: _loading
-                ? const Center(child: CircularProgressIndicator())
+                ? const LoadingState()
                 : _error != null
-                    ? _buildError(_error!)
+                    ? ErrorState(message: _error!, onRetry: _load)
                     : _items.isEmpty
-                        ? const Center(
-                            child: Text('Sin validaciones en el periodo'))
+                        ? const EmptyState(
+                            icon: Icons.fact_check_outlined,
+                            title: 'Sin validaciones en el periodo',
+                          )
                         : ListView.separated(
-                            padding:
-                                const EdgeInsets.symmetric(horizontal: 16),
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: AppSpacing.lg),
                             itemCount: _items.length,
                             separatorBuilder: (_, _) =>
                                 const Divider(height: 1),
                             itemBuilder: (ctx, i) {
                               final p = _items[i];
+                              final textTheme =
+                                  Theme.of(context).textTheme;
                               return ListTile(
                                 dense: true,
                                 leading: const Icon(
                                   Icons.check_circle,
-                                  color: Colors.green,
+                                  color: AppTheme.successColor,
                                 ),
                                 title: Text(
                                   p.driverName ?? p.driverId,
@@ -203,13 +208,13 @@ class _OperatorValidationsPageState extends State<OperatorValidationsPage> {
                                 ),
                                 subtitle: Text(
                                   '${p.concept} · ${p.validatedAt != null ? fmtDate.format(p.validatedAt!) : "—"}',
-                                  style: const TextStyle(fontSize: 12),
+                                  style: textTheme.bodySmall,
                                 ),
                                 trailing: Text(
                                   fmtMoney.format(p.amount),
-                                  style: TextStyle(
+                                  style: const TextStyle(
                                     fontWeight: FontWeight.w800,
-                                    color: Colors.green.shade700,
+                                    color: AppTheme.successColor,
                                   ),
                                 ),
                               );
@@ -252,32 +257,4 @@ class _OperatorValidationsPageState extends State<OperatorValidationsPage> {
     );
   }
 
-  Widget _buildError(String error) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.error_outline,
-                size: 56, color: Colors.red.shade400),
-            const SizedBox(height: 12),
-            const Text('No pudimos cargar tus validaciones',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
-                textAlign: TextAlign.center),
-            const SizedBox(height: 8),
-            Text(error,
-                textAlign: TextAlign.center,
-                style: TextStyle(color: Colors.grey.shade700, fontSize: 12)),
-            const SizedBox(height: 16),
-            FilledButton.icon(
-              onPressed: _load,
-              icon: const Icon(Icons.refresh),
-              label: const Text('Reintentar'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
 }

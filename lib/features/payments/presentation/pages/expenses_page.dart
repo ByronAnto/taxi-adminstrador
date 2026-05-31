@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:uuid/uuid.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/models/payment_model.dart';
 import '../bloc/payment_bloc.dart';
@@ -25,12 +26,13 @@ class _ExpensesPageState extends State<ExpensesPage> {
     'otro': Icons.receipt_long,
   };
 
+  // Colores categóricos cohesivos (paleta del design system).
   final Map<String, Color> _categoryColors = {
-    'gasolina': Colors.orange,
-    'mantenimiento': Colors.blue,
-    'lavado': Colors.cyan,
-    'peaje': Colors.purple,
-    'otro': Colors.grey,
+    'gasolina': AppTheme.categorical[6], // orange
+    'mantenimiento': AppTheme.categorical[0], // indigo
+    'lavado': AppTheme.categorical[4], // cyan
+    'peaje': AppTheme.categorical[2], // purple
+    'otro': AppTheme.statusOffline, // gris neutro
   };
 
   @override
@@ -95,87 +97,89 @@ class _ExpensesPageState extends State<ExpensesPage> {
             label: const Text('Nuevo gasto'),
           ),
           body: state is PaymentLoading
-              ? const Center(child: CircularProgressIndicator())
-              : Column(
-                  children: [
-                    // Summary cards
-                    Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Row(
-                        children: [
-                          Expanded(
-                            child: _summaryCard(
-                              'Total',
-                              '\$${_totalForCategory(expenses, 'todos').toStringAsFixed(2)}',
-                              AppTheme.secondaryColor,
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          Expanded(
-                            child: _summaryCard(
-                              'Gasolina',
-                              '\$${_totalForCategory(expenses, 'gasolina').toStringAsFixed(2)}',
-                              Colors.orange,
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-
-                    // Category filter chips
-                    Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16),
-                      child: SingleChildScrollView(
-                        scrollDirection: Axis.horizontal,
-                        child: Row(
-                          children: [
-                            _buildFilterChip('todos', 'Todos'),
-                            ..._categoryIcons.keys.map(
-                              (cat) => _buildFilterChip(
-                                cat,
-                                cat[0].toUpperCase() + cat.substring(1),
+              ? const LoadingState(message: 'Cargando gastos…')
+              : state is PaymentError
+                  ? ErrorState(
+                      message: state.message,
+                      onRetry: _loadExpenses,
+                    )
+                  : Column(
+                      children: [
+                        // Summary cards
+                        Padding(
+                          padding: const EdgeInsets.all(AppSpacing.lg),
+                          child: Row(
+                            children: [
+                              Expanded(
+                                child: _summaryCard(
+                                  context,
+                                  'Total',
+                                  '\$${_totalForCategory(expenses, 'todos').toStringAsFixed(2)}',
+                                  Theme.of(context).colorScheme.secondary,
+                                ),
                               ),
-                            ),
-                          ],
+                              const SizedBox(width: AppSpacing.sm),
+                              Expanded(
+                                child: _summaryCard(
+                                  context,
+                                  'Gasolina',
+                                  '\$${_totalForCategory(expenses, 'gasolina').toStringAsFixed(2)}',
+                                  _categoryColors['gasolina']!,
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
 
-                    // Expense list
-                    Expanded(
-                      child: filtered.isEmpty
-                          ? Center(
-                              child: Column(
-                                mainAxisAlignment: MainAxisAlignment.center,
-                                children: [
-                                  Icon(Icons.receipt_long,
-                                      size: 64, color: Colors.grey[300]),
-                                  const SizedBox(height: 16),
-                                  Text('Sin gastos registrados',
-                                      style: TextStyle(
-                                          color: Colors.grey[500],
-                                          fontSize: 16)),
-                                ],
-                              ),
-                            )
-                          : ListView.builder(
-                              padding: const EdgeInsets.all(12),
-                              itemCount: filtered.length,
-                              itemBuilder: (ctx, i) =>
-                                  _buildExpenseCard(filtered[i]),
+                        // Category filter chips
+                        Padding(
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: AppSpacing.lg),
+                          child: SingleChildScrollView(
+                            scrollDirection: Axis.horizontal,
+                            child: Row(
+                              children: [
+                                _buildFilterChip('todos', 'Todos'),
+                                ..._categoryIcons.keys.map(
+                                  (cat) => _buildFilterChip(
+                                    cat,
+                                    cat[0].toUpperCase() + cat.substring(1),
+                                  ),
+                                ),
+                              ],
                             ),
+                          ),
+                        ),
+                        const SizedBox(height: AppSpacing.sm),
+
+                        // Expense list
+                        Expanded(
+                          child: filtered.isEmpty
+                              ? const EmptyState(
+                                  icon: Icons.receipt_long,
+                                  title: 'Sin gastos registrados',
+                                  subtitle:
+                                      'Toca "Nuevo gasto" para registrar el primero.',
+                                )
+                              : ListView.builder(
+                                  padding: const EdgeInsets.all(AppSpacing.md),
+                                  itemCount: filtered.length,
+                                  itemBuilder: (ctx, i) =>
+                                      _buildExpenseCard(filtered[i]),
+                                ),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
         );
       },
     );
   }
 
-  Widget _summaryCard(String label, String value, Color color) {
+  Widget _summaryCard(
+      BuildContext context, String label, String value, Color color) {
+    final textTheme = Theme.of(context).textTheme;
     return Container(
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.all(AppSpacing.md),
       decoration: BoxDecoration(
         color: color.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(12),
@@ -184,11 +188,10 @@ class _ExpensesPageState extends State<ExpensesPage> {
       child: Column(
         children: [
           Text(value,
-              style: TextStyle(
-                  fontWeight: FontWeight.bold, fontSize: 16, color: color)),
+              style: textTheme.titleMedium?.copyWith(color: color)),
           Text(label,
-              style: const TextStyle(
-                  fontSize: 11, color: AppTheme.textSecondary)),
+              style: textTheme.labelSmall
+                  ?.copyWith(color: AppTheme.textSecondary)),
         ],
       ),
     );
@@ -196,20 +199,21 @@ class _ExpensesPageState extends State<ExpensesPage> {
 
   Widget _buildFilterChip(String category, String label) {
     final isSelected = _selectedCategory == category;
+    final secondary = Theme.of(context).colorScheme.secondary;
     return Padding(
-      padding: const EdgeInsets.only(right: 8),
+      padding: const EdgeInsets.only(right: AppSpacing.sm),
       child: FilterChip(
         selected: isSelected,
         label: Text(label),
-        selectedColor: AppTheme.secondaryColor.withValues(alpha: 0.2),
-        checkmarkColor: AppTheme.secondaryColor,
+        selectedColor: secondary.withValues(alpha: 0.2),
+        checkmarkColor: secondary,
         onSelected: (_) => setState(() => _selectedCategory = category),
       ),
     );
   }
 
   Widget _buildExpenseCard(ExpenseModel expense) {
-    final color = _categoryColors[expense.category] ?? Colors.grey;
+    final color = _categoryColors[expense.category] ?? AppTheme.statusOffline;
     final icon = _categoryIcons[expense.category] ?? Icons.receipt_long;
 
     return Dismissible(
@@ -242,7 +246,7 @@ class _ExpensesPageState extends State<ExpensesPage> {
         context.read<PaymentBloc>().add(ExpenseDeleteRequested(expense.uid));
       },
       child: Card(
-        margin: const EdgeInsets.only(bottom: 12),
+        margin: const EdgeInsets.only(bottom: AppSpacing.md),
         child: ListTile(
           leading: CircleAvatar(
             backgroundColor: color.withValues(alpha: 0.15),
@@ -250,7 +254,7 @@ class _ExpensesPageState extends State<ExpensesPage> {
           ),
           title: Text(
             expense.category[0].toUpperCase() + expense.category.substring(1),
-            style: const TextStyle(fontWeight: FontWeight.w600),
+            style: Theme.of(context).textTheme.titleMedium,
           ),
           subtitle: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -258,15 +262,19 @@ class _ExpensesPageState extends State<ExpensesPage> {
               if (expense.description.isNotEmpty) Text(expense.description),
               Text(
                 expense.date.toIso8601String().substring(0, 10),
-                style: const TextStyle(
-                    fontSize: 12, color: AppTheme.textSecondary),
+                style: Theme.of(context)
+                    .textTheme
+                    .bodySmall
+                    ?.copyWith(color: AppTheme.textSecondary),
               ),
             ],
           ),
           trailing: Text(
             '\$${expense.amount.toStringAsFixed(2)}',
-            style: TextStyle(
-                fontWeight: FontWeight.bold, fontSize: 16, color: color),
+            style: Theme.of(context)
+                .textTheme
+                .titleMedium
+                ?.copyWith(color: color),
           ),
         ),
       ),

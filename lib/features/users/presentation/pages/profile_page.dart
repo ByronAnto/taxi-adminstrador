@@ -10,6 +10,7 @@ import '../../../../core/theme/app_theme.dart';
 import '../../../../core/services/image_upload_service.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../auth/data/models/user_model.dart';
+import '../../../home/presentation/widgets/remote_logging_dialog.dart';
 import 'request_vehicle_change_page.dart';
 
 /// Página de perfil de usuario con edición de datos
@@ -80,22 +81,25 @@ class _ProfilePageState extends State<ProfilePage> {
   Future<void> _pickImage(String tipo) async {
     final source = await showModalBottomSheet<ImageSource>(
       context: context,
-      builder: (ctx) => SafeArea(
-        child: Wrap(
-          children: [
-            ListTile(
-              leading: const Icon(Icons.camera_alt, color: AppTheme.primaryColor),
-              title: const Text('Cámara'),
-              onTap: () => Navigator.pop(ctx, ImageSource.camera),
-            ),
-            ListTile(
-              leading: const Icon(Icons.photo_library, color: AppTheme.primaryColor),
-              title: const Text('Galería'),
-              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
-            ),
-          ],
-        ),
-      ),
+      builder: (ctx) {
+        final primary = Theme.of(ctx).colorScheme.primary;
+        return SafeArea(
+          child: Wrap(
+            children: [
+              ListTile(
+                leading: Icon(Icons.camera_alt, color: primary),
+                title: const Text('Cámara'),
+                onTap: () => Navigator.pop(ctx, ImageSource.camera),
+              ),
+              ListTile(
+                leading: Icon(Icons.photo_library, color: primary),
+                title: const Text('Galería'),
+                onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+              ),
+            ],
+          ),
+        );
+      },
     );
     if (source == null) return;
     final file = await _imageService.pickImage(source: source);
@@ -210,28 +214,30 @@ class _ProfilePageState extends State<ProfilePage> {
             builder: (context, state) {
               if (state is! AuthAuthenticated) return const SizedBox();
               if (_isEditing) {
+                final onPrimary = Theme.of(context).colorScheme.onPrimary;
                 return Row(
                   children: [
                     TextButton(
                       onPressed: _isSaving
                           ? null
                           : () => setState(() => _isEditing = false),
-                      child: const Text('Cancelar',
-                          style: TextStyle(color: Colors.white70)),
+                      child: Text('Cancelar',
+                          style: TextStyle(
+                              color: onPrimary.withValues(alpha: 0.7))),
                     ),
                     TextButton(
                       onPressed: _isSaving
                           ? null
                           : () => _saveProfile(state.user),
                       child: _isSaving
-                          ? const SizedBox(
+                          ? SizedBox(
                               width: 18,
                               height: 18,
                               child: CircularProgressIndicator(
-                                  strokeWidth: 2, color: Colors.white))
-                          : const Text('Guardar',
+                                  strokeWidth: 2, color: onPrimary))
+                          : Text('Guardar',
                               style: TextStyle(
-                                  color: Colors.white,
+                                  color: onPrimary,
                                   fontWeight: FontWeight.bold)),
                     ),
                   ],
@@ -294,8 +300,11 @@ class _ProfilePageState extends State<ProfilePage> {
                   width: double.infinity,
                   padding: const EdgeInsets.all(24),
                   decoration: BoxDecoration(
-                    gradient: const LinearGradient(
-                      colors: [AppTheme.primaryColor, Color(0xFF1565C0)],
+                    gradient: LinearGradient(
+                      colors: [
+                        Theme.of(context).colorScheme.primary,
+                        Theme.of(context).colorScheme.secondary,
+                      ],
                     ),
                     borderRadius: BorderRadius.circular(16),
                   ),
@@ -405,7 +414,7 @@ class _ProfilePageState extends State<ProfilePage> {
                   ListTile(
                     contentPadding: EdgeInsets.zero,
                     leading: const Icon(Icons.directions_car,
-                        color: Colors.orange),
+                        color: AppTheme.warningColor),
                     title: const Text('Solicitar cambio de unidad'),
                     subtitle: const Text('Por accidente, avería, etc.'),
                     trailing: const Icon(Icons.chevron_right),
@@ -418,6 +427,25 @@ class _ProfilePageState extends State<ProfilePage> {
                   const SizedBox(height: 8),
                 ],
 
+                // Ajustes avanzados / debug (solo admin). "Logs remotos"
+                // antes vivía en la grilla de Administración del home; se
+                // movió aquí por ser una herramienta de diagnóstico, no de
+                // gestión diaria. Mismo gating (admin o super-admin).
+                if (user.role == 'admin' ||
+                    user.email == 'brealpeaymara@gmail.com') ...[
+                  ListTile(
+                    contentPadding: EdgeInsets.zero,
+                    leading: const Icon(Icons.bug_report_outlined,
+                        color: AppTheme.infoColor),
+                    title: const Text('Logs remotos'),
+                    subtitle:
+                        const Text('Diagnóstico: enviar logs al servidor'),
+                    trailing: const Icon(Icons.chevron_right),
+                    onTap: () => RemoteLoggingDialog.show(context),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+
                 // Cambiar contraseña
                 SizedBox(
                   width: double.infinity,
@@ -426,10 +454,15 @@ class _ProfilePageState extends State<ProfilePage> {
                     icon: const Icon(Icons.lock_reset),
                     label: const Text('Cambiar contraseña'),
                     style: OutlinedButton.styleFrom(
-                      foregroundColor: AppTheme.primaryColor,
-                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      foregroundColor:
+                          Theme.of(context).colorScheme.secondary,
+                      padding:
+                          const EdgeInsets.symmetric(vertical: AppSpacing.lg),
                       side: BorderSide(
-                          color: AppTheme.primaryColor.withValues(alpha: 0.5)),
+                          color: Theme.of(context)
+                              .colorScheme
+                              .secondary
+                              .withValues(alpha: 0.5)),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(12),
                       ),
@@ -509,8 +542,8 @@ class _ProfilePageState extends State<ProfilePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Información Personal',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+            Text('Información Personal',
+                style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 12),
             TextFormField(
               controller: _nameCtrl,
@@ -559,8 +592,8 @@ class _ProfilePageState extends State<ProfilePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Cooperativa y Vehículo',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+            Text('Cooperativa y Vehículo',
+                style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 12),
             TextFormField(
               controller: _cooperativaCtrl,
@@ -641,8 +674,8 @@ class _ProfilePageState extends State<ProfilePage> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            const Text('Fotografías',
-                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 15)),
+            Text('Fotografías',
+                style: Theme.of(context).textTheme.titleMedium),
             const SizedBox(height: 12),
             // Foto vehículo
             _buildPhotoRow(
@@ -704,11 +737,11 @@ class _ProfilePageState extends State<ProfilePage> {
                         ? CachedNetworkImage(
                             imageUrl: url,
                             fit: BoxFit.cover,
-                            placeholder: (_, __) => Container(
+                            placeholder: (_, _) => Container(
                               color: Colors.grey[200],
                               child: const Icon(Icons.image, size: 20),
                             ),
-                            errorWidget: (_, __, ___) => Container(
+                            errorWidget: (_, _, _) => Container(
                               color: Colors.grey[200],
                               child: const Icon(Icons.broken_image, size: 20),
                             ),
@@ -740,7 +773,8 @@ class _ProfilePageState extends State<ProfilePage> {
               ),
             ),
             if (onEdit != null)
-              Icon(Icons.edit, size: 18, color: AppTheme.primaryColor),
+              Icon(Icons.edit,
+                  size: 18, color: Theme.of(context).colorScheme.secondary),
             if (hasImage && onEdit == null)
               Icon(Icons.zoom_in, size: 18, color: Colors.grey[500]),
           ],
@@ -761,7 +795,7 @@ class _ProfilePageState extends State<ProfilePage> {
               : CachedNetworkImage(
                   imageUrl: url!,
                   fit: BoxFit.contain,
-                  placeholder: (_, __) =>
+                  placeholder: (_, _) =>
                       const Center(child: CircularProgressIndicator()),
                 ),
         ),
@@ -784,11 +818,12 @@ class _ProfilePageState extends State<ProfilePage> {
         return StatefulBuilder(
           builder: (sCtx, setLocal) {
             return AlertDialog(
-              title: const Row(
+              title: Row(
                 children: [
-                  Icon(Icons.lock_reset, color: AppTheme.primaryColor),
-                  SizedBox(width: 8),
-                  Text('Cambiar contraseña'),
+                  Icon(Icons.lock_reset,
+                      color: Theme.of(sCtx).colorScheme.secondary),
+                  const SizedBox(width: AppSpacing.sm),
+                  const Text('Cambiar contraseña'),
                 ],
               ),
               content: SingleChildScrollView(
@@ -898,25 +933,25 @@ class _ProfilePageState extends State<ProfilePage> {
 
   Widget _buildInfoCard(
       BuildContext context, String title, List<_InfoItem> items) {
+    final secondary = Theme.of(context).colorScheme.secondary;
     return Card(
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: Padding(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
               title,
-              style: const TextStyle(
-                  fontWeight: FontWeight.bold, fontSize: 15),
+              style: Theme.of(context).textTheme.titleMedium,
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             ...items.map((item) => Padding(
                   padding: const EdgeInsets.only(bottom: 10),
                   child: Row(
                     children: [
-                      Icon(item.icon, size: 18, color: AppTheme.primaryColor),
-                      const SizedBox(width: 12),
+                      Icon(item.icon, size: 18, color: secondary),
+                      const SizedBox(width: AppSpacing.md),
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,

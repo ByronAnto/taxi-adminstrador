@@ -7,6 +7,7 @@ import 'package:intl/intl.dart';
 
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/data/models/user_model.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../data/models/payment_model.dart';
@@ -50,14 +51,9 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
     if (aid == null || aid.isEmpty) {
       return Scaffold(
         appBar: AppBar(title: const Text('Validar pagos')),
-        body: const Center(
-          child: Padding(
-            padding: EdgeInsets.all(24),
-            child: Text(
-              'No se pudo determinar la asociación.',
-              textAlign: TextAlign.center,
-            ),
-          ),
+        body: const EmptyState(
+          icon: Icons.business_outlined,
+          title: 'No se pudo determinar la asociación.',
         ),
       );
     }
@@ -68,8 +64,6 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('Validar pagos'),
-        backgroundColor: AppTheme.primaryColor,
-        foregroundColor: Colors.white,
         leading: IconButton(
           icon: const Icon(Icons.arrow_back),
           onPressed: () =>
@@ -158,18 +152,10 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
       stream: query.snapshots(),
       builder: (context, snap) {
         if (snap.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator());
+          return const LoadingState();
         }
         if (snap.hasError) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Text(
-                'Error cargando pagos: ${snap.error}',
-                style: const TextStyle(color: Colors.red),
-              ),
-            ),
-          );
+          return ErrorState.fromError(snap.error);
         }
 
         final docs = snap.data?.docs ?? [];
@@ -195,31 +181,18 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
         });
 
         if (payments.isEmpty) {
-          return Center(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.inbox, size: 56, color: Colors.grey[300]),
-                  const SizedBox(height: 12),
-                  Text(
-                    _filter == _ApprovalFilter.pending
-                        ? 'No hay pagos pendientes por validar.'
-                        : 'No hay pagos en este filtro.',
-                    style: const TextStyle(color: Colors.black54),
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            ),
+          return EmptyState(
+            icon: Icons.inbox,
+            title: _filter == _ApprovalFilter.pending
+                ? 'No hay pagos pendientes por validar.'
+                : 'No hay pagos en este filtro.',
           );
         }
 
         return ListView.separated(
-          padding: const EdgeInsets.symmetric(vertical: 8),
+          padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
           itemCount: payments.length,
-          separatorBuilder: (_, _) => const SizedBox(height: 4),
+          separatorBuilder: (_, _) => const SizedBox(height: AppSpacing.xs),
           itemBuilder: (_, i) => _PaymentTile(
             payment: payments[i],
             onTap: () => _openDetail(payments[i]),
@@ -287,7 +260,7 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text(
-              '✅ Backfill: ${data['updated']} actualizados, '
+              'Backfill: ${data['updated']} actualizados, '
               '${data['skipped']} saltados, ${data['scanned']} totales'),
           backgroundColor: AppTheme.successColor,
           duration: const Duration(seconds: 5),
@@ -323,7 +296,7 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Pago validado.'),
-          backgroundColor: Colors.green,
+          backgroundColor: AppTheme.successColor,
         ),
       );
     } on FirebaseFunctionsException catch (e) {
@@ -331,7 +304,7 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error: ${e.message ?? e.code}'),
-          backgroundColor: Colors.red,
+          backgroundColor: AppTheme.errorColor,
         ),
       );
     }
@@ -382,7 +355,7 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
         SnackBar(
           content: Text(
               'Membresía aprobada (+$months mes${months == 1 ? '' : 'es'}).'),
-          backgroundColor: Colors.green,
+          backgroundColor: AppTheme.successColor,
         ),
       );
     } on FirebaseFunctionsException catch (e) {
@@ -390,7 +363,7 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error: ${e.message ?? e.code}'),
-          backgroundColor: Colors.red,
+          backgroundColor: AppTheme.errorColor,
         ),
       );
     }
@@ -417,7 +390,8 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
           ),
           ElevatedButton(
             style: ElevatedButton.styleFrom(
-                backgroundColor: Colors.red, foregroundColor: Colors.white),
+                backgroundColor: AppTheme.errorColor,
+                foregroundColor: Colors.white),
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('Rechazar'),
           ),
@@ -436,7 +410,7 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Pago rechazado.'),
-          backgroundColor: Colors.orange,
+          backgroundColor: AppTheme.warningColor,
         ),
       );
     } on FirebaseFunctionsException catch (e) {
@@ -444,7 +418,7 @@ class _PaymentApprovalsPageState extends State<PaymentApprovalsPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
           content: Text('Error: ${e.message ?? e.code}'),
-          backgroundColor: Colors.red,
+          backgroundColor: AppTheme.errorColor,
         ),
       );
     }
@@ -461,10 +435,11 @@ class _PaymentTile extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
     final statusColor = switch (payment.status) {
-      PaymentStatus.pending => Colors.orange,
-      PaymentStatus.validated => Colors.green,
-      PaymentStatus.rejected => Colors.red,
+      PaymentStatus.pending => AppTheme.warningColor,
+      PaymentStatus.validated => AppTheme.successColor,
+      PaymentStatus.rejected => AppTheme.errorColor,
     };
     final statusLabel = switch (payment.status) {
       PaymentStatus.pending => 'Pendiente',
@@ -499,23 +474,20 @@ class _PaymentTile extends StatelessWidget {
             Expanded(
               child: Text(
                 '\$${payment.amount.toStringAsFixed(2)}',
-                style: const TextStyle(
-                    fontWeight: FontWeight.bold, fontSize: 16),
+                style: textTheme.titleMedium,
               ),
             ),
             Container(
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+              padding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.sm, vertical: 2),
               decoration: BoxDecoration(
                 color: statusColor.withValues(alpha: 0.15),
                 borderRadius: BorderRadius.circular(4),
               ),
               child: Text(
                 statusLabel,
-                style: TextStyle(
-                    color: statusColor,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600),
+                style: textTheme.labelSmall?.copyWith(
+                    color: statusColor, fontWeight: FontWeight.w600),
               ),
             ),
           ],
@@ -525,7 +497,7 @@ class _PaymentTile extends StatelessWidget {
           children: [
             Text(
               '${PaymentConcepts.label(payment.concept)} · $methodLabel',
-              style: const TextStyle(fontSize: 12),
+              style: textTheme.bodySmall,
             ),
             // Nombre + unidad denormalizados al doc en el reporte. Si
             // no están (doc antiguo), caemos al UID truncado.
@@ -538,7 +510,8 @@ class _PaymentTile extends StatelessWidget {
                     : 'Membresía asociación';
                 return Text(
                   'Reportado ${df.format(payment.reportedAt)} · $label',
-                  style: const TextStyle(fontSize: 11, color: Colors.black54),
+                  style: textTheme.labelSmall
+                      ?.copyWith(color: AppTheme.textSecondary),
                 );
               }
               final name = (payment.driverName ?? '').trim();
@@ -548,24 +521,27 @@ class _PaymentTile extends StatelessWidget {
                   : 'Conductor: ${payment.driverId.substring(0, 8)}…';
               return Text(
                 'Reportado ${df.format(payment.reportedAt)} · $who',
-                style: const TextStyle(fontSize: 11, color: Colors.black54),
+                style: textTheme.labelSmall
+                    ?.copyWith(color: AppTheme.textSecondary),
               );
             }),
             if (payment.proof?.photoUrl != null)
-              const Padding(
-                padding: EdgeInsets.only(top: 2),
+              Padding(
+                padding: const EdgeInsets.only(top: 2),
                 child: Row(children: [
-                  Icon(Icons.image, size: 12, color: Colors.blue),
-                  SizedBox(width: 4),
+                  const Icon(Icons.image,
+                      size: 12, color: AppTheme.infoColor),
+                  const SizedBox(width: AppSpacing.xs),
                   Text('Con comprobante',
-                      style: TextStyle(fontSize: 11, color: Colors.blue)),
+                      style: textTheme.labelSmall
+                          ?.copyWith(color: AppTheme.infoColor)),
                 ]),
               ),
           ],
         ),
         isThreeLine: true,
         trailing: payment.isPending
-            ? const Icon(Icons.chevron_right, color: Colors.orange)
+            ? const Icon(Icons.chevron_right, color: AppTheme.warningColor)
             : null,
       ),
     );
@@ -589,10 +565,11 @@ class _PaymentDetailDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
     final statusColor = switch (payment.status) {
-      PaymentStatus.pending => Colors.orange,
-      PaymentStatus.validated => Colors.green,
-      PaymentStatus.rejected => Colors.red,
+      PaymentStatus.pending => AppTheme.warningColor,
+      PaymentStatus.validated => AppTheme.successColor,
+      PaymentStatus.rejected => AppTheme.errorColor,
     };
     final statusLabel = switch (payment.status) {
       PaymentStatus.pending => 'Pendiente',
@@ -612,8 +589,8 @@ class _PaymentDetailDialog extends StatelessWidget {
           children: [
             // Header
             Container(
-              padding: const EdgeInsets.all(16),
-              color: AppTheme.primaryColor,
+              padding: const EdgeInsets.all(AppSpacing.lg),
+              color: scheme.primary,
               child: Row(
                 children: [
                   Expanded(
@@ -622,27 +599,29 @@ class _PaymentDetailDialog extends StatelessWidget {
                       children: [
                         Text(
                           '\$${payment.amount.toStringAsFixed(2)}',
-                          style: const TextStyle(
-                              color: Colors.white,
+                          style: TextStyle(
+                              color: scheme.onPrimary,
                               fontSize: 24,
                               fontWeight: FontWeight.bold),
                         ),
                         Text(
                           PaymentConcepts.label(payment.concept),
-                          style: const TextStyle(color: Colors.white70),
+                          style: TextStyle(
+                              color:
+                                  scheme.onPrimary.withValues(alpha: 0.7)),
                         ),
                         const SizedBox(height: 6),
                         Container(
                           padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 2),
+                              horizontal: AppSpacing.sm, vertical: 2),
                           decoration: BoxDecoration(
                             color: statusColor.withValues(alpha: 0.25),
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
                             statusLabel,
-                            style: const TextStyle(
-                                color: Colors.white,
+                            style: TextStyle(
+                                color: scheme.onPrimary,
                                 fontSize: 12,
                                 fontWeight: FontWeight.w600),
                           ),
@@ -651,7 +630,7 @@ class _PaymentDetailDialog extends StatelessWidget {
                     ),
                   ),
                   IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
+                    icon: Icon(Icons.close, color: scheme.onPrimary),
                     onPressed: () => Navigator.pop(context),
                   ),
                 ],
@@ -662,7 +641,7 @@ class _PaymentDetailDialog extends StatelessWidget {
               child: ListView(
                 padding: const EdgeInsets.all(16),
                 children: [
-                  _section('Conductor'),
+                  _section(context, 'Conductor'),
                   if (driver != null) ...[
                     _info(
                       'Nombre',
@@ -681,12 +660,12 @@ class _PaymentDetailDialog extends StatelessWidget {
                   ] else
                     _info('UID', payment.driverId),
                   const SizedBox(height: 12),
-                  _section('Pago'),
+                  _section(context, 'Pago'),
                   _info('Fecha de pago', df.format(payment.paymentDate)),
                   _info('Reportado el', df.format(payment.reportedAt)),
                   if (proof != null) ...[
                     const SizedBox(height: 12),
-                    _section('Comprobante'),
+                    _section(context, 'Comprobante'),
                     _info('Método', _methodLabel(proof.method)),
                     if (proof.method == PaymentMethod.efectivo)
                       _info(
@@ -707,7 +686,7 @@ class _PaymentDetailDialog extends StatelessWidget {
                   ],
                   if (hasPhoto) ...[
                     const SizedBox(height: 12),
-                    _section('Foto del comprobante'),
+                    _section(context, 'Foto del comprobante'),
                     InkWell(
                       onTap: () =>
                           _openFullScreen(context, proof.photoUrl!),
@@ -744,17 +723,17 @@ class _PaymentDetailDialog extends StatelessWidget {
                   ],
                   if (payment.notes != null && payment.notes!.isNotEmpty) ...[
                     const SizedBox(height: 12),
-                    _section('Notas'),
+                    _section(context, 'Notas'),
                     Text(payment.notes!),
                   ],
                   if (payment.isRejected &&
                       payment.rejectionReason != null) ...[
                     const SizedBox(height: 12),
-                    _section('Motivo de rechazo'),
+                    _section(context, 'Motivo de rechazo'),
                     Container(
-                      padding: const EdgeInsets.all(12),
+                      padding: const EdgeInsets.all(AppSpacing.md),
                       decoration: BoxDecoration(
-                        color: Colors.red.shade50,
+                        color: AppTheme.errorColor.withValues(alpha: 0.08),
                         borderRadius: BorderRadius.circular(8),
                       ),
                       child: Text(payment.rejectionReason!),
@@ -777,26 +756,27 @@ class _PaymentDetailDialog extends StatelessWidget {
                     Expanded(
                       child: OutlinedButton.icon(
                         onPressed: onReject,
-                        icon: const Icon(Icons.cancel, color: Colors.red),
+                        icon: const Icon(Icons.cancel,
+                            color: AppTheme.errorColor),
                         label: const Text('Rechazar',
-                            style: TextStyle(color: Colors.red)),
+                            style: TextStyle(color: AppTheme.errorColor)),
                         style: OutlinedButton.styleFrom(
-                          padding:
-                              const EdgeInsets.symmetric(vertical: 12),
-                          side: const BorderSide(color: Colors.red),
+                          padding: const EdgeInsets.symmetric(
+                              vertical: AppSpacing.md),
+                          side: const BorderSide(color: AppTheme.errorColor),
                         ),
                       ),
                     ),
-                    const SizedBox(width: 12),
+                    const SizedBox(width: AppSpacing.md),
                     Expanded(
                       child: ElevatedButton.icon(
                         onPressed: onApprove,
                         icon: const Icon(Icons.check_circle),
                         label: const Text('Aprobar'),
                         style: ElevatedButton.styleFrom(
-                          padding:
-                              const EdgeInsets.symmetric(vertical: 12),
-                          backgroundColor: Colors.green,
+                          padding: const EdgeInsets.symmetric(
+                              vertical: AppSpacing.md),
+                          backgroundColor: AppTheme.successColor,
                           foregroundColor: Colors.white,
                         ),
                       ),
@@ -820,11 +800,11 @@ class _PaymentDetailDialog extends StatelessWidget {
                 child: SizedBox(
                   width: double.infinity,
                   child: OutlinedButton.icon(
-                    icon: const Icon(Icons.block, color: Colors.red),
+                    icon: const Icon(Icons.block, color: AppTheme.errorColor),
                     label: const Text('Anular pago',
-                        style: TextStyle(color: Colors.red)),
+                        style: TextStyle(color: AppTheme.errorColor)),
                     style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: Colors.red),
+                      side: const BorderSide(color: AppTheme.errorColor),
                     ),
                     onPressed: () =>
                         _confirmAndVoid(ctx, payment),
@@ -849,15 +829,15 @@ class _PaymentDetailDialog extends StatelessWidget {
     }
   }
 
-  Widget _section(String title) {
+  Widget _section(BuildContext context, String title) {
     return Padding(
-      padding: const EdgeInsets.only(top: 4, bottom: 6),
+      padding: const EdgeInsets.only(top: AppSpacing.xs, bottom: 6),
       child: Text(
         title,
-        style: const TextStyle(
+        style: TextStyle(
           fontWeight: FontWeight.bold,
           fontSize: 13,
-          color: AppTheme.primaryColor,
+          color: Theme.of(context).colorScheme.secondary,
         ),
       ),
     );
@@ -872,8 +852,8 @@ class _PaymentDetailDialog extends StatelessWidget {
           SizedBox(
             width: 130,
             child: Text(label,
-                style:
-                    const TextStyle(color: Colors.black54, fontSize: 13)),
+                style: const TextStyle(
+                    color: AppTheme.textSecondary, fontSize: 13)),
           ),
           Expanded(
             child: Text(value,
@@ -961,7 +941,8 @@ Future<void> _confirmAndVoid(
           child: const Text('Cancelar'),
         ),
         ElevatedButton(
-          style: ElevatedButton.styleFrom(backgroundColor: Colors.red),
+          style:
+              ElevatedButton.styleFrom(backgroundColor: AppTheme.errorColor),
           onPressed: () {
             if (reasonCtrl.text.trim().length < 10) {
               ScaffoldMessenger.of(ctx).showSnackBar(

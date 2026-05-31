@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import '../../../../core/constants/app_constants.dart';
+import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../data/models/taxi_stand_model.dart';
 import '../bloc/map_bloc.dart';
 
@@ -39,44 +41,26 @@ class _TaxiStandConfigPageState extends State<TaxiStandConfigPage> {
               state is MapLoaded ? state.taxiStands : <TaxiStandModel>[];
 
           if (state is MapLoading) {
-            return const Center(child: CircularProgressIndicator());
+            return const LoadingState(message: 'Cargando paradas...');
           }
 
           if (stands.isEmpty) {
-            return Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(Icons.flag_outlined, size: 72, color: Colors.grey[400]),
-                  const SizedBox(height: 16),
-                  Text(
-                    'No hay paradas configuradas',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w500,
-                      color: Colors.grey[600],
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    'Toca + para agregar una parada',
-                    style: TextStyle(color: Colors.grey[500]),
-                  ),
-                  const SizedBox(height: 24),
-                  ElevatedButton.icon(
-                    onPressed: () => _showStandDialog(context),
-                    icon: const Icon(Icons.add),
-                    label: const Text('Agregar Parada'),
-                  ),
-                ],
+            return EmptyState(
+              icon: Icons.flag_outlined,
+              title: 'No hay paradas configuradas',
+              subtitle: 'Toca + para agregar una parada',
+              action: ElevatedButton.icon(
+                onPressed: () => _showStandDialog(context),
+                icon: const Icon(Icons.add),
+                label: const Text('Agregar Parada'),
               ),
             );
           }
 
           return ListView.separated(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(AppSpacing.lg),
             itemCount: stands.length,
-            separatorBuilder: (_, __) => const SizedBox(height: 8),
+            separatorBuilder: (_, _) => const SizedBox(height: AppSpacing.sm),
             itemBuilder: (ctx, i) => _buildStandCard(context, stands[i]),
           );
         },
@@ -89,33 +73,37 @@ class _TaxiStandConfigPageState extends State<TaxiStandConfigPage> {
   }
 
   Widget _buildStandCard(BuildContext context, TaxiStandModel stand) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final activeColor = colorScheme.tertiary;
     return Card(
       elevation: 2,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
       child: ListTile(
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        contentPadding: const EdgeInsets.symmetric(
+            horizontal: AppSpacing.lg, vertical: AppSpacing.sm),
         leading: CircleAvatar(
           backgroundColor: stand.isActive
-              ? Colors.orange.withValues(alpha: 0.15)
-              : Colors.grey.withValues(alpha: 0.15),
+              ? activeColor.withValues(alpha: 0.15)
+              : AppTheme.statusOffline.withValues(alpha: 0.15),
           child: Icon(
             Icons.flag,
-            color: stand.isActive ? Colors.orange[700] : Colors.grey,
+            color: stand.isActive ? activeColor : AppTheme.statusOffline,
           ),
         ),
         title: Text(
           stand.name,
-          style: const TextStyle(fontWeight: FontWeight.w600),
+          style: textTheme.titleMedium,
         ),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (stand.address != null && stand.address!.isNotEmpty)
-              Text(stand.address!),
+              Text(stand.address!, style: textTheme.bodyMedium),
             Text(
               '${stand.latitude.toStringAsFixed(5)}, ${stand.longitude.toStringAsFixed(5)}',
-              style: TextStyle(fontSize: 11, color: Colors.grey[500]),
+              style: textTheme.labelSmall
+                  ?.copyWith(color: AppTheme.textSecondary),
             ),
           ],
         ),
@@ -155,8 +143,9 @@ class _TaxiStandConfigPageState extends State<TaxiStandConfigPage> {
             const PopupMenuItem(
               value: 'delete',
               child: ListTile(
-                leading: Icon(Icons.delete, color: Colors.red),
-                title: Text('Eliminar', style: TextStyle(color: Colors.red)),
+                leading: Icon(Icons.delete, color: AppTheme.errorColor),
+                title: Text('Eliminar',
+                    style: TextStyle(color: AppTheme.errorColor)),
                 dense: true,
                 contentPadding: EdgeInsets.zero,
               ),
@@ -179,7 +168,7 @@ class _TaxiStandConfigPageState extends State<TaxiStandConfigPage> {
             child: const Text('Cancelar'),
           ),
           FilledButton(
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            style: FilledButton.styleFrom(backgroundColor: AppTheme.errorColor),
             onPressed: () {
               context.read<MapBloc>().add(MapDeleteTaxiStand(stand.id));
               Navigator.pop(ctx);
@@ -206,12 +195,13 @@ class _TaxiStandConfigPageState extends State<TaxiStandConfigPage> {
       ),
       builder: (ctx) {
         return StatefulBuilder(builder: (ctx, setModalState) {
+          final textTheme = Theme.of(ctx).textTheme;
           return Padding(
             padding: EdgeInsets.only(
-              left: 20,
-              right: 20,
-              top: 20,
-              bottom: MediaQuery.of(ctx).viewInsets.bottom + 20,
+              left: AppSpacing.xl,
+              right: AppSpacing.xl,
+              top: AppSpacing.xl,
+              bottom: MediaQuery.of(ctx).viewInsets.bottom + AppSpacing.xl,
             ),
             child: SingleChildScrollView(
               child: Column(
@@ -220,10 +210,9 @@ class _TaxiStandConfigPageState extends State<TaxiStandConfigPage> {
                 children: [
                   Text(
                     existing != null ? 'Editar Parada' : 'Nueva Parada',
-                    style: const TextStyle(
-                        fontSize: 20, fontWeight: FontWeight.bold),
+                    style: textTheme.titleLarge,
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: AppSpacing.lg),
                   TextField(
                     controller: nameCtrl,
                     decoration: const InputDecoration(
@@ -233,7 +222,7 @@ class _TaxiStandConfigPageState extends State<TaxiStandConfigPage> {
                       border: OutlineInputBorder(),
                     ),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: AppSpacing.md),
                   TextField(
                     controller: addressCtrl,
                     decoration: const InputDecoration(
@@ -243,16 +232,16 @@ class _TaxiStandConfigPageState extends State<TaxiStandConfigPage> {
                       border: OutlineInputBorder(),
                     ),
                   ),
-                  const SizedBox(height: 16),
-                  const Text(
+                  const SizedBox(height: AppSpacing.lg),
+                  Text(
                     'Toca el mapa para seleccionar la ubicación:',
-                    style: TextStyle(fontWeight: FontWeight.w500),
+                    style: textTheme.titleMedium,
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: AppSpacing.sm),
                   Container(
                     height: 250,
                     decoration: BoxDecoration(
-                      border: Border.all(color: Colors.grey[300]!),
+                      border: Border.all(color: AppTheme.dividerColor),
                       borderRadius: BorderRadius.circular(12),
                     ),
                     clipBehavior: Clip.antiAlias,
@@ -279,14 +268,15 @@ class _TaxiStandConfigPageState extends State<TaxiStandConfigPage> {
                       liteModeEnabled: false,
                     ),
                   ),
-                  const SizedBox(height: 8),
+                  const SizedBox(height: AppSpacing.sm),
                   Text(
                     'Lat: ${selectedPos.latitude.toStringAsFixed(6)}, '
                     'Lng: ${selectedPos.longitude.toStringAsFixed(6)}',
-                    style: TextStyle(fontSize: 12, color: Colors.grey[600]),
+                    style: textTheme.bodySmall
+                        ?.copyWith(color: AppTheme.textSecondary),
                     textAlign: TextAlign.center,
                   ),
-                  const SizedBox(height: 20),
+                  const SizedBox(height: AppSpacing.xl),
                   FilledButton.icon(
                     onPressed: () {
                       final name = nameCtrl.text.trim();

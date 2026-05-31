@@ -2,6 +2,8 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:go_router/go_router.dart';
+import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../associations/data/models/association_model.dart';
 import '../../../payments/presentation/widgets/report_association_payment_dialog.dart';
 import '../../data/models/user_model.dart';
@@ -52,7 +54,7 @@ class _LoadingScaffold extends StatelessWidget {
   const _LoadingScaffold();
   @override
   Widget build(BuildContext context) =>
-      const Scaffold(body: Center(child: CircularProgressIndicator()));
+      const Scaffold(body: LoadingState());
 }
 
 class _DriverBlockedView extends StatelessWidget {
@@ -61,6 +63,7 @@ class _DriverBlockedView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
     final reason = user.blockReason;
     final reasonText = reason == 'pago_anulado'
         ? 'Un pago tuyo fue anulado.'
@@ -68,28 +71,28 @@ class _DriverBlockedView extends StatelessWidget {
             ? 'Tu cuota está vencida.'
             : 'Tu cuenta está bloqueada.';
     return Scaffold(
-      backgroundColor: Colors.red.shade50,
+      backgroundColor: AppTheme.errorColor.withValues(alpha: 0.06),
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(AppSpacing.xl),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Icon(Icons.block, size: 80, color: Colors.red),
-              const SizedBox(height: 16),
-              const Text(
+              const Icon(Icons.block, size: 80, color: AppTheme.errorColor),
+              const SizedBox(height: AppSpacing.lg),
+              Text(
                 'Tu cuenta está bloqueada',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                style: textTheme.displaySmall,
                 textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 8),
+              const SizedBox(height: AppSpacing.sm),
               Text(
                 reasonText,
                 textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 16),
+                style: textTheme.bodyLarge,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: AppSpacing.xl),
               ElevatedButton.icon(
                 onPressed: () => context.push('/my-payments'),
                 icon: const Icon(Icons.upload),
@@ -98,7 +101,7 @@ class _DriverBlockedView extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(vertical: 16),
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               OutlinedButton(
                 onPressed: () =>
                     context.read<AuthBloc>().add(AuthSignOutRequested()),
@@ -119,28 +122,30 @@ class _AssocSuspendedAdminView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
     return Scaffold(
-      backgroundColor: Colors.red.shade50,
+      backgroundColor: AppTheme.errorColor.withValues(alpha: 0.06),
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(AppSpacing.xl),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Icon(Icons.business, size: 80, color: Colors.red),
-              const SizedBox(height: 16),
-              const Text(
+              const Icon(Icons.business, size: 80, color: AppTheme.errorColor),
+              const SizedBox(height: AppSpacing.lg),
+              Text(
                 'Tu cooperativa fue suspendida',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                style: textTheme.displaySmall,
                 textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 8),
-              const Text(
+              const SizedBox(height: AppSpacing.sm),
+              Text(
                 'La membresía está vencida. Sube el comprobante de pago para reactivarla.',
                 textAlign: TextAlign.center,
+                style: textTheme.bodyMedium,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: AppSpacing.xl),
               ElevatedButton.icon(
                 onPressed: () => showDialog(
                   context: context,
@@ -152,7 +157,7 @@ class _AssocSuspendedAdminView extends StatelessWidget {
                   padding: const EdgeInsets.symmetric(vertical: 16),
                 ),
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: AppSpacing.md),
               OutlinedButton(
                 onPressed: () =>
                     context.read<AuthBloc>().add(AuthSignOutRequested()),
@@ -172,28 +177,30 @@ class _AssocSuspendedNonAdminView extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
     return Scaffold(
-      backgroundColor: Colors.red.shade50,
+      backgroundColor: AppTheme.errorColor.withValues(alpha: 0.06),
       body: SafeArea(
         child: Padding(
-          padding: const EdgeInsets.all(24),
+          padding: const EdgeInsets.all(AppSpacing.xl),
           child: Column(
             mainAxisAlignment: MainAxisAlignment.center,
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              const Icon(Icons.business, size: 80, color: Colors.red),
-              const SizedBox(height: 16),
-              const Text(
+              const Icon(Icons.business, size: 80, color: AppTheme.errorColor),
+              const SizedBox(height: AppSpacing.lg),
+              Text(
                 'Tu cooperativa fue suspendida',
-                style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold),
+                style: textTheme.displaySmall,
                 textAlign: TextAlign.center,
               ),
-              const SizedBox(height: 8),
-              const Text(
+              const SizedBox(height: AppSpacing.sm),
+              Text(
                 'El administrador debe pagar la membresía. Mientras tanto no puedes operar.',
                 textAlign: TextAlign.center,
+                style: textTheme.bodyMedium,
               ),
-              const SizedBox(height: 24),
+              const SizedBox(height: AppSpacing.xl),
               OutlinedButton(
                 onPressed: () =>
                     context.read<AuthBloc>().add(AuthSignOutRequested()),

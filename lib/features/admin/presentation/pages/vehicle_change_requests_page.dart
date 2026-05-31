@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:intl/intl.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../users/data/models/vehicle_change_request_model.dart';
 
@@ -32,33 +33,26 @@ class VehicleChangeRequestsPage extends StatelessWidget {
             .snapshots(),
         builder: (context, snapshot) {
           if (snapshot.hasError) {
-            return Center(child: Text('Error: ${snapshot.error}'));
+            return ErrorState.fromError(snapshot.error);
           }
           if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
+            return const LoadingState();
           }
           final docs = snapshot.data!.docs;
           if (docs.isEmpty) {
-            return const Center(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(Icons.directions_car_outlined,
-                      size: 64, color: Colors.grey),
-                  SizedBox(height: 12),
-                  Text('Sin solicitudes pendientes',
-                      style: TextStyle(color: Colors.grey)),
-                ],
-              ),
+            return const EmptyState(
+              icon: Icons.directions_car_outlined,
+              title: 'Sin solicitudes pendientes',
             );
           }
           final requests = docs
               .map((d) => VehicleChangeRequest.fromFirestore(d))
               .toList();
           return ListView.separated(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.all(AppSpacing.lg),
             itemCount: requests.length,
-            separatorBuilder: (context, index) => const SizedBox(height: 12),
+            separatorBuilder: (context, index) =>
+                const SizedBox(height: AppSpacing.md),
             itemBuilder: (context, i) =>
                 _RequestCard(request: requests[i]),
           );
@@ -86,18 +80,21 @@ class _RequestCard extends StatelessWidget {
             // Header: driver name + date
             Row(
               children: [
-                const Icon(Icons.person, size: 18, color: AppTheme.primaryColor),
-                const SizedBox(width: 6),
+                Icon(Icons.person,
+                    size: 18, color: Theme.of(context).colorScheme.primary),
+                const SizedBox(width: AppSpacing.xs),
                 Expanded(
                   child: Text(
                     request.driverName,
-                    style: const TextStyle(
-                        fontWeight: FontWeight.bold, fontSize: 15),
+                    style: Theme.of(context).textTheme.titleMedium,
                   ),
                 ),
                 Text(
                   fmt.format(request.createdAt),
-                  style: const TextStyle(fontSize: 11, color: Colors.grey),
+                  style: Theme.of(context)
+                      .textTheme
+                      .labelSmall
+                      ?.copyWith(color: AppTheme.textSecondary),
                 ),
               ],
             ),
@@ -150,22 +147,22 @@ class _RequestCard extends StatelessWidget {
               ),
             ),
 
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             // Botones
             Row(
               children: [
                 Expanded(
                   child: OutlinedButton.icon(
                     onPressed: () => _reject(context),
-                    icon: const Icon(Icons.close, color: Colors.red),
+                    icon: const Icon(Icons.close, color: AppTheme.errorColor),
                     label: const Text('Rechazar',
-                        style: TextStyle(color: Colors.red)),
+                        style: TextStyle(color: AppTheme.errorColor)),
                     style: OutlinedButton.styleFrom(
-                      side: const BorderSide(color: Colors.red),
+                      side: const BorderSide(color: AppTheme.errorColor),
                     ),
                   ),
                 ),
-                const SizedBox(width: 10),
+                const SizedBox(width: AppSpacing.sm),
                 Expanded(
                   child: ElevatedButton.icon(
                     onPressed: () => _approve(context),
@@ -173,7 +170,7 @@ class _RequestCard extends StatelessWidget {
                     label: const Text('Aprobar',
                         style: TextStyle(color: Colors.white)),
                     style: ElevatedButton.styleFrom(
-                      backgroundColor: Colors.green,
+                      backgroundColor: AppTheme.successColor,
                     ),
                   ),
                 ),
@@ -201,7 +198,8 @@ class _RequestCard extends StatelessWidget {
           ),
           ElevatedButton(
             onPressed: () => Navigator.pop(ctx, true),
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.green),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.successColor),
             child: const Text('Aprobar', style: TextStyle(color: Colors.white)),
           ),
         ],
@@ -216,14 +214,14 @@ class _RequestCard extends StatelessWidget {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('Cambio aprobado correctamente.'),
-          backgroundColor: Colors.green,
+          backgroundColor: AppTheme.successColor,
         ));
       }
     } on FirebaseFunctionsException catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('Error: ${e.message ?? e.code}'),
-          backgroundColor: Colors.red,
+          backgroundColor: AppTheme.errorColor,
         ));
       }
     }
@@ -262,8 +260,8 @@ class _RequestCard extends StatelessWidget {
               if (!formKey.currentState!.validate()) return;
               Navigator.pop(ctx, true);
             },
-            style:
-                ElevatedButton.styleFrom(backgroundColor: Colors.red),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: AppTheme.errorColor),
             child:
                 const Text('Rechazar', style: TextStyle(color: Colors.white)),
           ),
@@ -282,14 +280,14 @@ class _RequestCard extends StatelessWidget {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
           content: Text('Solicitud rechazada.'),
-          backgroundColor: Colors.orange,
+          backgroundColor: AppTheme.warningColor,
         ));
       }
     } on FirebaseFunctionsException catch (e) {
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
           content: Text('Error: ${e.message ?? e.code}'),
-          backgroundColor: Colors.red,
+          backgroundColor: AppTheme.errorColor,
         ));
       }
     }
@@ -318,13 +316,14 @@ class _VehicleColumn extends StatelessWidget {
       children: [
         Text(
           label,
-          style: TextStyle(
-            fontSize: 11,
-            fontWeight: FontWeight.w700,
-            color: highlight ? Colors.green.shade700 : Colors.grey.shade600,
-          ),
+          style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                fontWeight: FontWeight.w700,
+                color: highlight
+                    ? AppTheme.successColor
+                    : AppTheme.textSecondary,
+              ),
         ),
-        const SizedBox(height: 4),
+        const SizedBox(height: AppSpacing.xs),
         if (photoUrl != null && photoUrl!.isNotEmpty)
           ClipRRect(
             borderRadius: BorderRadius.circular(8),
@@ -356,14 +355,19 @@ class _VehicleColumn extends StatelessWidget {
             ),
             child: const Icon(Icons.no_photography, color: Colors.grey),
           ),
-        const SizedBox(height: 6),
+        const SizedBox(height: AppSpacing.xs),
         Text(
           plate.isNotEmpty ? plate : '—',
-          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+          style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                fontWeight: FontWeight.bold,
+              ),
         ),
         Text(
           vehicleNumber.isNotEmpty ? '#$vehicleNumber' : '—',
-          style: const TextStyle(fontSize: 12, color: Colors.grey),
+          style: Theme.of(context)
+              .textTheme
+              .bodySmall
+              ?.copyWith(color: AppTheme.textSecondary),
         ),
       ],
     );

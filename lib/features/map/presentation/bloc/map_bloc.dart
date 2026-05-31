@@ -14,6 +14,12 @@ abstract class MapEvent extends Equatable {
 
 class MapDriversWatchStarted extends MapEvent {}
 
+/// Re-suscribe los streams (conductores + paradas) SIN emitir MapLoading, para
+/// no parpadear el mapa. Se dispara al volver de background: Firestore puede
+/// haber pausado el listener y entregar un snapshot vacío/viejo, dejando la
+/// lista en 0 (el conductor "desaparece" aunque su ubicación siga fresca).
+class MapWatchersRefreshed extends MapEvent {}
+
 class MapDriversUpdated extends MapEvent {
   final List<DriverModel> drivers;
   MapDriversUpdated(this.drivers);
@@ -150,6 +156,7 @@ class MapBloc extends Bloc<MapEvent, MapState> {
     required this.deleteTaxiStandUseCase,
   }) : super(MapInitial()) {
     on<MapDriversWatchStarted>(_onWatchStarted);
+    on<MapWatchersRefreshed>(_onWatchersRefreshed);
     on<MapDriversUpdated>(_onDriversUpdated);
     on<MapUpdateLocation>(_onUpdateLocation);
     on<MapUpdateDriverStatus>(_onUpdateStatus);
@@ -174,6 +181,18 @@ class MapBloc extends Bloc<MapEvent, MapState> {
   /// Firestore, refresh de token, blip de red) NO borramos la lista actual
   /// —para que el mapa no quede sin unidades— y nos re-suscribimos tras un
   /// breve retardo, recuperando solos sin tener que reiniciar la app.
+  /// Refresco al volver de background: re-suscribe ambos streams sin tocar el
+  /// estado actual (no emite MapLoading). Si el listener seguía vivo, el cancel
+  /// + re-listen fuerza una entrega inmediata del snapshot fresco; si había
+  /// quedado vacío, repuebla la lista al instante.
+  void _onWatchersRefreshed(
+    MapWatchersRefreshed event,
+    Emitter<MapState> emit,
+  ) {
+    _subscribeDrivers();
+    _subscribeStands();
+  }
+
   void _subscribeDrivers() {
     _driversSubscription?.cancel();
     _driversSubscription = watchActiveDrivers().listen(

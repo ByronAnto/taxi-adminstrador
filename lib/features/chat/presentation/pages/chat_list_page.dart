@@ -8,6 +8,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:share_plus/share_plus.dart';
 import 'package:uuid/uuid.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../communication/presentation/widgets/radio_history_view.dart';
 import '../../data/models/chat_model.dart';
@@ -118,7 +119,7 @@ class _ChatListPageState extends State<ChatListPage>
           child: BlocBuilder<ChatBloc, ChatState>(
               builder: (context, state) {
                 if (state is ChatLoading) {
-                  return const Center(child: CircularProgressIndicator());
+                  return const LoadingState();
                 }
 
                 if (state is ChatRoomsLoaded) {
@@ -132,74 +133,7 @@ class _ChatListPageState extends State<ChatListPage>
                   }
 
                   if (rooms.isEmpty) {
-                    return Padding(
-                      padding: const EdgeInsets.all(32),
-                      child: Center(
-                        child: Column(
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            Icon(Icons.chat_bubble_outline,
-                                size: 72, color: Colors.grey[300]),
-                            const SizedBox(height: 20),
-                            const Text(
-                              'Aún no tienes conversaciones',
-                              style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w700,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                            const SizedBox(height: 12),
-                            Container(
-                              padding: const EdgeInsets.all(14),
-                              decoration: BoxDecoration(
-                                color: Colors.blue.shade50,
-                                borderRadius: BorderRadius.circular(12),
-                                border:
-                                    Border.all(color: Colors.blue.shade100),
-                              ),
-                              child: Column(
-                                crossAxisAlignment:
-                                    CrossAxisAlignment.start,
-                                children: [
-                                  Row(
-                                    children: [
-                                      Icon(Icons.lightbulb_outline,
-                                          size: 18,
-                                          color: Colors.blue.shade700),
-                                      const SizedBox(width: 6),
-                                      Text(
-                                        'Cómo iniciar un chat',
-                                        style: TextStyle(
-                                          fontWeight: FontWeight.w800,
-                                          color: Colors.blue.shade900,
-                                          fontSize: 13,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                  const SizedBox(height: 6),
-                                  const Text(
-                                    'Toca un conductor en el Mapa o un socio en la lista para abrir un chat 1-a-1 con texto e imágenes (estilo WhatsApp).',
-                                    style: TextStyle(
-                                        fontSize: 12, height: 1.4),
-                                  ),
-                                ],
-                              ),
-                            ),
-                            const SizedBox(height: 12),
-                            Text(
-                              'La pestaña "Radio" muestra el historial de audios y mensajes del canal de la cooperativa.',
-                              style: TextStyle(
-                                  color: Colors.grey[600],
-                                  fontSize: 12,
-                                  fontStyle: FontStyle.italic),
-                              textAlign: TextAlign.center,
-                            ),
-                          ],
-                        ),
-                      ),
-                    );
+                    return _buildEmptyChats(context);
                   }
 
                   return ListView.builder(
@@ -209,15 +143,66 @@ class _ChatListPageState extends State<ChatListPage>
                 }
 
                 if (state is ChatError) {
-                  return Center(child: Text(state.message));
+                  return ErrorState(message: state.message);
                 }
 
-                return const Center(
-                    child: Text('Inicia una conversación'));
+                return const EmptyState(
+                  icon: Icons.chat_bubble_outline,
+                  title: 'Inicia una conversación',
+                );
               },
             ),
         ),
       ],
+    );
+  }
+
+  /// Estado vacío de los chats privados: además del mensaje base, muestra
+  /// una guía de cómo iniciar un chat (onboarding) y una nota sobre la
+  /// pestaña Radio.
+  Widget _buildEmptyChats(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return SingleChildScrollView(
+      child: EmptyState(
+        icon: Icons.chat_bubble_outline,
+        title: 'Aún no tienes conversaciones',
+        subtitle: 'La pestaña "Radio" muestra el historial de audios y '
+            'mensajes del canal de la cooperativa.',
+        action: Container(
+          padding: const EdgeInsets.all(AppSpacing.lg),
+          decoration: BoxDecoration(
+            color: AppTheme.infoColor.withValues(alpha: 0.10),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppTheme.infoColor.withValues(alpha: 0.30)),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.lightbulb_outline,
+                      size: 18, color: AppTheme.infoColor),
+                  const SizedBox(width: AppSpacing.sm),
+                  Text(
+                    'Cómo iniciar un chat',
+                    style: textTheme.labelSmall?.copyWith(
+                      fontWeight: FontWeight.w800,
+                      color: AppTheme.infoColor,
+                      fontSize: 13,
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: AppSpacing.sm),
+              Text(
+                'Toca un conductor en el Mapa o un socio en la lista para '
+                'abrir un chat 1-a-1 con texto e imágenes (estilo WhatsApp).',
+                style: textTheme.bodySmall?.copyWith(height: 1.4),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
@@ -229,13 +214,14 @@ class _ChatListPageState extends State<ChatListPage>
         ? '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}'
         : '';
 
+    final colorScheme = Theme.of(context).colorScheme;
     return ListTile(
       leading: CircleAvatar(
-        backgroundColor: AppTheme.primaryColor.withValues(alpha: 0.15),
+        backgroundColor: colorScheme.secondary.withValues(alpha: 0.15),
         child: Text(
           name.isNotEmpty ? name[0].toUpperCase() : '?',
-          style: const TextStyle(
-              fontWeight: FontWeight.bold, color: AppTheme.primaryColor),
+          style: TextStyle(
+              fontWeight: FontWeight.bold, color: colorScheme.secondary),
         ),
       ),
       title: Text(name, style: const TextStyle(fontWeight: FontWeight.w600)),
@@ -430,6 +416,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   @override
   Widget build(BuildContext context) {
     final myId = _currentUserId();
+    final colorScheme = Theme.of(context).colorScheme;
 
     return Scaffold(
       appBar: AppBar(
@@ -437,17 +424,16 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
           children: [
             CircleAvatar(
               radius: 16,
-              backgroundColor:
-                  AppTheme.primaryColor.withValues(alpha: 0.15),
+              backgroundColor: colorScheme.onPrimary.withValues(alpha: 0.25),
               child: Text(
                 widget.chatName.isNotEmpty
                     ? widget.chatName[0].toUpperCase()
                     : '?',
-                style: const TextStyle(
-                    fontSize: 14, color: AppTheme.primaryColor),
+                style: TextStyle(
+                    fontSize: 14, color: colorScheme.onPrimary),
               ),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: AppSpacing.sm),
             Text(widget.chatName, style: const TextStyle(fontSize: 16)),
           ],
         ),
@@ -463,14 +449,16 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                   final messages = state.messages;
 
                   if (messages.isEmpty) {
-                    return const Center(
-                        child: Text('Envía el primer mensaje'));
+                    return const EmptyState(
+                      icon: Icons.forum_outlined,
+                      title: 'Envía el primer mensaje',
+                    );
                   }
 
                   return ListView.builder(
                     controller: _scrollController,
                     reverse: true,
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(AppSpacing.md),
                     itemCount: messages.length,
                     itemBuilder: (ctx, i) {
                       // Reverse order: newest first
@@ -482,10 +470,10 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                 }
 
                 if (state is ChatLoading) {
-                  return const Center(child: CircularProgressIndicator());
+                  return const LoadingState();
                 }
 
-                return const Center(child: Text('Cargando mensajes...'));
+                return const LoadingState(message: 'Cargando mensajes...');
               },
             ),
           ),
@@ -530,9 +518,10 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                 ),
                 const SizedBox(width: 6),
                 CircleAvatar(
-                  backgroundColor: AppTheme.primaryColor,
+                  backgroundColor: colorScheme.primary,
                   child: IconButton(
-                    icon: const Icon(Icons.send, color: Colors.white, size: 20),
+                    icon: Icon(Icons.send,
+                        color: colorScheme.onPrimary, size: 20),
                     onPressed: _sendMessage,
                   ),
                 ),
@@ -545,6 +534,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
   }
 
   Widget _buildMessageBubble(ChatMessageModel msg, bool isMe) {
+    final colorScheme = Theme.of(context).colorScheme;
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: GestureDetector(
@@ -556,7 +546,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
             BoxConstraints(maxWidth: MediaQuery.of(context).size.width * 0.7),
         decoration: BoxDecoration(
           color: isMe
-              ? AppTheme.primaryColor
+              ? colorScheme.primary
               : AppTheme.surfaceColor,
           borderRadius: BorderRadius.only(
             topLeft: const Radius.circular(16),
@@ -575,7 +565,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
                 style: TextStyle(
                   fontSize: 11,
                   fontWeight: FontWeight.w600,
-                  color: AppTheme.secondaryColor,
+                  color: colorScheme.secondary,
                 ),
               ),
             if (msg.hasImage)
@@ -608,7 +598,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
               Text(
                 msg.message,
                 style: TextStyle(
-                  color: isMe ? Colors.white : AppTheme.textPrimary,
+                  color: isMe ? colorScheme.onPrimary : AppTheme.textPrimary,
                 ),
               ),
             const SizedBox(height: 2),
@@ -617,7 +607,7 @@ class _ChatDetailPageState extends State<ChatDetailPage> {
               style: TextStyle(
                 fontSize: 10,
                 color: isMe
-                    ? Colors.white.withValues(alpha: 0.7)
+                    ? colorScheme.onPrimary.withValues(alpha: 0.7)
                     : AppTheme.textSecondary,
               ),
             ),

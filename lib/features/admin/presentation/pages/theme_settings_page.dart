@@ -7,11 +7,15 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:image_picker/image_picker.dart';
 import '../../../../core/services/association_theme_service.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/theme/theme_presets.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 
 /// Pantalla del admin para editar el branding de su asociación
-/// (`associations/{aid}.theme`): logoUrl, primaryColor, secondaryColor,
-/// accentColor.
+/// (`associations/{aid}.theme`): elige un TEMA CURADO (preset) + logo.
+///
+/// Ya no se eligen colores sueltos: el admin escoge un preset profesional
+/// de una galería, garantizando combinaciones siempre legibles. Se guarda
+/// `theme.presetId` (conservando `logoUrl`).
 ///
 /// Al guardar, [AssociationThemeService.loadFor] vuelve a cargar y la app
 /// se repinta automáticamente.
@@ -23,9 +27,7 @@ class ThemeSettingsPage extends StatefulWidget {
 }
 
 class _ThemeSettingsPageState extends State<ThemeSettingsPage> {
-  Color _primary = const Color(0xFF1565C0);
-  Color _secondary = const Color(0xFFFFC107);
-  Color _accent = const Color(0xFF0D47A1);
+  String _selectedPresetId = defaultPreset.id;
   String? _logoUrl;
   bool _loading = true;
   bool _saving = false;
@@ -45,84 +47,24 @@ class _ThemeSettingsPageState extends State<ThemeSettingsPage> {
 
   Future<void> _load() async {
     final aid = _aid;
-    if (aid == null) return;
+    if (aid == null) {
+      if (mounted) setState(() => _loading = false);
+      return;
+    }
     try {
       final doc = await FirebaseFirestore.instance
           .collection('associations')
           .doc(aid)
           .get();
       final theme = doc.data()?['theme'] as Map<String, dynamic>?;
-      _primary = _parseHex(theme?['primaryColor']) ?? _primary;
-      _secondary = _parseHex(theme?['secondaryColor']) ?? _secondary;
-      _accent = _parseHex(theme?['accentColor']) ?? _accent;
+      final presetId = theme?['presetId'] as String?;
+      if (presetId != null && presetId.isNotEmpty) {
+        // Resolver para normalizar ids desconocidos al default.
+        _selectedPresetId = presetById(presetId).id;
+      }
       _logoUrl = theme?['logoUrl'] as String?;
     } catch (_) {}
     if (mounted) setState(() => _loading = false);
-  }
-
-  Color? _parseHex(dynamic value) {
-    if (value is! String || !value.startsWith('#') || value.length != 7) {
-      return null;
-    }
-    try {
-      final v = int.parse(value.substring(1), radix: 16);
-      return Color(0xff000000 | v);
-    } catch (_) {
-      return null;
-    }
-  }
-
-  String _toHex(Color c) {
-    return '#${(((c.r * 255.0).round() & 0xff) << 16 | ((c.g * 255.0).round() & 0xff) << 8 | ((c.b * 255.0).round() & 0xff)).toRadixString(16).padLeft(6, '0').toUpperCase()}';
-  }
-
-  Future<void> _pickColor(String label, Color current, ValueChanged<Color> onPicked) async {
-    final palette = <Color>[
-      const Color(0xFF1565C0), const Color(0xFFFFC107), const Color(0xFFE91E63),
-      const Color(0xFF4CAF50), const Color(0xFFFF5722), const Color(0xFF9C27B0),
-      const Color(0xFF00BCD4), const Color(0xFF795548), const Color(0xFF607D8B),
-      const Color(0xFFF44336), const Color(0xFF3F51B5), const Color(0xFF009688),
-      const Color(0xFFFFEB3B), const Color(0xFF8BC34A), const Color(0xFF673AB7),
-      const Color(0xFF0D47A1),
-    ];
-    final picked = await showDialog<Color>(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('Seleccionar $label'),
-        content: SizedBox(
-          width: 320,
-          child: Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: palette
-                .map((c) => GestureDetector(
-                      onTap: () => Navigator.pop(ctx, c),
-                      child: Container(
-                        width: 56,
-                        height: 56,
-                        decoration: BoxDecoration(
-                          color: c,
-                          shape: BoxShape.circle,
-                          border: Border.all(
-                            color: c.toARGB32() == current.toARGB32()
-                                ? Colors.black
-                                : Colors.transparent,
-                            width: 3,
-                          ),
-                        ),
-                      ),
-                    ))
-                .toList(),
-          ),
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('Cancelar')),
-        ],
-      ),
-    );
-    if (picked != null) onPicked(picked);
   }
 
   Future<void> _pickLogo() async {
@@ -138,8 +80,7 @@ class _ThemeSettingsPageState extends State<ThemeSettingsPage> {
     setState(() => _uploadingLogo = true);
     try {
       // Path tiene que matchear `match /associations/{aid}/{allPaths=**}`
-      // en storage.rules. (Antes usábamos `association_logos/` que no
-      // existía como regla y caía en el default deny → unauthorized.)
+      // en storage.rules.
       final ref = FirebaseStorage.instance.ref('associations/$aid/logo.jpg');
       await ref.putFile(
         await _xFileToFile(picked),
@@ -172,18 +113,18 @@ class _ThemeSettingsPageState extends State<ThemeSettingsPage> {
           .doc(aid)
           .update({
         'theme': {
-          'primaryColor': _toHex(_primary),
-          'secondaryColor': _toHex(_secondary),
-          'accentColor': _toHex(_accent),
+          'presetId': _selectedPresetId,
           'logoUrl': _logoUrl,
         },
         'updatedAt': FieldValue.serverTimestamp(),
       });
-      // Recargar el theme service para que la app se repinte.
+      // Recargar el theme service para que la app se repinte. Como loadFor
+      // es idempotente por aid, forzamos limpiando el aid actual.
+      AssociationThemeService.instance.clear();
       await AssociationThemeService.instance.loadFor(aid);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Branding guardado')),
+          const SnackBar(content: Text('Tema guardado')),
         );
       }
     } catch (e) {
@@ -201,18 +142,21 @@ class _ThemeSettingsPageState extends State<ThemeSettingsPage> {
 
   @override
   Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Branding'),
+        title: const Text('Tema y branding'),
         actions: [
           IconButton(
             tooltip: 'Guardar',
             icon: _saving
-                ? const SizedBox(
+                ? SizedBox(
                     width: 20,
                     height: 20,
                     child: CircularProgressIndicator(
-                        strokeWidth: 2, color: Colors.white))
+                        strokeWidth: 2,
+                        color: Theme.of(context).colorScheme.onPrimary),
+                  )
                 : const Icon(Icons.save),
             onPressed: _saving ? null : _save,
           ),
@@ -221,14 +165,12 @@ class _ThemeSettingsPageState extends State<ThemeSettingsPage> {
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : SingleChildScrollView(
-              padding: const EdgeInsets.all(16),
+              padding: const EdgeInsets.all(AppSpacing.lg),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text('Logo de la asociación',
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 16)),
-                  const SizedBox(height: 8),
+                  Text('Logo de la asociación', style: textTheme.titleMedium),
+                  const SizedBox(height: AppSpacing.sm),
                   GestureDetector(
                     onTap: _uploadingLogo ? null : _pickLogo,
                     child: Container(
@@ -254,10 +196,10 @@ class _ThemeSettingsPageState extends State<ThemeSettingsPage> {
                                       Icon(Icons.add_photo_alternate,
                                           size: 40,
                                           color: Colors.grey.shade500),
-                                      const SizedBox(height: 8),
+                                      const SizedBox(height: AppSpacing.sm),
                                       Text(
                                         'Toca para subir logo',
-                                        style: TextStyle(
+                                        style: textTheme.bodyMedium?.copyWith(
                                             color: Colors.grey.shade600),
                                       ),
                                     ],
@@ -265,82 +207,148 @@ class _ThemeSettingsPageState extends State<ThemeSettingsPage> {
                                 )),
                     ),
                   ),
-                  const SizedBox(height: 24),
-                  const Text('Colores',
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 16)),
-                  const SizedBox(height: 12),
-                  _colorRow('Primario', _primary,
-                      (c) => setState(() => _primary = c)),
-                  _colorRow('Secundario', _secondary,
-                      (c) => setState(() => _secondary = c)),
-                  _colorRow('Acento', _accent,
-                      (c) => setState(() => _accent = c)),
-                  const SizedBox(height: 24),
-                  // Vista previa
-                  const Text('Vista previa',
-                      style: TextStyle(
-                          fontWeight: FontWeight.bold, fontSize: 16)),
-                  const SizedBox(height: 8),
-                  Card(
-                    color: _primary.withValues(alpha: 0.08),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Container(
-                            padding: const EdgeInsets.all(12),
-                            decoration: BoxDecoration(
-                              color: _primary,
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                            child: const Text('Primario',
-                                style: TextStyle(
-                                    color: Colors.white,
-                                    fontWeight: FontWeight.bold)),
-                          ),
-                          const SizedBox(height: 8),
-                          ElevatedButton(
-                            onPressed: () {},
-                            style: ElevatedButton.styleFrom(
-                                backgroundColor: _secondary,
-                                foregroundColor: Colors.black),
-                            child: const Text('Botón secundario'),
-                          ),
-                          const SizedBox(height: 8),
-                          Text('Texto en color acento',
-                              style: TextStyle(
-                                  color: _accent,
-                                  fontWeight: FontWeight.w600)),
-                        ],
-                      ),
+                  const SizedBox(height: AppSpacing.xl),
+                  Text('Tema de la asociación', style: textTheme.titleMedium),
+                  const SizedBox(height: AppSpacing.xs),
+                  Text(
+                    'Elige un tema profesional. Los colores se aplican a toda '
+                    'la app de tu asociación.',
+                    style: textTheme.bodySmall
+                        ?.copyWith(color: AppTheme.textSecondary),
+                  ),
+                  const SizedBox(height: AppSpacing.md),
+                  GridView.builder(
+                    shrinkWrap: true,
+                    physics: const NeverScrollableScrollPhysics(),
+                    itemCount: themePresets.length,
+                    gridDelegate:
+                        const SliverGridDelegateWithFixedCrossAxisCount(
+                      crossAxisCount: 2,
+                      mainAxisSpacing: AppSpacing.md,
+                      crossAxisSpacing: AppSpacing.md,
+                      childAspectRatio: 1.35,
                     ),
+                    itemBuilder: (_, i) {
+                      final preset = themePresets[i];
+                      return _ThemeCard(
+                        preset: preset,
+                        selected: preset.id == _selectedPresetId,
+                        onTap: () =>
+                            setState(() => _selectedPresetId = preset.id),
+                      );
+                    },
                   ),
                 ],
               ),
             ),
     );
   }
+}
 
-  Widget _colorRow(String label, Color color, ValueChanged<Color> onPicked) {
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      leading: Container(
-        width: 36,
-        height: 36,
+/// Tarjeta de la galería: nombre + swatches (primary/secondary/accent) y
+/// estado seleccionado.
+class _ThemeCard extends StatelessWidget {
+  final ThemePreset preset;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _ThemeCard({
+    required this.preset,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final textTheme = Theme.of(context).textTheme;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
         decoration: BoxDecoration(
-          color: color,
-          shape: BoxShape.circle,
-          border: Border.all(color: Colors.grey.shade400),
+          color: AppTheme.surfaceColor,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: selected ? preset.primary : Colors.grey.shade300,
+            width: selected ? 3 : 1,
+          ),
+          boxShadow: selected
+              ? [
+                  BoxShadow(
+                    color: preset.primary.withValues(alpha: 0.3),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ]
+              : null,
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            // Cabecera = muestra del color primary con texto onPrimary.
+            Container(
+              height: 46,
+              decoration: BoxDecoration(
+                color: preset.primary,
+                borderRadius: const BorderRadius.vertical(
+                    top: Radius.circular(11)),
+              ),
+              alignment: Alignment.center,
+              child: Text(
+                'Aa',
+                style: textTheme.titleLarge?.copyWith(color: preset.onPrimary),
+              ),
+            ),
+            Expanded(
+              child: Padding(
+                padding: const EdgeInsets.symmetric(
+                    horizontal: AppSpacing.md, vertical: AppSpacing.sm),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            preset.name,
+                            style: textTheme.titleMedium,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        if (selected)
+                          Icon(Icons.check_circle,
+                              color: preset.primary, size: 20),
+                      ],
+                    ),
+                    Row(
+                      children: [
+                        _swatch(preset.primary),
+                        const SizedBox(width: AppSpacing.xs),
+                        _swatch(preset.secondary),
+                        const SizedBox(width: AppSpacing.xs),
+                        _swatch(preset.accent),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ],
         ),
       ),
-      title: Text(label),
-      subtitle: Text(_toHex(color),
-          style: const TextStyle(fontFamily: 'monospace', fontSize: 12)),
-      trailing: TextButton(
-        onPressed: () => _pickColor(label, color, onPicked),
-        child: const Text('Cambiar'),
+    );
+  }
+
+  Widget _swatch(Color c) {
+    return Container(
+      width: 24,
+      height: 24,
+      decoration: BoxDecoration(
+        color: c,
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.black12),
       ),
     );
   }

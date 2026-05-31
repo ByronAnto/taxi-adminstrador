@@ -9,6 +9,8 @@ import 'package:image_picker/image_picker.dart';
 
 import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
+import '../../../../core/widgets/app_scaffold.dart';
+import '../../../../core/widgets/state_views.dart';
 import '../../data/models/user_model.dart';
 import '../bloc/auth_bloc.dart';
 
@@ -47,31 +49,36 @@ class _PendingApprovalPageState extends State<PendingApprovalPage> {
       );
     }
 
-    return Scaffold(
-      appBar: AppBar(
-        title: const Text('Pendiente de aprobación'),
-        backgroundColor: AppTheme.primaryColor,
-        foregroundColor: Colors.white,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.logout),
-            tooltip: 'Cerrar sesión',
-            onPressed: () =>
-                context.read<AuthBloc>().add(AuthSignOutRequested()),
-          ),
-        ],
-      ),
+    return AppScaffold(
+      title: 'Pendiente de aprobación',
+      showBack: false,
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.logout),
+          tooltip: 'Cerrar sesión',
+          onPressed: () =>
+              context.read<AuthBloc>().add(AuthSignOutRequested()),
+        ),
+      ],
       body: StreamBuilder<DocumentSnapshot>(
         stream: FirebaseFirestore.instance
             .collection('users')
             .doc(auth.user.uid)
             .snapshots(),
         builder: (context, snapshot) {
+          if (snapshot.hasError) {
+            return ErrorState.fromError(snapshot.error);
+          }
           if (snapshot.connectionState == ConnectionState.waiting) {
-            return const Center(child: CircularProgressIndicator());
+            return const LoadingState();
           }
           if (!snapshot.hasData || !snapshot.data!.exists) {
-            return const Center(child: Text('Cuenta no encontrada.'));
+            return const EmptyState(
+              icon: Icons.person_off_outlined,
+              title: 'Cuenta no encontrada',
+              subtitle: 'No pudimos cargar tu cuenta. Cierra sesión e '
+                  'intenta de nuevo.',
+            );
           }
           final user = UserModel.fromFirestore(snapshot.data!);
 
@@ -93,8 +100,9 @@ class _PendingApprovalPageState extends State<PendingApprovalPage> {
   Widget _buildBody(BuildContext context, UserModel user) {
     if (user.status == UserStatus.rejected) {
       return _statusMessage(
+        context,
         icon: Icons.cancel,
-        color: Colors.red,
+        color: AppTheme.errorColor,
         title: 'Cuenta rechazada',
         body:
             'Tu administrador rechazó esta solicitud. Si crees que es un '
@@ -103,8 +111,9 @@ class _PendingApprovalPageState extends State<PendingApprovalPage> {
     }
     if (user.status == UserStatus.suspended) {
       return _statusMessage(
+        context,
         icon: Icons.block,
-        color: Colors.orange,
+        color: AppTheme.warningColor,
         title: 'Cuenta suspendida',
         body:
             'Tu cuenta está suspendida temporalmente. Contacta al '
@@ -124,8 +133,9 @@ class _PendingApprovalPageState extends State<PendingApprovalPage> {
 
     // Sin fotos faltantes → solo esperar
     return _statusMessage(
+      context,
       icon: Icons.hourglass_top,
-      color: Colors.orange,
+      color: AppTheme.warningColor,
       title: 'Esperando aprobación',
       body:
           'Tu cuenta y datos ya están registrados. El administrador de '
@@ -134,29 +144,32 @@ class _PendingApprovalPageState extends State<PendingApprovalPage> {
     );
   }
 
-  Widget _statusMessage({
+  Widget _statusMessage(
+    BuildContext context, {
     required IconData icon,
     required Color color,
     required String title,
     required String body,
   }) {
+    final textTheme = Theme.of(context).textTheme;
     return Center(
       child: Padding(
-        padding: const EdgeInsets.all(32),
+        padding: const EdgeInsets.all(AppSpacing.xxl),
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
             Icon(icon, size: 80, color: color),
-            const SizedBox(height: 24),
+            const SizedBox(height: AppSpacing.xl),
             Text(
               title,
-              style: const TextStyle(fontSize: 22, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center,
+              style: textTheme.headlineMedium,
             ),
-            const SizedBox(height: 12),
+            const SizedBox(height: AppSpacing.md),
             Text(
               body,
               textAlign: TextAlign.center,
-              style: const TextStyle(fontSize: 14, color: Colors.black54),
+              style: textTheme.bodyMedium?.copyWith(color: Colors.black54),
             ),
           ],
         ),
@@ -165,42 +178,44 @@ class _PendingApprovalPageState extends State<PendingApprovalPage> {
   }
 
   Widget _photosForm(BuildContext context, UserModel user) {
+    final textTheme = Theme.of(context).textTheme;
     return ListView(
-      padding: const EdgeInsets.all(16),
+      padding: const EdgeInsets.all(AppSpacing.lg),
       children: [
         Container(
-          padding: const EdgeInsets.all(16),
+          padding: const EdgeInsets.all(AppSpacing.lg),
           decoration: BoxDecoration(
-            color: Colors.blue.shade50,
+            color: AppTheme.infoColor.withValues(alpha: 0.10),
             borderRadius: BorderRadius.circular(8),
-            border: Border.all(color: Colors.blue.shade200),
+            border:
+                Border.all(color: AppTheme.infoColor.withValues(alpha: 0.35)),
           ),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Row(
                 children: [
-                  Icon(Icons.info_outline, color: Colors.blue.shade700),
-                  const SizedBox(width: 8),
-                  const Expanded(
+                  const Icon(Icons.info_outline, color: AppTheme.infoColor),
+                  const SizedBox(width: AppSpacing.sm),
+                  Expanded(
                     child: Text(
                       'Completa tu registro',
-                      style: TextStyle(fontWeight: FontWeight.bold),
+                      style: textTheme.titleMedium,
                     ),
                   ),
                 ],
               ),
-              const SizedBox(height: 8),
-              const Text(
+              const SizedBox(height: AppSpacing.sm),
+              Text(
                 'Toma una foto de tu vehículo y de tu licencia (lado '
                 'frontal y trasero). Cuando termines, el administrador '
                 'revisará tu solicitud.',
-                style: TextStyle(fontSize: 12),
+                style: textTheme.bodySmall,
               ),
             ],
           ),
         ),
-        const SizedBox(height: 24),
+        const SizedBox(height: AppSpacing.xl),
         _photoTile(
           label: 'Foto del vehículo',
           icon: Icons.directions_car,
@@ -227,10 +242,10 @@ class _PendingApprovalPageState extends State<PendingApprovalPage> {
         const SizedBox(height: 24),
         if (_uploadError != null)
           Padding(
-            padding: const EdgeInsets.only(bottom: 12),
+            padding: const EdgeInsets.only(bottom: AppSpacing.md),
             child: Text(
               _uploadError!,
-              style: const TextStyle(color: Colors.red),
+              style: const TextStyle(color: AppTheme.errorColor),
               textAlign: TextAlign.center,
             ),
           ),
@@ -240,15 +255,16 @@ class _PendingApprovalPageState extends State<PendingApprovalPage> {
             padding: const EdgeInsets.symmetric(vertical: 14),
           ),
           child: _uploading
-              ? const SizedBox(
+              ? SizedBox(
                   width: 20,
                   height: 20,
                   child: CircularProgressIndicator(
-                      strokeWidth: 2, color: Colors.white),
+                      strokeWidth: 2,
+                      color: Theme.of(context).colorScheme.onPrimary),
                 )
               : const Text('SUBIR FOTOS Y CONTINUAR'),
         ),
-        const SizedBox(height: 32),
+        const SizedBox(height: AppSpacing.xxl),
       ],
     );
   }
@@ -267,18 +283,20 @@ class _PendingApprovalPageState extends State<PendingApprovalPage> {
     return InkWell(
       onTap: onTap,
       child: Container(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.all(AppSpacing.lg),
         decoration: BoxDecoration(
           border: Border.all(
-            color: hasAny ? Colors.green : Colors.grey.shade400,
+            color: hasAny ? AppTheme.successColor : Colors.grey.shade400,
             width: hasAny ? 2 : 1,
           ),
           borderRadius: BorderRadius.circular(8),
         ),
         child: Row(
           children: [
-            Icon(icon, size: 36, color: hasAny ? Colors.green : Colors.grey),
-            const SizedBox(width: 16),
+            Icon(icon,
+                size: 36,
+                color: hasAny ? AppTheme.successColor : Colors.grey),
+            const SizedBox(width: AppSpacing.lg),
             Expanded(
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
@@ -301,7 +319,7 @@ class _PendingApprovalPageState extends State<PendingApprovalPage> {
             ),
             Icon(
               hasAny ? Icons.check_circle : Icons.camera_alt,
-              color: hasAny ? Colors.green : Colors.grey,
+              color: hasAny ? AppTheme.successColor : Colors.grey,
             ),
           ],
         ),
@@ -398,7 +416,7 @@ class _PendingApprovalPageState extends State<PendingApprovalPage> {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text('Fotos subidas. Esperando aprobación del admin.'),
-          backgroundColor: Colors.green,
+          backgroundColor: AppTheme.successColor,
         ),
       );
 
