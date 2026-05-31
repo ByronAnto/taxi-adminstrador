@@ -5288,3 +5288,124 @@ exports.onTripRequestRated = onDocumentUpdated(
   },
 );
 
+// ───────────────────────────────────────────────────────────────────
+//  backfillNextDueAt — callable de UNA SOLA VEZ (super-admin).
+//  Puebla nextDueAt / lastValidatedPaymentAt / dueComputeVersion en los
+//  conductores existentes. Por diseño es SEGURO:
+//   - Por defecto corre en DRY-RUN: NO escribe nada, solo cuenta y muestra
+//     ejemplos. Solo escribe si se invoca con { dryRun: false } explícito.
+//   - En modo real es ADITIVO: escribe campos nuevos con merge:true y NUNCA
+//     toca `status` (no bloquea a nadie por sí mismo).
+//   - El N+1 (_lastValidatedPayment por conductor) es aceptable porque esto
+//     corre una sola vez.
+//  Devuelve un resumen con `wouldBlock` (cuántos quedarían vencidos AHORA)
+//  para compararlo contra `blockedCuota` (los que el sistema viejo tiene
+//  bloqueados por cuota). Si wouldBlock ≫ blockedCuota hay un error de
+//  cómputo → no se debe ejecutar el real.
+// ───────────────────────────────────────────────────────────────────
+
+exports.backfillNextDueAt = onCall({ timeoutSeconds: 540 }, async (request) => {
+  requireSuperAdmin(request);
+  // Default DRY-RUN (seguro): solo escribe si dryRun:false explícito.
+  const dryRun = request.data?.dryRun !== false;
+  const now = Timestamp.now();
+
+  let scanned = 0, withDue = 0, wouldBlock = 0, written = 0, assocCount = 0;
+  const samples = []; // hasta ~20 ejemplos para inspección
+
+  // Asociaciones con cobro activo (billingConfig.amount > 0).
+  const assocSnap = await db.collection("associations").get();
+  for (const a of assocSnap.docs) {
+    const cfg = a.data().billingConfig;
+    if (!cfg || !(Number(cfg.amount) > 0)) continue;
+    assocCount++;
+
+    const usersSnap = await db.collection("users")
+      .where("associationId", "==", a.id)
+      .where("role", "in", ["conductor", "admin"])
+      .select("approvedAt") // solo lo necesario
+      .get();
+
+    let batch = db.batch();
+    let n = 0;
+    for (const u of usersSnap.docs) {
+      scanned++;
+      const approvedAt = u.data().approvedAt;
+      let nextDueAt = null;
+      let lastValidatedAt = null;
+      if (approvedAt) {
+        // N+1 SOLO en este backfill de una vez.
+        const last = await _lastValidatedPayment(u.id, a.id);
+        lastValidatedAt = (last && last.validatedAt) ? last.validatedAt : null;
+        const d = computeNextDueAtForUser({
+          approvedAt: approvedAt.toDate ? approvedAt.toDate() : approvedAt,
+          lastPayment: last ? { validatedAt: last.validatedAt } : null,
+          billingConfig: cfg,
+        });
+        nextDueAt = d ? Timestamp.fromDate(d) : null;
+      }
+
+      const isOverdue = !!(nextDueAt && nextDueAt.toMillis() <= now.toMillis());
+      if (nextDueAt) {
+        withDue++;
+        if (isOverdue) wouldBlock++;
+      }
+      if (samples.length < 20) {
+        samples.push({
+          uid: u.id,
+          aid: a.id,
+          nextDueAt: nextDueAt ? nextDueAt.toDate().toISOString() : null,
+          wouldBlock: isOverdue,
+        });
+      }
+
+      if (!dryRun) {
+        batch.set(
+          u.ref,
+          {
+            nextDueAt,
+            lastValidatedPaymentAt: lastValidatedAt,
+            dueComputeVersion: 1,
+          },
+          { merge: true }
+        );
+        written++;
+        if (++n === 450) {
+          await batch.commit();
+          batch = db.batch();
+          n = 0;
+        }
+      }
+    }
+    if (!dryRun && n > 0) await batch.commit();
+  }
+
+  // Para comparar: cuántos están HOY bloqueados por cuota en el sistema viejo.
+  const blockedSnap = await db.collection("users")
+    .where("status", "==", "paymentBlocked")
+    .select("blockReason")
+    .get();
+  let blockedNow = 0, blockedCuota = 0;
+  blockedSnap.forEach((d) => {
+    blockedNow++;
+    if (d.data().blockReason === "cuota_vencida") blockedCuota++;
+  });
+
+  const summary = {
+    dryRun,
+    associations: assocCount,
+    scanned,
+    withDue,
+    wouldBlock,
+    written,
+    blockedNow,
+    blockedCuota,
+    samples,
+  };
+  console.log(
+    "backfillNextDueAt:",
+    JSON.stringify({ ...summary, samples: samples.length })
+  );
+  return summary;
+});
+
