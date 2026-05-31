@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:cached_network_image/cached_network_image.dart';
@@ -11,6 +12,10 @@ import '../../../../core/theme/app_theme.dart';
 import '../../../../core/widgets/state_views.dart';
 import '../../../auth/presentation/bloc/auth_bloc.dart';
 import '../../../communication/presentation/widgets/radio_history_view.dart';
+import '../../../group_chat/data/group_chat_service.dart';
+import '../../../group_chat/data/group_unread_service.dart';
+import '../../../group_chat/data/models/group_message_model.dart';
+import '../../../group_chat/presentation/group_chat_view.dart';
 import '../../data/models/chat_model.dart';
 import '../bloc/chat_bloc.dart';
 
@@ -24,45 +29,83 @@ class ChatListPage extends StatefulWidget {
 
 class _ChatListPageState extends State<ChatListPage>
     with SingleTickerProviderStateMixin {
-  final _searchController = TextEditingController();
-  String _searchQuery = '';
   late final TabController _tabs = TabController(length: 2, vsync: this);
 
-  @override
-  void initState() {
-    super.initState();
-    _loadChatRooms();
-  }
+  /// Conteo de no leídos del grupo, recomputado al llegar mensajes.
+  int _groupUnread = 0;
+  int _lastReadMs = 0;
+  StreamSubscription<List<GroupMessageModel>>? _groupSub;
 
-  void _loadChatRooms() {
+  String _associationId(BuildContext context) {
     final authState = context.read<AuthBloc>().state;
-    if (authState is AuthAuthenticated) {
-      context.read<ChatBloc>().add(
-            ChatRoomsWatchStarted(authState.user.uid),
-          );
-    }
+    return authState is AuthAuthenticated ? authState.user.associationId : '';
   }
 
-  String _currentUserId() {
+  String _myUid(BuildContext context) {
     final authState = context.read<AuthBloc>().state;
     return authState is AuthAuthenticated ? authState.user.uid : '';
   }
 
-  /// Get the other participant's name from the room
-  String _otherName(ChatRoomModel room) {
-    final myId = _currentUserId();
-    final idx = room.participantIds.indexOf(myId);
-    if (idx >= 0 && room.participantNames.length > 1) {
-      return room.participantNames[idx == 0 ? 1 : 0];
+  @override
+  void initState() {
+    super.initState();
+    _tabs.addListener(_onTabChanged);
+    _initGroupUnread();
+  }
+
+  /// Escucha el stream del grupo para mantener el badge de no leídos. Si la
+  /// tab Grupo está activa, marca como leído en vez de acumular.
+  Future<void> _initGroupUnread() async {
+    final aid = _associationId(context);
+    final uid = _myUid(context);
+    if (aid.isEmpty) return;
+
+    _lastReadMs = await GroupUnreadService.instance.lastReadMs(aid);
+    if (!mounted) return;
+
+    _groupSub =
+        GroupChatService.instance.stream(aid).listen((messages) async {
+      // Si el usuario está mirando la tab Grupo, todo cuenta como leído.
+      if (_tabs.index == 0) {
+        await GroupUnreadService.instance.markRead(aid);
+        _lastReadMs = DateTime.now().millisecondsSinceEpoch;
+        _setUnread(0);
+        return;
+      }
+      final n = GroupUnreadService.unreadCount(
+        messages: messages,
+        lastReadMs: _lastReadMs,
+        myUid: uid,
+      );
+      _setUnread(n);
+    });
+  }
+
+  void _setUnread(int n) {
+    GroupUnreadService.instance.unreadNotifier.value = n;
+    if (!mounted) {
+      _groupUnread = n;
+      return;
     }
-    return room.participantNames.isNotEmpty
-        ? room.participantNames.first
-        : 'Chat';
+    if (_groupUnread != n) setState(() => _groupUnread = n);
+  }
+
+  Future<void> _onTabChanged() async {
+    if (_tabs.indexIsChanging) return;
+    if (_tabs.index == 0) {
+      final aid = _associationId(context);
+      if (aid.isNotEmpty) {
+        await GroupUnreadService.instance.markRead(aid);
+        _lastReadMs = DateTime.now().millisecondsSinceEpoch;
+      }
+      _setUnread(0);
+    }
   }
 
   @override
   void dispose() {
-    _searchController.dispose();
+    _tabs.removeListener(_onTabChanged);
+    _groupSub?.cancel();
     _tabs.dispose();
     super.dispose();
   }
@@ -74,180 +117,36 @@ class _ChatListPageState extends State<ChatListPage>
         title: const Text('Mensajes'),
         bottom: TabBar(
           controller: _tabs,
-          tabs: const [
-            Tab(icon: Icon(Icons.chat_bubble_outline), text: 'Privados'),
-            Tab(icon: Icon(Icons.radio), text: 'Radio'),
+          tabs: [
+            Tab(
+              icon: const Icon(Icons.groups),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Text('Grupo'),
+                  if (_groupUnread > 0) ...[
+                    const SizedBox(width: 6),
+                    Badge(label: Text('$_groupUnread')),
+                  ],
+                ],
+              ),
+            ),
+            const Tab(icon: Icon(Icons.radio), text: 'Radio'),
           ],
         ),
       ),
       body: TabBarView(
         controller: _tabs,
         children: [
-          // ── Tab 1: chats privados 1-a-1 ──
-          _buildPrivateChatsTab(),
+          // ── Tab 1: chat de grupo de la asociación ──
+          GroupChatView(
+            associationId: _associationId(context),
+            myUid: _myUid(context),
+          ),
           // ── Tab 2: historial de audios + textos del canal del radio ──
           const RadioHistoryView(),
         ],
       ),
-    );
-  }
-
-  Widget _buildPrivateChatsTab() {
-    return Column(
-      children: [
-        // Search bar
-        Padding(
-          padding: const EdgeInsets.all(12),
-          child: TextField(
-            controller: _searchController,
-            decoration: InputDecoration(
-              hintText: 'Buscar conversación...',
-              prefixIcon: const Icon(Icons.search),
-              filled: true,
-              fillColor: AppTheme.surfaceColor,
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(24),
-                borderSide: BorderSide.none,
-              ),
-            ),
-            onChanged: (v) =>
-                setState(() => _searchQuery = v.toLowerCase()),
-          ),
-        ),
-        // Chat room list
-        Expanded(
-          child: BlocBuilder<ChatBloc, ChatState>(
-              builder: (context, state) {
-                if (state is ChatLoading) {
-                  return const LoadingState();
-                }
-
-                if (state is ChatRoomsLoaded) {
-                  var rooms = state.rooms;
-                  if (_searchQuery.isNotEmpty) {
-                    rooms = rooms
-                        .where((r) => _otherName(r)
-                            .toLowerCase()
-                            .contains(_searchQuery))
-                        .toList();
-                  }
-
-                  if (rooms.isEmpty) {
-                    return _buildEmptyChats(context);
-                  }
-
-                  return ListView.builder(
-                    itemCount: rooms.length,
-                    itemBuilder: (ctx, i) => _buildChatTile(rooms[i]),
-                  );
-                }
-
-                if (state is ChatError) {
-                  return ErrorState(message: state.message);
-                }
-
-                return const EmptyState(
-                  icon: Icons.chat_bubble_outline,
-                  title: 'Inicia una conversación',
-                );
-              },
-            ),
-        ),
-      ],
-    );
-  }
-
-  /// Estado vacío de los chats privados: además del mensaje base, muestra
-  /// una guía de cómo iniciar un chat (onboarding) y una nota sobre la
-  /// pestaña Radio.
-  Widget _buildEmptyChats(BuildContext context) {
-    final textTheme = Theme.of(context).textTheme;
-    return SingleChildScrollView(
-      child: EmptyState(
-        icon: Icons.chat_bubble_outline,
-        title: 'Aún no tienes conversaciones',
-        subtitle: 'La pestaña "Radio" muestra el historial de audios y '
-            'mensajes del canal de la cooperativa.',
-        action: Container(
-          padding: const EdgeInsets.all(AppSpacing.lg),
-          decoration: BoxDecoration(
-            color: AppTheme.infoColor.withValues(alpha: 0.10),
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(color: AppTheme.infoColor.withValues(alpha: 0.30)),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.lightbulb_outline,
-                      size: 18, color: AppTheme.infoColor),
-                  const SizedBox(width: AppSpacing.sm),
-                  Text(
-                    'Cómo iniciar un chat',
-                    style: textTheme.labelSmall?.copyWith(
-                      fontWeight: FontWeight.w800,
-                      color: AppTheme.infoColor,
-                      fontSize: 13,
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: AppSpacing.sm),
-              Text(
-                'Toca un conductor en el Mapa o un socio en la lista para '
-                'abrir un chat 1-a-1 con texto e imágenes (estilo WhatsApp).',
-                style: textTheme.bodySmall?.copyWith(height: 1.4),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildChatTile(ChatRoomModel room) {
-    final name = _otherName(room);
-    final lastMsg = room.lastMessage ?? 'Sin mensajes';
-    final time = room.lastMessageTime;
-    final timeStr = time != null
-        ? '${time.hour.toString().padLeft(2, '0')}:${time.minute.toString().padLeft(2, '0')}'
-        : '';
-
-    final colorScheme = Theme.of(context).colorScheme;
-    return ListTile(
-      leading: CircleAvatar(
-        backgroundColor: colorScheme.secondary.withValues(alpha: 0.15),
-        child: Text(
-          name.isNotEmpty ? name[0].toUpperCase() : '?',
-          style: TextStyle(
-              fontWeight: FontWeight.bold, color: colorScheme.secondary),
-        ),
-      ),
-      title: Text(name, style: const TextStyle(fontWeight: FontWeight.w600)),
-      subtitle: Text(
-        lastMsg,
-        maxLines: 1,
-        overflow: TextOverflow.ellipsis,
-        style: const TextStyle(color: AppTheme.textSecondary, fontSize: 13),
-      ),
-      trailing: Text(timeStr,
-          style:
-              const TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
-      onTap: () {
-        Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (_) => BlocProvider.value(
-              value: context.read<ChatBloc>(),
-              child: ChatDetailPage(
-                chatRoomId: room.uid,
-                chatName: name,
-              ),
-            ),
-          ),
-        );
-      },
     );
   }
 }
