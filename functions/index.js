@@ -1,11 +1,13 @@
 const { onCall, HttpsError } = require("firebase-functions/v2/https");
 const { onDocumentWritten, onDocumentUpdated, onDocumentCreated } = require("firebase-functions/v2/firestore");
 const { onSchedule } = require("firebase-functions/v2/scheduler");
+const { setGlobalOptions } = require("firebase-functions/v2");
 const { defineSecret } = require("firebase-functions/params");
 const { initializeApp } = require("firebase-admin/app");
 const { getAuth } = require("firebase-admin/auth");
 const { getFirestore, FieldValue, Timestamp } = require("firebase-admin/firestore");
 const { getStorage } = require("firebase-admin/storage");
+const { getMessaging } = require("firebase-admin/messaging");
 const { RtcTokenBuilder, RtcRole } = require("agora-token");
 const { buildLiveKitToken } = require("./lib/livekitToken");
 const { buildNotification, tokensForAssociation } = require("./lib/groupChat");
@@ -19,6 +21,11 @@ const {
 
 initializeApp();
 const db = getFirestore();
+
+// Tope global de instancias: evita fuga de costo ante un pico o un bucle de
+// escrituras sin estrangular la operación normal. NO seteamos region ni memory
+// aquí (los overrides por función siguen vigentes).
+setGlobalOptions({ maxInstances: 10 });
 
 // ───────────────────────────────────────────────────────────────────
 //  Configuración global
@@ -2586,7 +2593,6 @@ exports.enforcePayments = onSchedule(
 /// user dueño del token. `message` debe traer ya notification/data/android/apns
 /// (sin `tokens`). Devuelve { sent, pruned }.
 async function _sendMulticastAndPrune(entries, message) {
-  const { getMessaging } = require("firebase-admin/messaging");
   const DEAD = new Set([
     "messaging/registration-token-not-registered",
     "messaging/invalid-registration-token",
@@ -2622,7 +2628,6 @@ async function _sendFcmToUid(uid, payload, data = {}) {
   const u = await db.collection("users").doc(uid).get();
   const token = u.data()?.fcmToken;
   if (!token) return;
-  const { getMessaging } = require("firebase-admin/messaging");
   await getMessaging().send({
     token,
     notification: { title: payload.title, body: payload.body },
@@ -4341,7 +4346,7 @@ exports.cleanupOrphanedDrivers = onCall({}, async (request) => {
 //  audio porque cerró sesión / mató la app". La operadora deja de verlo
 //  como disponible y los demás dejan de esperarlo.
 //
-//  Cron cada 2 minutos. Threshold: 3 minutos sin updatedAt.
+//  Cron cada 3 minutos. Threshold: 6 minutos sin updatedAt (STALE_MINUTES).
 // ───────────────────────────────────────────────────────────────────
 
 // 6 min: debe ser MAYOR que el heartbeat estacionario de la app (2 min) con
@@ -4395,7 +4400,7 @@ async function _runMarkStaleDriversOffline() {
 
 exports.markStaleDriversOffline = onSchedule(
   {
-    schedule: "*/2 * * * *",
+    schedule: "*/3 * * * *",
     timeZone: "America/Guayaquil",
     timeoutSeconds: 60,
     memory: "256MiB",
@@ -4641,13 +4646,28 @@ exports.onTripRequestCreated = onDocumentCreated(
 // ───────────────────────────────────────────────────────────────────
 // Cache simple de nombres de asociación (como en el bot recorder).
 const _assocNames = new Map();
+const _ASSOC_NAMES_MAX = 500;
 async function _getAssociationName(aid) {
-  if (_assocNames.has(aid)) return _assocNames.get(aid);
+  if (_assocNames.has(aid)) {
+    // Refresca posición LRU: re-insertar lo deja como más reciente.
+    const v = _assocNames.get(aid);
+    _assocNames.delete(aid);
+    _assocNames.set(aid, v);
+    return v;
+  }
   let name = aid;
   try {
+    // Nota: .select() solo existe en Query/CollectionReference, no en
+    // DocumentReference, así que aquí el get() trae el doc completo. El doc
+    // de associations es chico y se cachea (LRU abajo), así que no vale la
+    // pena reescribirlo como query por documentId solo para proyectar `name`.
     const snap = await db.collection("associations").doc(aid).get();
     if (snap.exists) name = snap.data().name || aid;
   } catch (_) { /* noop */ }
+  if (_assocNames.size >= _ASSOC_NAMES_MAX) {
+    // Evict el más viejo (primera clave en orden de inserción).
+    _assocNames.delete(_assocNames.keys().next().value);
+  }
   _assocNames.set(aid, name);
   return name;
 }
