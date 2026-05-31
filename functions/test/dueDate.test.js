@@ -1,4 +1,4 @@
-const { computeNextDueDate, alignToDueDay } = require('../lib/dueDate');
+const { computeNextDueDate, alignToDueDay, computeNextDueAtForUser } = require('../lib/dueDate');
 
 describe('alignToDueDay', () => {
   test('week: Wed approval with monday dueDay → next Monday', () => {
@@ -96,5 +96,102 @@ describe('computeNextDueDate edge cases (C1)', () => {
     const cfg = { period: { every: 1, unit: 'week' }, dueDay: 'monday' };
     const result = computeNextDueDate(user, cfg, null);
     expect(result.toISOString().substring(0, 10)).toBe('2026-05-18'); // same Mon
+  });
+});
+
+describe('computeNextDueAtForUser (Bloque A — helper de materialización)', () => {
+  const cfgWeekly = { amount: 5, period: { every: 1, unit: 'week' }, dueDay: 'monday' };
+  const cfgMonthly = { amount: 10, period: { every: 1, unit: 'month' }, dueDay: 5 };
+
+  test('sin approvedAt → null (nunca se bloquea sin fecha de aprobación)', () => {
+    const result = computeNextDueAtForUser({
+      approvedAt: null,
+      lastPayment: null,
+      billingConfig: cfgWeekly,
+    });
+    expect(result).toBeNull();
+  });
+
+  test('approvedAt undefined → null', () => {
+    const result = computeNextDueAtForUser({
+      lastPayment: null,
+      billingConfig: cfgWeekly,
+    });
+    expect(result).toBeNull();
+  });
+
+  test('sin billingConfig → null', () => {
+    const result = computeNextDueAtForUser({
+      approvedAt: new Date('2026-05-13T10:00:00Z'),
+      lastPayment: null,
+      billingConfig: null,
+    });
+    expect(result).toBeNull();
+  });
+
+  test('amount <= 0 → null (sin cobro, no se materializa)', () => {
+    const result = computeNextDueAtForUser({
+      approvedAt: new Date('2026-05-13T10:00:00Z'),
+      lastPayment: null,
+      billingConfig: { amount: 0, period: { every: 1, unit: 'week' }, dueDay: 'monday' },
+    });
+    expect(result).toBeNull();
+  });
+
+  test('amount ausente → null', () => {
+    const result = computeNextDueAtForUser({
+      approvedAt: new Date('2026-05-13T10:00:00Z'),
+      lastPayment: null,
+      billingConfig: { period: { every: 1, unit: 'week' }, dueDay: 'monday' },
+    });
+    expect(result).toBeNull();
+  });
+
+  test('todo OK sin pago previo → Date = computeNextDueDate (primera cuota desde approvedAt)', () => {
+    const approvedAt = new Date('2026-05-13T10:00:00Z'); // Wed
+    const result = computeNextDueAtForUser({
+      approvedAt,
+      lastPayment: null,
+      billingConfig: cfgWeekly,
+    });
+    const expected = computeNextDueDate({ approvedAt }, cfgWeekly, null);
+    expect(result).toBeInstanceOf(Date);
+    expect(result.getTime()).toBe(expected.getTime());
+    expect(result.toISOString().substring(0, 10)).toBe('2026-05-18'); // next Mon
+  });
+
+  test('con pago previo → Date = computeNextDueDate desde validatedAt', () => {
+    const approvedAt = new Date('2026-04-01T10:00:00Z');
+    const lastPayment = { validatedAt: new Date('2026-05-11T08:00:00Z') }; // Mon
+    const result = computeNextDueAtForUser({
+      approvedAt,
+      lastPayment,
+      billingConfig: cfgWeekly,
+    });
+    const expected = computeNextDueDate({ approvedAt }, cfgWeekly, lastPayment);
+    expect(result).toBeInstanceOf(Date);
+    expect(result.getTime()).toBe(expected.getTime());
+    expect(result.toISOString().substring(0, 10)).toBe('2026-05-18'); // +1 week
+  });
+
+  test('borde de mes: dueDay 5, sin pago, aprobado día 10 → día 5 del mes siguiente', () => {
+    const approvedAt = new Date('2026-05-10T10:00:00Z');
+    const result = computeNextDueAtForUser({
+      approvedAt,
+      lastPayment: null,
+      billingConfig: cfgMonthly,
+    });
+    expect(result).toBeInstanceOf(Date);
+    expect(result.toISOString().substring(0, 10)).toBe('2026-06-05');
+  });
+
+  test('borde de semana: aprobado miércoles, dueDay lunes → próximo lunes', () => {
+    const approvedAt = new Date('2026-05-13T10:00:00Z'); // Wed
+    const result = computeNextDueAtForUser({
+      approvedAt,
+      lastPayment: null,
+      billingConfig: cfgWeekly,
+    });
+    expect(result.toISOString().substring(0, 10)).toBe('2026-05-18'); // Mon
   });
 });

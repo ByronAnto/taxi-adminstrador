@@ -118,4 +118,26 @@ function computeNextDueDate(user, cfg, lastPayment) {
   return alignToDueDay(advanced, cfg.dueDay, unit, true);
 }
 
-module.exports = { computeNextDueDate, alignToDueDay };
+/**
+ * Materializa el próximo vencimiento (`nextDueAt`) de la cuota interna de un
+ * conductor, listo para escribir en `users/{uid}`. Puro, sin Firestore.
+ *
+ * Reglas (decisiones del dueño: 0 días de gracia, cálculo preciso):
+ *  - Si no hay `approvedAt` → null (nunca se bloquea sin fecha de aprobación).
+ *  - Si no hay billingConfig con `amount > 0` → null (sin cobro, no se materializa).
+ *  - En otro caso → Date exacto via `computeNextDueDate` (alineado a dueDay).
+ *    `lastPayment` null = primera cuota desde `approvedAt`.
+ *
+ * @param {Object} params
+ * @param {Date|Timestamp|null} [params.approvedAt]
+ * @param {{validatedAt: Date|Timestamp}|null} [params.lastPayment]
+ * @param {{amount?: number, period: {every: number, unit: string}, dueDay: any}|null} [params.billingConfig]
+ * @returns {Date|null}
+ */
+function computeNextDueAtForUser({ approvedAt, lastPayment, billingConfig } = {}) {
+  if (!approvedAt) return null;
+  if (!billingConfig || !(Number(billingConfig.amount) > 0)) return null;
+  return computeNextDueDate({ approvedAt }, billingConfig, lastPayment || null);
+}
+
+module.exports = { computeNextDueDate, alignToDueDay, computeNextDueAtForUser };
