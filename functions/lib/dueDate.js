@@ -140,4 +140,75 @@ function computeNextDueAtForUser({ approvedAt, lastPayment, billingConfig } = {}
   return computeNextDueDate({ approvedAt }, billingConfig, lastPayment || null);
 }
 
-module.exports = { computeNextDueDate, alignToDueDay, computeNextDueAtForUser };
+/**
+ * Decisión PURA de morosidad de un conductor (sin Firestore).
+ *
+ * Modela el núcleo del cron unificado `enforceMembershipDues`: dado el estado
+ * actual de un user, su `nextDueAt`, la hora `now`, si tiene permiso activo y
+ * su rol/blockReason, decide qué acción tomaría el cron.
+ *
+ * Decisiones del dueño aplicadas:
+ *  - Gracia conductor: 0 días → se bloquea exactamente cuando `nextDueAt <= now`.
+ *  - Solo roles conductor/admin son sujetos de cuota interna.
+ *  - Un permiso activo evita el bloqueo (no la reactivación, que no lo necesita).
+ *
+ * Reglas:
+ *  WOULD_BLOCK: status==="active", rol elegible, nextDueAt!=null, nextDueAt<=now,
+ *               y NO hay permiso activo.
+ *  WOULD_REACTIVATE: status==="paymentBlocked", blockReason==="cuota_vencida",
+ *               nextDueAt!=null, nextDueAt>now.
+ *  "none": cualquier otro caso (incl. status deleted/disabledByAdmin/etc.,
+ *               bloqueado por otra razón, sin nextDueAt, con permiso activo,
+ *               rol no elegible).
+ *
+ * @param {Object} params
+ * @param {string} params.status            - status actual del user.
+ * @param {Date|Timestamp|null} params.nextDueAt
+ * @param {Date|Timestamp|number} params.now
+ * @param {boolean} [params.hasPermit=false]
+ * @param {string} [params.role]
+ * @param {string} [params.blockReason]
+ * @returns {"WOULD_BLOCK"|"WOULD_REACTIVATE"|"none"}
+ */
+const DUES_ELIGIBLE_ROLES = new Set(['conductor', 'admin']);
+
+function _toMillis(v) {
+  if (v == null) return null;
+  if (typeof v === 'number') return v;
+  if (v.toMillis) return v.toMillis();
+  if (v.toDate) return v.toDate().getTime();
+  if (v instanceof Date) return v.getTime();
+  const d = new Date(v);
+  return Number.isNaN(d.getTime()) ? null : d.getTime();
+}
+
+function decideDuesAction({ status, nextDueAt, now, hasPermit = false, role, blockReason } = {}) {
+  const nowMs = _toMillis(now);
+  const dueMs = _toMillis(nextDueAt);
+
+  // Reactivación: bloqueado por cuota vencida pero ya con vencimiento futuro.
+  if (status === 'paymentBlocked' && blockReason === 'cuota_vencida') {
+    if (dueMs != null && nowMs != null && dueMs > nowMs) {
+      return 'WOULD_REACTIVATE';
+    }
+    return 'none';
+  }
+
+  // Bloqueo: activo, rol elegible, vencido y sin permiso activo.
+  if (status === 'active') {
+    if (!DUES_ELIGIBLE_ROLES.has(role)) return 'none';
+    if (dueMs == null || nowMs == null) return 'none';
+    if (dueMs > nowMs) return 'none';
+    if (hasPermit) return 'none';
+    return 'WOULD_BLOCK';
+  }
+
+  return 'none';
+}
+
+module.exports = {
+  computeNextDueDate,
+  alignToDueDay,
+  computeNextDueAtForUser,
+  decideDuesAction,
+};
