@@ -2579,6 +2579,43 @@ exports.enforcePayments = onSchedule(
   }
 );
 
+/// Helper: envía un multicast en lotes de 500 y borra de Firestore los
+/// fcmToken muertos (UNREGISTERED / inválidos) que reporte FCM. `entries` es
+/// un array paralelo de { token, ref } donde `ref` es la DocumentReference del
+/// user dueño del token. `message` debe traer ya notification/data/android/apns
+/// (sin `tokens`). Devuelve { sent, pruned }.
+async function _sendMulticastAndPrune(entries, message) {
+  const { getMessaging } = require("firebase-admin/messaging");
+  const DEAD = new Set([
+    "messaging/registration-token-not-registered",
+    "messaging/invalid-registration-token",
+    "messaging/invalid-argument",
+  ]);
+  let sent = 0;
+  let pruned = 0;
+  for (let i = 0; i < entries.length; i += 500) {
+    const chunk = entries.slice(i, i + 500);
+    const resp = await getMessaging().sendEachForMulticast({
+      ...message,
+      tokens: chunk.map((e) => e.token),
+    });
+    sent += resp.successCount;
+    const batch = db.batch();
+    let toPrune = 0;
+    resp.responses.forEach((r, idx) => {
+      if (!r.success && r.error && DEAD.has(r.error.code)) {
+        batch.update(chunk[idx].ref, { fcmToken: FieldValue.delete() });
+        toPrune++;
+      }
+    });
+    if (toPrune > 0) {
+      await batch.commit();
+      pruned += toPrune;
+    }
+  }
+  return { sent, pruned };
+}
+
 /// Helper interno para enviar FCM a un uid usando el fcmToken guardado.
 async function _sendFcmToUid(uid, payload, data = {}) {
   const u = await db.collection("users").doc(uid).get();
@@ -2626,19 +2663,17 @@ async function _sendFcmToRoles(associationId, roles, payload, data = {}) {
   const snap = await db
     .collection("users")
     .where("associationId", "==", associationId)
-    .where("status", "==", "active")
+    .where("status", "in", ["active", "paymentPending"])
     .get();
-  const tokens = [];
+  const entries = [];
   for (const u of snap.docs) {
     const d = u.data();
     if (!roles.includes(d.role)) continue;
     const t = d.fcmToken;
-    if (typeof t === "string" && t.length > 0) tokens.push(t);
+    if (typeof t === "string" && t.length > 0) entries.push({ token: t, ref: u.ref });
   }
-  if (tokens.length === 0) return 0;
-  const { getMessaging } = require("firebase-admin/messaging");
-  await getMessaging().sendEachForMulticast({
-    tokens,
+  if (entries.length === 0) return 0;
+  const { sent, pruned } = await _sendMulticastAndPrune(entries, {
     notification: { title: payload.title, body: payload.body },
     data: Object.fromEntries(
       Object.entries(data).map(([k, v]) => [k, String(v)]),
@@ -2654,7 +2689,8 @@ async function _sendFcmToRoles(associationId, roles, payload, data = {}) {
     },
     apns: { payload: { aps: { sound: "default" } } },
   });
-  return tokens.length;
+  console.log(`[_sendFcmToRoles] sent=${sent} pruned=${pruned} tokens=${entries.length}`);
+  return entries.length;
 }
 
 /// Helper: envía la MISMA push a TODOS los usuarios activos de la plataforma
@@ -2665,39 +2701,35 @@ async function _sendFcmGlobalToRoles(roles, payload, data = {}) {
   if (!Array.isArray(roles) || roles.length === 0) return 0;
   const snap = await db
     .collection("users")
-    .where("status", "==", "active")
+    .where("status", "in", ["active", "paymentPending"])
     .get();
-  const tokens = [];
+  const entries = [];
   for (const u of snap.docs) {
     const d = u.data();
     if (!roles.includes(d.role)) continue;
     const t = d.fcmToken;
-    if (typeof t === "string" && t.length > 0) tokens.push(t);
+    if (typeof t === "string" && t.length > 0) entries.push({ token: t, ref: u.ref });
   }
-  if (tokens.length === 0) return 0;
-  const { getMessaging } = require("firebase-admin/messaging");
+  if (entries.length === 0) return 0;
   const dataStr = Object.fromEntries(
     Object.entries(data).map(([k, v]) => [k, String(v)]),
   );
-  for (let i = 0; i < tokens.length; i += 500) {
-    const chunk = tokens.slice(i, i + 500);
-    await getMessaging().sendEachForMulticast({
-      tokens: chunk,
-      notification: { title: payload.title, body: payload.body },
-      data: dataStr,
-      android: {
-        priority: "high",
-        notification: {
-          sound: "default",
-          channelId: "taxi_default",
-          defaultSound: true,
-          defaultVibrateTimings: true,
-        },
+  const { sent, pruned } = await _sendMulticastAndPrune(entries, {
+    notification: { title: payload.title, body: payload.body },
+    data: dataStr,
+    android: {
+      priority: "high",
+      notification: {
+        sound: "default",
+        channelId: "taxi_default",
+        defaultSound: true,
+        defaultVibrateTimings: true,
       },
-      apns: { payload: { aps: { sound: "default" } } },
-    });
-  }
-  return tokens.length;
+    },
+    apns: { payload: { aps: { sound: "default" } } },
+  });
+  console.log(`[_sendFcmGlobalToRoles] sent=${sent} pruned=${pruned} tokens=${entries.length}`);
+  return entries.length;
 }
 
 /// Último pago validado y NO anulado del conductor.
@@ -3299,23 +3331,20 @@ async function _runDispatchScheduledNotifications() {
       let usersQuery = db
         .collection("users")
         .where("associationId", "==", n.associationId)
-        .where("status", "==", "active");
+        .where("status", "in", ["active", "paymentPending"]);
       if (n.audience === "drivers") {
         usersQuery = usersQuery.where("role", "==", "conductor");
       } else if (n.audience === "operadoras") {
         usersQuery = usersQuery.where("role", "==", "operadora");
       }
       const usersSnap = await usersQuery.get();
-      const tokens = [];
+      const entries = [];
       for (const u of usersSnap.docs) {
         const fcm = u.data().fcmToken;
-        if (typeof fcm === "string" && fcm.length > 0) tokens.push(fcm);
+        if (typeof fcm === "string" && fcm.length > 0) entries.push({ token: fcm, ref: u.ref });
       }
-      if (tokens.length > 0) {
-        // Importar messaging on-demand para no romper deploys donde no se usa.
-        const { getMessaging } = require("firebase-admin/messaging");
-        await getMessaging().sendEachForMulticast({
-          tokens,
+      if (entries.length > 0) {
+        const { sent, pruned } = await _sendMulticastAndPrune(entries, {
           notification: { title: n.title || "Aviso", body: n.body || "" },
           data: { type: "admin_notification", notifId: d.id },
           android: {
@@ -3331,13 +3360,14 @@ async function _runDispatchScheduledNotifications() {
             payload: { aps: { sound: "default" } },
           },
         });
+        console.log(`[dispatchNotif] ${d.id} sent=${sent} pruned=${pruned} tokens=${entries.length}`);
       }
       // TTL 72h: si el creador no seteó expiresAt, lo derivamos aquí
       // como now + 72h. Después purgeExpiredNotifications borra el doc.
       const update = {
         status: "dispatched",
         dispatchedAt: FieldValue.serverTimestamp(),
-        recipientsCount: tokens.length,
+        recipientsCount: entries.length,
       };
       if (!n.expiresAt) {
         const exp = new Date();
