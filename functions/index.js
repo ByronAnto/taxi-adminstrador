@@ -18,7 +18,7 @@ const {
   fareForHour,
   localDateHourEC,
 } = require("./lib/tripStats");
-const { computeNextDueAtForUser } = require("./lib/dueDate");
+const { computeNextDueAtForUser, decideDuesAction } = require("./lib/dueDate");
 
 initializeApp();
 const db = getFirestore();
@@ -3099,6 +3099,224 @@ exports.checkSubscriptionsNow = onCall({}, async (request) => {
   requireSuperAdmin(request);
   const summary = await _runSubscriptionCheck();
   return { ok: true, ...summary };
+});
+
+// ═══════════════════════════════════════════════════════════════════
+//  enforceMembershipDues — cron unificado de morosidad (Bloque D / Fase 2).
+//
+//  Estado: SHADOW. Corre a las 00:45 (después de los 3 crones viejos:
+//  enforcePayments 00:00, checkSubscriptions 00:05, checkDriverDues 00:30).
+//  Los 3 viejos SIGUEN siendo la fuente de verdad: este cron NO escribe
+//  status mientras `mode` != "live" (y "live" aún no está habilitado).
+//
+//  Modo leído de la bandera Firestore `app_config/duesEnforcement.mode`:
+//    - "off"    → no hace nada.
+//    - "shadow" → calcula qué bloquearía/reactivaría y lo loguea en
+//                 `duesShadowLog/{YYYY-MM-DD}` (NO escribe status). DEFAULT
+//                 seguro si el doc no existe o falla la lectura.
+//    - "live"   → reservado; por ahora se comporta como shadow + warn
+//                 (el cutover real a escritura es un paso posterior).
+//
+//  El ahorro N+1: una sola query de candidatos (status==active &
+//  nextDueAt<=now) en vez de escanear todos los users por asociación.
+//  `_hasActivePermit` se ejecuta SOLO sobre los candidatos vencidos.
+// ═══════════════════════════════════════════════════════════════════
+
+const DUES_ENFORCEMENT_FLAG = { collection: "app_config", doc: "duesEnforcement" };
+
+/// Lee el modo de la bandera. Default "shadow" (seguro: nunca escribe status)
+/// si el doc no existe o la lectura falla.
+async function _readDuesEnforcementMode() {
+  try {
+    const snap = await db
+      .collection(DUES_ENFORCEMENT_FLAG.collection)
+      .doc(DUES_ENFORCEMENT_FLAG.doc)
+      .get();
+    if (!snap.exists) return "shadow";
+    const mode = snap.data()?.mode;
+    if (mode === "off" || mode === "shadow" || mode === "live") return mode;
+    return "shadow";
+  } catch (e) {
+    console.error("[enforceMembershipDues] flag read failed, default shadow", e);
+    return "shadow";
+  }
+}
+
+/// Módulo conductores en modo read-only: calcula qué uids se BLOQUEARÍAN y
+/// cuáles se REACTIVARÍAN, sin escribir nada. Devuelve { wouldBlock, wouldReactivate }.
+/// Usa la decisión pura `decideDuesAction` para cada candidato.
+async function _computeDriverDuesShadow(now) {
+  const wouldBlock = [];
+  const wouldReactivate = [];
+
+  // ── Candidatos a BLOQUEAR: activos con vencimiento <= now ──
+  // Una sola query (índice users(status, nextDueAt)); sin N+1.
+  const blockSnap = await db
+    .collection("users")
+    .where("status", "==", "active")
+    .where("nextDueAt", "<=", now)
+    .select("nextDueAt", "approvedAt", "role", "associationId")
+    .get();
+
+  // `_hasActivePermit` solo se evalúa sobre estos candidatos (decenas),
+  // que es lo que elimina el N+1 sobre TODOS los conductores.
+  for (const uDoc of blockSnap.docs) {
+    const u = uDoc.data();
+    // Pre-filtro de rol barato para no consultar permisos de no-elegibles.
+    if (!["conductor", "admin"].includes(u.role)) continue;
+    const hasPermit = await _hasActivePermit(uDoc.id, u.nextDueAt?.toDate?.() || u.nextDueAt);
+    const action = decideDuesAction({
+      status: "active",
+      role: u.role,
+      nextDueAt: u.nextDueAt,
+      now,
+      hasPermit,
+    });
+    if (action === "WOULD_BLOCK") wouldBlock.push(uDoc.id);
+  }
+
+  // ── Candidatos a REACTIVAR: bloqueados por cuota con vencimiento futuro ──
+  const reactSnap = await db
+    .collection("users")
+    .where("status", "==", "paymentBlocked")
+    .where("blockReason", "==", "cuota_vencida")
+    .where("nextDueAt", ">", now)
+    .select("nextDueAt", "role")
+    .get();
+
+  for (const uDoc of reactSnap.docs) {
+    const u = uDoc.data();
+    const action = decideDuesAction({
+      status: "paymentBlocked",
+      role: u.role,
+      blockReason: "cuota_vencida",
+      nextDueAt: u.nextDueAt,
+      now,
+    });
+    if (action === "WOULD_REACTIVATE") wouldReactivate.push(uDoc.id);
+  }
+
+  return { wouldBlock, wouldReactivate };
+}
+
+/// Módulo SaaS de asociaciones en modo read-only: replica el CÁLCULO de
+/// `_runSubscriptionCheck` (gracia 3d, expired/active) SIN escribir nada.
+/// NO modifica la función vieja: duplica solo la decisión en read-only.
+/// Devuelve { wouldExpire: [assocIds], wouldReactivate: [assocIds] }.
+async function _computeSubscriptionsShadow() {
+  const now = new Date();
+  const wouldExpire = [];
+  const wouldReactivate = [];
+
+  const associationsSnap = await db.collection("associations").get();
+  for (const aDoc of associationsSnap.docs) {
+    const a = aDoc.data();
+    const trialEndsAt = a.trialEndsAt?.toDate?.() || a.trialEndsAt || null;
+    const paidUntil = a.paidUntil?.toDate?.() || a.paidUntil || null;
+    const expiresAt = paidUntil || trialEndsAt;
+    if (!expiresAt) continue; // legacy: no se toca
+
+    const isExpired = expiresAt < now;
+    const newStatus = isExpired ? "expired" : "active";
+    if (a.status !== newStatus) {
+      if (newStatus === "expired") wouldExpire.push(aDoc.id);
+      else wouldReactivate.push(aDoc.id);
+    }
+  }
+
+  return { wouldExpire, wouldReactivate };
+}
+
+/// Núcleo del cron: lee modo, calcula shadow y persiste el resumen en
+/// `duesShadowLog/{YYYY-MM-DD}`. NO escribe status en ningún caso por ahora.
+async function _runEnforceMembershipDues() {
+  const now = Timestamp.now();
+  const mode = await _readDuesEnforcementMode();
+  const dateKey = now.toDate().toISOString().substring(0, 10); // YYYY-MM-DD (UTC)
+
+  console.log(`[enforceMembershipDues] start mode=${mode} ${now.toDate().toISOString()}`);
+
+  if (mode === "off") {
+    console.log("[enforceMembershipDues] mode=off, no-op");
+    return {
+      mode,
+      counts: { wouldBlock: 0, wouldReactivate: 0 },
+      wouldBlock: [],
+      wouldReactivate: [],
+      subscriptions: { wouldExpire: [], wouldReactivate: [] },
+    };
+  }
+
+  if (mode === "live") {
+    // Branch preparado. El cutover real a escritura de status es un paso
+    // posterior con revisión del dueño: por ahora se comporta como shadow.
+    console.warn("[enforceMembershipDues] live mode not yet enabled — running as shadow");
+  }
+
+  const drivers = await _computeDriverDuesShadow(now);
+  const subscriptions = await _computeSubscriptionsShadow();
+
+  const summary = {
+    runAt: now,
+    mode,
+    wouldBlock: drivers.wouldBlock,
+    wouldReactivate: drivers.wouldReactivate,
+    counts: {
+      wouldBlock: drivers.wouldBlock.length,
+      wouldReactivate: drivers.wouldReactivate.length,
+    },
+    subscriptions: {
+      wouldExpire: subscriptions.wouldExpire,
+      wouldReactivate: subscriptions.wouldReactivate,
+    },
+  };
+
+  // Persistir el resumen para comparar contra lo que hicieron los crones viejos.
+  await db
+    .collection("duesShadowLog")
+    .doc(dateKey)
+    .set(summary, { merge: true });
+
+  console.log(
+    "[enforceMembershipDues] summary",
+    JSON.stringify({
+      mode,
+      counts: summary.counts,
+      wouldBlock: summary.wouldBlock,
+      wouldReactivate: summary.wouldReactivate,
+      subscriptions: summary.subscriptions,
+    }),
+  );
+
+  return summary;
+}
+
+exports.enforceMembershipDues = onSchedule(
+  {
+    schedule: "45 0 * * *", // 00:45 — después de los 3 crones viejos
+    timeZone: "America/Guayaquil",
+    timeoutSeconds: 540,
+    memory: "256MiB",
+    retryCount: 1,
+  },
+  async () => {
+    return await _runEnforceMembershipDues();
+  },
+);
+
+/// Trigger manual super-admin para disparar el shadow sin esperar a las 00:45.
+exports.enforceMembershipDuesNow = onCall({}, async (request) => {
+  requireSuperAdmin(request);
+  const summary = await _runEnforceMembershipDues();
+  // `runAt` es un Timestamp; devolverlo como ISO para el cliente.
+  return {
+    ok: true,
+    mode: summary.mode,
+    counts: summary.counts,
+    wouldBlock: summary.wouldBlock,
+    wouldReactivate: summary.wouldReactivate,
+    subscriptions: summary.subscriptions,
+  };
 });
 
 // ───────────────────────────────────────────────────────────────────
