@@ -2834,42 +2834,52 @@ async function _sendFcmToRoles(associationId, roles, payload, data = {}) {
 
 /// Helper: envía la MISMA push a TODOS los usuarios activos de la plataforma
 /// (todas las asociaciones) cuyo rol esté en `roles`. Usado para avisos
-/// globales como los eventos de Quito. Trocea en lotes de 500 tokens (límite
-/// de sendEachForMulticast). Devuelve cuántos tokens se intentaron.
+/// globales como los eventos de Quito.
+///
+/// OPTIMIZACIÓN DE COSTO (audit §4): antes leía TODA la colección `users` en
+/// cada envío (la query más cara a escala). Ahora usa FCM topics por rol:
+/// envía un único mensaje a `role_<rol>` por cada rol, sin leer Firestore.
+/// El cliente (app) suscribe a cada usuario al topic `role_<su rol>` al iniciar
+/// sesión (convención: role_conductor, role_admin, role_operadora).
+///
+/// NOTA DE TRANSICIÓN: con topics solo reciben los usuarios cuya app los
+/// suscribió a `role_<rol>`. Como se va a redistribuir el APK nuevo (que
+/// suscribe), todos los usuarios activos quedarán suscritos. Es aceptable para
+/// este broadcast (eventos Quito).
+///
+/// Conserva la firma `(roles, payload, data)`. Devuelve el nº de topics a los
+/// que se envió (ya no el nº de tokens). No limpia tokens muertos (FCM gestiona
+/// la entrega por topic).
 async function _sendFcmGlobalToRoles(roles, payload, data = {}) {
   if (!Array.isArray(roles) || roles.length === 0) return 0;
-  const snap = await db
-    .collection("users")
-    .where("status", "in", ["active", "paymentPending"])
-    .select("fcmToken", "role")
-    .get();
-  const entries = [];
-  for (const u of snap.docs) {
-    const d = u.data();
-    if (!roles.includes(d.role)) continue;
-    const t = d.fcmToken;
-    if (typeof t === "string" && t.length > 0) entries.push({ token: t, ref: u.ref });
-  }
-  if (entries.length === 0) return 0;
   const dataStr = Object.fromEntries(
     Object.entries(data).map(([k, v]) => [k, String(v)]),
   );
-  const { sent, pruned } = await _sendMulticastAndPrune(entries, {
-    notification: { title: payload.title, body: payload.body },
-    data: dataStr,
-    android: {
-      priority: "high",
-      notification: {
-        sound: "default",
-        channelId: "taxi_default",
-        defaultSound: true,
-        defaultVibrateTimings: true,
-      },
-    },
-    apns: { payload: { aps: { sound: "default" } } },
-  });
-  console.log(`[_sendFcmGlobalToRoles] sent=${sent} pruned=${pruned} tokens=${entries.length}`);
-  return entries.length;
+  let sent = 0;
+  for (const role of roles) {
+    try {
+      await getMessaging().send({
+        topic: `role_${role}`,
+        notification: { title: payload.title, body: payload.body },
+        data: dataStr,
+        android: {
+          priority: "high",
+          notification: {
+            sound: "default",
+            channelId: "taxi_default",
+            defaultSound: true,
+            defaultVibrateTimings: true,
+          },
+        },
+        apns: { payload: { aps: { sound: "default" } } },
+      });
+      sent++;
+    } catch (e) {
+      console.warn(`_sendFcmGlobalToRoles topic role_${role} fail:`, e.message);
+    }
+  }
+  console.log(`_sendFcmGlobalToRoles: enviado a ${sent} topics (${roles.join(",")})`);
+  return sent;
 }
 
 /// Último pago validado y NO anulado del conductor.
