@@ -18,6 +18,7 @@ const {
   fareForHour,
   localDateHourEC,
 } = require("./lib/tripStats");
+const { computeNextDueAtForUser } = require("./lib/dueDate");
 
 initializeApp();
 const db = getFirestore();
@@ -421,11 +422,27 @@ exports.approveDriver = onCall({}, async (request) => {
     );
   }
 
+  // Materializar nextDueAt (cuota interna) de forma ADITIVA. La aprobación
+  // ocurre ahora, así que usamos la fecha actual como approvedAt para el
+  // cómputo preciso (el campo approvedAt persistido sigue siendo serverTimestamp).
+  const aSnapForDue = await db.collection("associations").doc(aid).get();
+  const billingConfigForDue = aSnapForDue.exists
+    ? aSnapForDue.data().billingConfig || null
+    : null;
+  const nextDueAt = computeNextDueAtForUser({
+    approvedAt: new Date(),
+    lastPayment: null,
+    billingConfig: billingConfigForDue,
+  });
+
   await driverRef.update({
     status: "active",
     approvedBy: auth.uid,
     approvedAt: FieldValue.serverTimestamp(),
     updatedAt: FieldValue.serverTimestamp(),
+    nextDueAt: nextDueAt ? Timestamp.fromDate(nextDueAt) : null,
+    lastValidatedPaymentAt: null,
+    dueComputeVersion: 1,
   });
 
   // Si el rol del usuario es 'conductor', garantizamos que también
@@ -1302,6 +1319,37 @@ exports.validatePayment = onCall({}, async (request) => {
         body: "Tu pago fue aprobado. Ya puedes operar normalmente.",
       }).catch(() => {});
     }
+
+    // Materializar nextDueAt (ADITIVO): si el pago validado es la cuota interna
+    // (concepto == billingConfig.defaultConcept), recalcular el próximo
+    // vencimiento usando este pago como último pago validado. NO altera el
+    // path de reactivación de arriba.
+    const aSnapForDue = await db
+      .collection("associations")
+      .doc(payment.associationId)
+      .get();
+    const billingConfigForDue = aSnapForDue.exists
+      ? aSnapForDue.data().billingConfig || null
+      : null;
+    const defaultConcept = billingConfigForDue
+      ? billingConfigForDue.defaultConcept
+      : null;
+    if (billingConfigForDue && payment.concept === defaultConcept) {
+      // El pago se acaba de validar con validatedAt=serverTimestamp (pendiente),
+      // así que usamos la fecha actual como validatedAt para el cómputo preciso.
+      const validatedAtForDue = new Date();
+      const nextDueAt = computeNextDueAtForUser({
+        approvedAt: d.approvedAt || null,
+        lastPayment: { validatedAt: validatedAtForDue },
+        billingConfig: billingConfigForDue,
+      });
+      await driverSnap.ref.update({
+        nextDueAt: nextDueAt ? Timestamp.fromDate(nextDueAt) : null,
+        lastValidatedPaymentAt: Timestamp.fromDate(validatedAtForDue),
+        dueComputeVersion: 1,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
   }
 
   // Auto-cashflow: cuando se valida un pago, crear espejo de ingreso
@@ -1452,6 +1500,36 @@ exports.voidPayment = onCall({}, async (request) => {
       title: "Pago anulado",
       body: `Un pago tuyo fue anulado. Motivo: ${reason}. Tu cuenta está bloqueada.`,
     }).catch(() => {});
+
+    // Materializar nextDueAt (ADITIVO): tras anular, el último pago no anulado
+    // pudo cambiar; recomputamos. NO toca la lógica de bloqueo por pago_anulado.
+    // _lastValidatedPayment ya filtra los anulados (este pago ya tiene voidedAt).
+    const driverDueSnap = await db.collection("users").doc(p.driverId).get();
+    const driverDue = driverDueSnap.exists ? driverDueSnap.data() : null;
+    const aSnapForDue = await db
+      .collection("associations")
+      .doc(p.associationId)
+      .get();
+    const billingConfigForDue = aSnapForDue.exists
+      ? aSnapForDue.data().billingConfig || null
+      : null;
+    if (driverDue && billingConfigForDue) {
+      const lastPayment = await _lastValidatedPayment(p.driverId, p.associationId);
+      const nextDueAt = computeNextDueAtForUser({
+        approvedAt: driverDue.approvedAt || null,
+        lastPayment: lastPayment ? { validatedAt: lastPayment.validatedAt } : null,
+        billingConfig: billingConfigForDue,
+      });
+      await driverDueSnap.ref.update({
+        nextDueAt: nextDueAt ? Timestamp.fromDate(nextDueAt) : null,
+        lastValidatedPaymentAt:
+          lastPayment && lastPayment.validatedAt
+            ? lastPayment.validatedAt
+            : null,
+        dueComputeVersion: 1,
+        updatedAt: FieldValue.serverTimestamp(),
+      });
+    }
   }
 
   // Si el pago tenía un cashflow vinculado (auto-generado al validar),
@@ -1922,10 +2000,64 @@ exports.updateBillingConfig = onCall({}, async (request) => {
     multaPorDiaAtraso: Math.max(0, Number(billingConfig.multaPorDiaAtraso) || 0),
   };
 
-  await db.collection("associations").doc(associationId).update({
+  // Leer config previa para detectar cambios que afectan el cómputo de
+  // vencimiento (período, dueDay o amount).
+  const aRef = db.collection("associations").doc(associationId);
+  const aSnapPrev = await aRef.get();
+  const prevCfg = aSnapPrev.exists ? aSnapPrev.data().billingConfig || {} : {};
+
+  await aRef.update({
     billingConfig: cleaned,
     updatedAt: FieldValue.serverTimestamp(),
   });
+
+  // Si cambió período/dueDay/amount, recomputar nextDueAt de los conductores
+  // de esta asociación (ADITIVO; en batches de 450). Reusa _lastValidatedPayment
+  // por conductor (poco frecuente, aceptable).
+  const dueRelevantChanged =
+    Number(prevCfg.amount || 0) !== cleaned.amount ||
+    Number(prevCfg.dueDay || 1) !== cleaned.dueDay ||
+    (prevCfg?.period?.every || 1) !== cleaned.period.every ||
+    (prevCfg?.period?.unit || "month") !== cleaned.period.unit;
+
+  if (dueRelevantChanged) {
+    const driversSnap = await db
+      .collection("users")
+      .where("associationId", "==", associationId)
+      .where("role", "in", ["conductor", "admin"])
+      .select("approvedAt", "role")
+      .get();
+
+    const CHUNK = 450;
+    const docs = driversSnap.docs;
+    for (let i = 0; i < docs.length; i += CHUNK) {
+      const slice = docs.slice(i, i + CHUNK);
+      const batch = db.batch();
+      for (const uDoc of slice) {
+        const u = uDoc.data();
+        const lastPayment = await _lastValidatedPayment(uDoc.id, associationId);
+        const nextDueAt = computeNextDueAtForUser({
+          approvedAt: u.approvedAt || null,
+          lastPayment: lastPayment ? { validatedAt: lastPayment.validatedAt } : null,
+          billingConfig: cleaned,
+        });
+        batch.set(
+          uDoc.ref,
+          {
+            nextDueAt: nextDueAt ? Timestamp.fromDate(nextDueAt) : null,
+            lastValidatedPaymentAt:
+              lastPayment && lastPayment.validatedAt
+                ? lastPayment.validatedAt
+                : null,
+            dueComputeVersion: 1,
+            updatedAt: FieldValue.serverTimestamp(),
+          },
+          { merge: true }
+        );
+      }
+      await batch.commit();
+    }
+  }
 
   return { ok: true };
 });
