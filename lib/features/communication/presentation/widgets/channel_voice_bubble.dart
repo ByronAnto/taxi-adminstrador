@@ -1,6 +1,11 @@
+import 'dart:io';
+
 import 'package:audioplayers/audioplayers.dart';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:intl/intl.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../data/models/channel_model.dart';
 
@@ -37,6 +42,17 @@ class _ChannelVoiceBubbleState extends State<ChannelVoiceBubble> {
   Duration _position = Duration.zero;
   Duration _total = Duration.zero;
   bool _playing = false;
+  bool _sharing = false;
+
+  /// Etiqueta del hablante: "Unidad #N · Nombre" si trae unidad, si no solo el
+  /// nombre. Para mis propios audios, "Tú".
+  String get _speakerLabel {
+    final msg = widget.message;
+    if (widget.isMe) return 'Tú';
+    final unidad = msg.senderVehiculo?.trim() ?? '';
+    if (unidad.isNotEmpty) return 'Unidad #$unidad · ${msg.senderName}';
+    return msg.senderName;
+  }
 
   @override
   void initState() {
@@ -79,6 +95,43 @@ class _ChannelVoiceBubbleState extends State<ChannelVoiceBubble> {
     }
   }
 
+  /// Comparte el audio (WhatsApp, etc.). Como el `.wav` vive en una URL remota,
+  /// hay que descargarlo a un archivo temporal antes de compartirlo con
+  /// `share_plus` (no comparte URLs remotas como archivo).
+  Future<void> _share() async {
+    final msg = widget.message;
+    final url = msg.audioUrl;
+    if (url == null || url.isEmpty || _sharing) return;
+    setState(() => _sharing = true);
+    try {
+      final resp =
+          await http.get(Uri.parse(url)).timeout(const Duration(seconds: 20));
+      if (resp.statusCode != 200) throw Exception('HTTP ${resp.statusCode}');
+
+      final dir = await getTemporaryDirectory();
+      final file = File('${dir.path}/audio_${msg.uid}.wav');
+      await file.writeAsBytes(resp.bodyBytes);
+
+      final time = DateFormat('dd MMM HH:mm').format(msg.createdAt);
+      final caption = 'Audio de $_speakerLabel — $time';
+      await Share.shareXFiles(
+        [XFile(file.path, mimeType: 'audio/wav', name: 'audio_${msg.uid}.wav')],
+        subject: 'Audio walkie-talkie',
+        text: caption,
+      );
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('No se pudo descargar el audio para compartir'),
+          ),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _sharing = false);
+    }
+  }
+
   String _fmt(Duration d) {
     final m = d.inMinutes.remainder(60).toString().padLeft(2, '0');
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
@@ -113,7 +166,7 @@ class _ChannelVoiceBubbleState extends State<ChannelVoiceBubble> {
                 const SizedBox(width: 8),
                 Expanded(
                   child: Text(
-                    widget.isMe ? 'Tú' : msg.senderName,
+                    _speakerLabel,
                     style: TextStyle(
                       fontWeight: FontWeight.w600,
                       fontSize: 14,
@@ -166,6 +219,20 @@ class _ChannelVoiceBubbleState extends State<ChannelVoiceBubble> {
                     ],
                   ),
                 ),
+                _sharing
+                    ? const Padding(
+                        padding: EdgeInsets.all(12),
+                        child: SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                    : IconButton(
+                        onPressed: _share,
+                        tooltip: 'Compartir',
+                        icon: const Icon(Icons.share, size: 22),
+                      ),
               ],
             ),
           ],

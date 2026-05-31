@@ -64,19 +64,22 @@ async function getAssociationId(channelId) {
   return aid;
 }
 
-async function getUserName(uid) {
+// Resuelve nombre + número de unidad del usuario (cacheado). El nombre cae al
+// uid si no se encuentra; la unidad cae a "" (la app muestra solo el nombre).
+async function getUserInfo(uid) {
   if (userNames.has(uid)) return userNames.get(uid);
-  let name = uid;
+  let info = { name: uid, vehiculo: "" };
   try {
     const snap = await db.collection("users").doc(uid).get();
     if (snap.exists) {
       const d = snap.data();
       const full = `${d.name || ""} ${d.lastName || d.lastname || ""}`.trim();
-      if (full) name = full;
+      if (full) info.name = full;
+      info.vehiculo = String(d.numeroVehiculo || "").trim();
     }
   } catch (_) { /* noop */ }
-  userNames.set(uid, name);
-  return name;
+  userNames.set(uid, info);
+  return info;
 }
 
 // ── Escritura WAV (PCM16 mono/estéreo) ──
@@ -236,13 +239,16 @@ async function finalizeSeg(segs, sid, roomName) {
   }
   const durationSeconds = Math.max(1, Math.round(durMs / 1000));
   const aid = await getAssociationId(roomName);
-  const senderName = await getUserName(s.identity);
+  const { name: senderName, vehiculo: senderVehiculo } = await getUserInfo(
+    s.identity,
+  );
   try {
     await db.collection(MESSAGES_COLLECTION).add({
       associationId: aid,
       channelId: roomName,
       senderId: s.identity,
       senderName,
+      senderVehiculo,
       type: "voz",
       audioUrl: `${PUBLIC_BASE}/${rel}`,
       durationSeconds,

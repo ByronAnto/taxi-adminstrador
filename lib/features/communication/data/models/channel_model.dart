@@ -150,6 +150,12 @@ class MessageModel {
   final String channelId;
   final String senderId;
   final String senderName;
+
+  /// Número de unidad/vehículo de quien envió (resuelto por el bot grabador
+  /// desde `users/{uid}.numeroVehiculo`). Vacío/null en mensajes viejos o de
+  /// usuarios sin unidad. Se muestra como "Unidad #N · Nombre".
+  final String? senderVehiculo;
+
   final String type; // texto, voz
   final String? text;
   final String? audioBase64; // audio codificado en base64 para PTT cortos
@@ -169,6 +175,7 @@ class MessageModel {
     required this.channelId,
     required this.senderId,
     required this.senderName,
+    this.senderVehiculo,
     required this.type,
     this.text,
     this.audioBase64,
@@ -185,6 +192,7 @@ class MessageModel {
       channelId: data['channelId'] ?? '',
       senderId: data['senderId'] ?? '',
       senderName: data['senderName'] ?? '',
+      senderVehiculo: data['senderVehiculo'] as String?,
       type: data['type'] ?? 'texto',
       text: data['text'],
       audioBase64: data['audioBase64'],
@@ -200,6 +208,7 @@ class MessageModel {
       'channelId': channelId,
       'senderId': senderId,
       'senderName': senderName,
+      'senderVehiculo': senderVehiculo,
       'type': type,
       'text': text,
       'audioBase64': audioBase64,
