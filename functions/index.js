@@ -3561,6 +3561,47 @@ exports.purgeOldChannelMessages = onSchedule(
   }
 );
 
+// ───────────────────────────────────────────────────────────────────
+//  purgeOldGroupChat — cron cada hora.
+//  Borra los mensajes del CHAT GRUPAL de cada asociación
+//  (collectionGroup `groupMessages` bajo associationChats/{aid}/) con más
+//  de 24h por `createdAt`. Mantiene el chat del grupo efímero (24h).
+//  Clon de _runPurgeOldChannelMessages usando collectionGroup.
+// ───────────────────────────────────────────────────────────────────
+async function _runPurgeOldGroupChat() {
+  const cutoff = Timestamp.fromMillis(Date.now() - 24 * 60 * 60 * 1000);
+  let deleted = 0;
+  for (let i = 0; i < 50; i++) {
+    const snap = await db
+      .collectionGroup("groupMessages")
+      .where("createdAt", "<=", cutoff)
+      .limit(300)
+      .get();
+    if (snap.empty) break;
+    const batch = db.batch();
+    snap.docs.forEach((d) => batch.delete(d.ref));
+    await batch.commit();
+    deleted += snap.size;
+    if (snap.size < 300) break;
+  }
+  return { deleted };
+}
+
+exports.purgeOldGroupChat = onSchedule(
+  {
+    schedule: "40 * * * *", // cada hora, minuto 40 (desfasado de los otros purges)
+    timeZone: "America/Guayaquil",
+    timeoutSeconds: 540,
+    memory: "256MiB",
+    retryCount: 1,
+  },
+  async () => {
+    const summary = await _runPurgeOldGroupChat();
+    console.log("purgeOldGroupChat:", JSON.stringify(summary));
+    return summary;
+  }
+);
+
 exports.purgeOldChatMessagesNow = onCall({}, async (request) => {
   requireSuperAdmin(request);
   return await _runPurgeOldChatMessages();
