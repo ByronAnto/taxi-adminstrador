@@ -13,6 +13,7 @@ import '../../../../core/widgets/payment_pending_banner.dart';
 import '../../../map/presentation/pages/map_page.dart';
 import '../../../communication/presentation/pages/walkie_talkie_page.dart';
 import '../../../chat/presentation/pages/chat_list_page.dart';
+import '../../../group_chat/data/group_unread_service.dart';
 import '../../../payments/presentation/widgets/due_date_banner.dart';
 import '../widgets/dashboard_kpis.dart';
 import '../widgets/notifications_bell_button.dart';
@@ -221,11 +222,16 @@ class _HomePageState extends State<HomePage> {
                     ),
                   ),
                   Expanded(
-                    child: _NavBarItem(
-                      icon: Icons.chat,
-                      label: 'Chat',
-                      selected: _currentIndex == 3,
-                      onTap: () => setState(() => _currentIndex = 3),
+                    child: ValueListenableBuilder<int>(
+                      valueListenable:
+                          GroupUnreadService.instance.unreadNotifier,
+                      builder: (context, unread, _) => _NavBarItem(
+                        icon: Icons.chat,
+                        label: 'Chat',
+                        selected: _currentIndex == 3,
+                        badgeCount: unread,
+                        onTap: () => setState(() => _currentIndex = 3),
+                      ),
                     ),
                   ),
                   Expanded(
@@ -519,12 +525,14 @@ class _NavBarItem extends StatelessWidget {
   final String label;
   final bool selected;
   final VoidCallback onTap;
+  final int badgeCount;
 
   const _NavBarItem({
     required this.icon,
     required this.label,
     required this.selected,
     required this.onTap,
+    this.badgeCount = 0,
   });
 
   @override
@@ -537,7 +545,12 @@ class _NavBarItem extends StatelessWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(icon, color: color, size: 24),
+          badgeCount > 0
+              ? Badge(
+                  label: Text('$badgeCount'),
+                  child: Icon(icon, color: color, size: 24),
+                )
+              : Icon(icon, color: color, size: 24),
           const SizedBox(height: 2),
           Text(
             label,
