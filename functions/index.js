@@ -2665,6 +2665,7 @@ async function _sendFcmToRoles(associationId, roles, payload, data = {}) {
     .collection("users")
     .where("associationId", "==", associationId)
     .where("status", "in", ["active", "paymentPending"])
+    .select("fcmToken", "role")
     .get();
   const entries = [];
   for (const u of snap.docs) {
@@ -2703,6 +2704,7 @@ async function _sendFcmGlobalToRoles(roles, payload, data = {}) {
   const snap = await db
     .collection("users")
     .where("status", "in", ["active", "paymentPending"])
+    .select("fcmToken", "role")
     .get();
   const entries = [];
   for (const u of snap.docs) {
@@ -3338,7 +3340,7 @@ async function _runDispatchScheduledNotifications() {
       } else if (n.audience === "operadoras") {
         usersQuery = usersQuery.where("role", "==", "operadora");
       }
-      const usersSnap = await usersQuery.get();
+      const usersSnap = await usersQuery.select("fcmToken").get();
       const entries = [];
       for (const u of usersSnap.docs) {
         const fcm = u.data().fcmToken;
@@ -4355,6 +4357,7 @@ async function _runMarkStaleDriversOffline() {
     .collection("drivers")
     .where("isActive", "==", true)
     .where("updatedAt", "<", cutoff)
+    .select("updatedAt")
     .limit(500)
     .get();
 
@@ -4643,10 +4646,14 @@ exports.onGroupMessageCreated = onDocumentCreated(
     const senderId = msg.senderId;
 
     // Usuarios activos de la asociación (con uid del doc).
+    // tokensForAssociation re-verifica associationId y status sobre cada doc,
+    // así que el .select debe incluirlos además de fcmToken (uid sale del id
+    // del doc, no de un campo). status va también en el .where.
     const snap = await db
       .collection("users")
       .where("associationId", "==", aid)
       .where("status", "==", "active")
+      .select("fcmToken", "associationId", "status")
       .get();
 
     // Construimos entries {token, ref} aplicando la misma regla que
