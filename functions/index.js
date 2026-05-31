@@ -2395,7 +2395,7 @@ exports.purgeExpiredProofs = onSchedule(
     schedule: "every day 02:00",
     timeZone: "America/Guayaquil",
     timeoutSeconds: 540,
-    memory: "512MiB",
+    memory: "256MiB",
   },
   async (event) => {
     const now = new Date();
@@ -2577,7 +2577,7 @@ exports.enforcePayments = onSchedule(
   {
     schedule: "every day 00:00",
     timeZone: "America/Guayaquil",
-    memory: "512MiB",
+    memory: "256MiB",
     timeoutSeconds: 540,
   },
   async (event) => {
