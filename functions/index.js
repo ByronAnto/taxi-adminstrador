@@ -3709,9 +3709,10 @@ Reglas:
     return [];
   };
 
-  // Lista de modelos a probar en orden. Si gemini-2.5-flash está
-  // saturado (503), caemos a 2.0-flash que suele tener menos demanda.
-  const models = ["gemini-2.5-flash", "gemini-2.0-flash"];
+  // Lista de modelos a probar en orden. Si gemini-2.5-flash está saturado
+  // (503), caemos a 2.5-flash-lite (vivo y más barato). NOTA: gemini-2.0-flash
+  // se apagó el 2026-06-01, por eso NO se usa como fallback.
+  const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
   // Cada modelo se intenta primero con grounding, luego sin grounding.
   const variants = [
     { body: bodyGrounded, label: "grounded" },
