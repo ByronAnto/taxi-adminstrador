@@ -53,9 +53,12 @@ export default function Landing() {
           ¿Quiénes somos?
         </h2>
         <p className="mt-5 text-base sm:text-lg text-gray-700 max-w-3xl mx-auto text-center leading-relaxed">
-          Taxi Seguro Ecuador nace para{" "}
-          <strong>apoyar y dignificar al taxismo convencional</strong> — el taxi
-          legal de toda la vida. Modernizamos al gremio con tecnología, sin
+          Taxi Seguro Ecuador es una{" "}
+          <strong>asociación de taxis legalmente constituida</strong> — un{" "}
+          <strong>operador privado de transporte</strong> con una flota de más de{" "}
+          <strong>150 taxis legales y registrados</strong>, con rutas y paradas
+          asignadas en Quito y sus valles. Nacemos para apoyar y dignificar al
+          taxismo convencional, modernizando al gremio con tecnología, sin
           competencia desleal: orden, seguridad y movilidad para Quito.
         </p>
 
@@ -97,8 +100,9 @@ export default function Landing() {
       <section className="bg-primary">
         <div className="mx-auto max-w-6xl px-4 sm:px-6 py-12 text-center">
           <p className="text-lg sm:text-2xl font-semibold text-white max-w-3xl mx-auto leading-relaxed">
-            🌆 Movilidad para la ciudad — Colaboramos con datos de tránsito en
-            tiempo real para una Quito más ordenada, fluida y segura.
+            🌆 Movilidad para la ciudad — Nuestra flota aporta reportes de
+            cierres e incidentes viales en tiempo real para una Quito más
+            ordenada, fluida y segura.
           </p>
         </div>
       </section>
