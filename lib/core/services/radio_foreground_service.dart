@@ -5,6 +5,7 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:logger/logger.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+import '../../spike/livekit_isolate_spike.dart';
 import 'connectivity_service.dart';
 import 'driver_location_service.dart';
 
@@ -48,6 +49,13 @@ class RadioForegroundService {
   static void _onTaskData(Object data) {
     if (data == _kLocationTickSignal) {
       unawaited(DriverLocationService.instance.nativeHeartbeatPulse());
+    } else if (data == kSpikeNeedToken) {
+      // SPIKE: el handler del FGS pide el token; lo obtenemos en el main
+      // (autenticado) y se lo mandamos al isolate.
+      unawaited(spikeProvideTokenToHandler());
+    } else if (data is String && data.startsWith(kSpikeLogPrefix)) {
+      // SPIKE: log desde el isolate del FGS → debugPrint (lo sube RemoteLogService).
+      debugPrint('📻 $data');
     }
   }
 
@@ -434,6 +442,8 @@ class _RadioTaskHandler extends TaskHandler {
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     // El servicio arrancó. Los streams de Firestore siguen activos.
+    // SPIKE: pedir al main el token para conectar LiveKit EN ESTE isolate.
+    FlutterForegroundTask.sendDataToMain(kSpikeNeedToken);
   }
 
   @override
@@ -453,11 +463,16 @@ class _RadioTaskHandler extends TaskHandler {
   @override
   Future<void> onDestroy(DateTime timestamp) async {
     // Limpieza al detener el servicio.
+    // SPIKE: cerrar la conexión LiveKit del isolate.
+    await spikeHandlerDisconnect();
   }
 
   @override
   void onReceiveData(Object data) {
-    // Comunicación desde el main isolate (no necesaria por ahora).
+    // SPIKE: el main mandó {spike: connect/error, url, token, ...}.
+    if (data is Map) {
+      unawaited(spikeHandlerConnect(data));
+    }
   }
 
   @override
