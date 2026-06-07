@@ -5,6 +5,8 @@ import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
 import '../constants/app_constants.dart';
+import 'driver_presence_writer.dart';
+import 'location_fix_policy.dart';
 import 'radio_foreground_service.dart';
 
 /// Servicio global de ubicación del conductor.
@@ -121,6 +123,7 @@ class DriverLocationService extends ChangeNotifier {
   }
 
   final _firestore = FirebaseFirestore.instance;
+  late final DriverPresenceWriter _presence = DriverPresenceWriter(_firestore);
 
   // ─── Inicialización ──────────────────────────────────────
 
@@ -425,31 +428,10 @@ class DriverLocationService extends ChangeNotifier {
     if (!_isOnline || _driverId == null) return;
     debugPrint('📍 [LocationService] native FGS tick → pulso de ubicación '
         '(stationary=$_isStationary)');
-    try {
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.bestForNavigation,
-          timeLimit: Duration(seconds: 8),
-        ),
-      );
-      // Forzar el push: este tick es nuestro pulso garantizado, no puede
-      // quedar bloqueado por el throttle adaptativo de _onFix.
-      _lastPush = null;
-      _onFix(pos, source: 'native-tick');
-    } catch (_) {
-      // Sin fix nuevo en este intento (interior/cell). Repushear lo último
-      // conocido para que la operadora siga viendo la unidad viva y el cron
-      // no la marque stale.
-      if (_lastLatitude != null && _lastLongitude != null) {
-        _lastPush = DateTime.now();
-        await _pushLocation(
-          _lastLatitude!,
-          _lastLongitude!,
-          accuracy: _lastAccuracy,
-          stationary: _isStationary ? true : null,
-        );
-      }
-    }
+    // forcePush: este tick es nuestro pulso garantizado en background, no puede
+    // quedar bloqueado por el throttle de _onFix. Si el fix es malo o no hay,
+    // _heartbeatTick hace keep-alive (mantiene isActive vivo bajo techo).
+    await _heartbeatTick(source: 'native-tick', forcePush: true);
   }
 
   // ─── GPS interno ─────────────────────────────────────────
@@ -496,30 +478,69 @@ class DriverLocationService extends ChangeNotifier {
     //    conductor está parado en una parada y el `distanceFilter`
     //    bloquea el stream.
     _heartbeatTimer = Timer.periodic(_heartbeatInterval, (_) async {
-      if (!_isOnline || _driverId == null) return;
-      try {
-        final pos = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.bestForNavigation,
-            timeLimit: Duration(seconds: 6),
-          ),
-        );
-        _onFix(pos, source: 'heartbeat');
-      } catch (_) {
-        // Si el getCurrentPosition falla, repushear lo último conocido
-        // así la operadora ve el doc "vivo".
-        if (_lastLatitude != null && _lastLongitude != null) {
-          _lastPush = DateTime.now();
-          _pushLocation(
-            _lastLatitude!,
-            _lastLongitude!,
-            accuracy: _lastAccuracy,
-          );
-        }
-      }
+      await _heartbeatTick(source: 'heartbeat', fixTimeout: const Duration(seconds: 6));
     });
 
     debugPrint('📍 [LocationService] GPS stream iniciado (bestForNavigation)');
+  }
+
+  /// Un latido de presencia. Intenta un fix fresco:
+  ///  - fix bueno (<=50m)            → `_onFix` (mueve marcador + push)
+  ///  - fix impreciso (bajo techo) / sin fix → keep-alive: re-publica la última
+  ///    posición conocida para refrescar `updatedAt` + `isActive`.
+  ///
+  /// Garantiza "siempre enviando mientras esté activo": el cron
+  /// markStaleDriversOffline nunca nos marca offline aunque el GPS esté pobre.
+  Future<void> _heartbeatTick({
+    required String source,
+    Duration fixTimeout = const Duration(seconds: 8),
+    bool forcePush = false,
+  }) async {
+    if (!_isOnline || _driverId == null) return;
+    Position? pos;
+    try {
+      pos = await Geolocator.getCurrentPosition(
+        locationSettings: LocationSettings(
+          accuracy: LocationAccuracy.bestForNavigation,
+          timeLimit: fixTimeout,
+        ),
+      );
+    } catch (_) {
+      pos = null;
+    }
+
+    final decision = decideFix(
+      online: _isOnline,
+      accuracyMeters: pos?.accuracy,
+      maxAccuracyMeters: _maxAcceptableAccuracyMeters,
+      hasLastKnown: _lastLatitude != null && _lastLongitude != null,
+    );
+
+    switch (decision) {
+      case FixDecision.push:
+        if (forcePush) _lastPush = null;
+        _onFix(pos!, source: source);
+        break;
+      case FixDecision.keepAlive:
+        await _keepAlivePush();
+        break;
+      case FixDecision.ignore:
+        break;
+    }
+  }
+
+  /// Re-publica la última posición conocida (sin mover el marcador a un fix
+  /// malo) para mantener viva la presencia. `_pushLocation` re-afirma
+  /// `isActive=true` + status cuando estamos online.
+  Future<void> _keepAlivePush() async {
+    if (_lastLatitude == null || _lastLongitude == null) return;
+    _lastPush = DateTime.now();
+    await _pushLocation(
+      _lastLatitude!,
+      _lastLongitude!,
+      accuracy: _lastAccuracy,
+      stationary: _isStationary ? true : null,
+    );
   }
 
   /// Pide un fix de alta precisión SIN bloquear. Usado al iniciar.
@@ -681,30 +702,10 @@ class DriverLocationService extends ChangeNotifier {
   /// Heartbeat especial para modo STATIONARY: pide un fix y lo manda
   /// a _onFix, que decide si seguir parado o despertar.
   Future<void> _doStationaryHeartbeat() async {
-    if (!_isOnline || _driverId == null) return;
-    try {
-      final pos = await Geolocator.getCurrentPosition(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.bestForNavigation,
-          timeLimit: Duration(seconds: 8),
-        ),
-      );
-      // Forzar push aunque el throttle no se cumpla (es nuestro pulso
-      // único en stationary, la operadora necesita ver updatedAt fresco).
-      _lastPush = null;
-      _onFix(pos, source: 'heartbeat-stationary');
-    } catch (_) {
-      // Sin GPS en este intento: solo refrescamos updatedAt para que la
-      // operadora siga viendo la unidad "viva".
-      if (_lastLatitude != null && _lastLongitude != null) {
-        _pushLocation(
-          _lastLatitude!,
-          _lastLongitude!,
-          accuracy: _lastAccuracy,
-          stationary: true,
-        );
-      }
-    }
+    // Mismo latido unificado: fix bueno mueve el marcador (y sale de
+    // stationary si se alejó), fix malo/ausente hace keep-alive. forcePush
+    // porque en stationary este es el único pulso.
+    await _heartbeatTick(source: 'heartbeat-stationary', forcePush: true);
   }
 
   /// Distancia haversine en metros (versión local para evitar import
@@ -732,26 +733,22 @@ class DriverLocationService extends ChangeNotifier {
     double? heading,
     bool? stationary,
   }) async {
+    if (_driverId == null) return;
     try {
-      final data = <String, dynamic>{
-        'currentLatitude': lat,
-        'currentLongitude': lng,
-        'updatedAt': Timestamp.fromDate(DateTime.now()),
-      };
-      // Metadata GPS opcional. Permite que el mapa muestre círculo de
-      // incertidumbre + flecha de dirección de movimiento, y que en
-      // debug se vea por qué un fix se aceptó.
-      if (accuracy != null) data['locationAccuracy'] = accuracy;
-      if (speed != null && speed >= 0) data['locationSpeed'] = speed;
-      if (heading != null && heading >= 0) data['locationHeading'] = heading;
-      // Marca si el conductor está en modo "parado" (state-machine de
-      // ahorro). El admin puede mostrarlo como un ícono "🅿️ parado" para
-      // distinguir del que se está moviendo.
-      if (stationary != null) data['stationaryMode'] = stationary;
-      await _firestore
-          .collection(AppConstants.driversCollection)
-          .doc(_driverId!)
-          .update(data);
+      // Delega en DriverPresenceWriter, que además RE-AFIRMA isActive=true +
+      // status cuando estamos online → auto-sana del cron markStaleDriversOffline
+      // en el primer push tras recuperar señal. Ver driver_presence_writer.dart.
+      await _presence.pushLocation(
+        _driverId!,
+        lat,
+        lng,
+        online: _isOnline,
+        status: _currentStatus,
+        accuracy: accuracy,
+        speed: speed,
+        heading: heading,
+        stationary: stationary,
+      );
       debugPrint(
           '📍 [LocationService] push ($lat, $lng) acc=${accuracy?.toStringAsFixed(0)}m'
           '${stationary == true ? " [stationary]" : ""}');
