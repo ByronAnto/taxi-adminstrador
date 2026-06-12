@@ -26,6 +26,7 @@ import 'core/services/radio_foreground_service.dart';
 import 'core/services/claims_refresh_service.dart';
 import 'core/services/queue_alert_service.dart';
 import 'core/services/remote_log_service.dart';
+import 'core/services/rtdb_service.dart';
 import 'core/services/single_session_service.dart';
 import 'core/services/version_gate_service.dart';
 import 'core/services/voice/voice_provider_factory.dart';
@@ -96,6 +97,13 @@ Future<void> _bootstrap() async {
   await Firebase.initializeApp(
     options: DefaultFirebaseOptions.currentPlatform,
   );
+
+  // Abre el get/listener de Firestore (app_config/rtdb) que alimenta el cache
+  // de flags lockEnabled/presenceEnabled y habilita setPersistenceEnabled para
+  // que onDisconnect sobreviva reconexiones. Sin este init los flags nunca
+  // pasan a true y la feature RTDB (lock + presencia + rollback) queda inerte.
+  // No await crítico: si falla, el camino Firestore sigue 100% intacto.
+  unawaited(RtdbService.instance.init());
 
   // bypassVoiceProcessing=TRUE → MODE_NORMAL → el mic NO se reserva: otras apps
   // (WhatsApp, grabadora) pueden usar el micrófono con el radio encendido

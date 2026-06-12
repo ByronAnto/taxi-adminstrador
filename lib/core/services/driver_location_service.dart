@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_database/firebase_database.dart';
 import 'package:flutter/foundation.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:permission_handler/permission_handler.dart';
@@ -8,6 +9,7 @@ import '../constants/app_constants.dart';
 import 'driver_presence_writer.dart';
 import 'location_fix_policy.dart';
 import 'radio_foreground_service.dart';
+import 'rtdb_service.dart';
 
 /// Servicio global de ubicación del conductor.
 ///
@@ -25,6 +27,17 @@ class DriverLocationService extends ChangeNotifier {
 
   String? _driverId;
   String? _userId;
+  /// `auth.uid` del conductor: clave del path RTDB `/presence/{aid}/{uid}`
+  /// (las reglas exigen `auth.uid === $uid`). Distinto de `_driverId`, que es
+  /// el id del doc Firestore `drivers/` (va como campo `driverId` en el nodo).
+  String? _uid;
+  /// associationId del conductor: primer segmento del path RTDB multi-tenant.
+  /// Las reglas exigen `auth.token.associationId === $associationId`.
+  String? _associationId;
+  /// Suscripción al estado de conexión RTDB (`.info/connected`) para
+  /// re-registrar `onDisconnect` tras cada reconexión (el SDK lo descarta al
+  /// caerse y reconectar). Solo viva mientras presencia RTDB esté activa.
+  StreamSubscription<DatabaseEvent>? _connectedSub;
   bool _isOnline = false;
   bool _initialized = false;
   String _currentStatus = AppConstants.statusOffline;
@@ -139,6 +152,12 @@ class DriverLocationService extends ChangeNotifier {
     // Si ya está inicializado para el mismo usuario, no repetir
     if (_driverId != null && _userId == userId && _isOnline) return;
     _userId = userId;
+    // `userId` es el `auth.uid` (Firebase Auth) → clave del path RTDB de
+    // presencia. Guardamos también el associationId para el path multi-tenant.
+    _uid = userId;
+    if (associationId != null && associationId.isNotEmpty) {
+      _associationId = associationId;
+    }
 
     try {
       final snapshot = await _firestore
@@ -278,6 +297,12 @@ class DriverLocationService extends ChangeNotifier {
       debugPrint('📍 [LocationService] Error goOnline: $e');
     }
 
+    // ── Presencia RTDB (aditivo, gated por flag) ──
+    // Marca online=true y registra onDisconnect → si el celular muere/pierde
+    // datos, RTDB deja online=false + lastSeen en segundos (beneficio clave).
+    // No quita NINGUNA escritura Firestore de arriba.
+    await _registerRtdbPresence();
+
     await _requestPermissionAndStartGps();
     // Foreground service (tipo location) → mantiene el GPS vivo en background:
     // mientras "Activo General" esté ON, la unidad NUNCA deja de enviar
@@ -319,6 +344,9 @@ class DriverLocationService extends ChangeNotifier {
     } catch (e) {
       debugPrint('📍 [LocationService] Error goOffline: $e');
     }
+
+    // ── Presencia RTDB: marcar offline + cancelar onDisconnect (aditivo) ──
+    await _clearRtdbPresence();
 
     notifyListeners();
     debugPrint('📍 [LocationService] ⛔ OFFLINE → GPS detenido');
@@ -708,6 +736,106 @@ class DriverLocationService extends ChangeNotifier {
     await _heartbeatTick(source: 'heartbeat-stationary', forcePush: true);
   }
 
+  // ─── Presencia RTDB (dual-write aditivo, gated por flag) ─────────────
+
+  /// True cuando el camino RTDB de presencia está habilitado Y tenemos las
+  /// claves del path multi-tenant. Default false = camino Firestore intacto.
+  bool get _rtdbPresenceUsable =>
+      RtdbService.instance.presenceEnabled &&
+      _uid != null &&
+      _uid!.isNotEmpty &&
+      _associationId != null &&
+      _associationId!.isNotEmpty;
+
+  /// Ref a `/presence/{associationId}/{uid}` (null si falta el flag o claves).
+  DatabaseReference? get _presenceRef => _rtdbPresenceUsable
+      ? RtdbService.instance.presenceRef(_associationId!, _uid!)
+      : null;
+
+  /// Al ponerse online: publica `online=true` en RTDB y registra el
+  /// `onDisconnect` que dejará `online=false` + `lastSeen` si el celular
+  /// muere o pierde datos (beneficio clave del diseño). Además engancha
+  /// `.info/connected` para RE-registrar el onDisconnect en cada reconexión
+  /// (el SDK descarta los onDisconnect pendientes al caerse la conexión).
+  ///
+  /// Idempotente y no crítico: cualquier error se traga (el camino Firestore
+  /// de goOnline ya quedó persistido).
+  Future<void> _registerRtdbPresence() async {
+    final ref = _presenceRef;
+    if (ref == null) return;
+    try {
+      // 1) onDisconnect: lo dejamos armado ANTES de marcar online, para que si
+      //    el proceso muere justo después, el servidor ya tenga la orden.
+      await _armOnDisconnect(ref);
+
+      // 2) Marca online=true con el último fix conocido (si lo hay). Solo las
+      //    llaves contempladas por las reglas; updatedAt forzado a now.
+      final node = <String, dynamic>{
+        'online': true,
+        'status': _currentStatus,
+        'driverId': _driverId ?? '',
+        'updatedAt': ServerValue.timestamp,
+      };
+      if (_lastLatitude != null) node['lat'] = _lastLatitude;
+      if (_lastLongitude != null) node['lng'] = _lastLongitude;
+      if (_lastAccuracy != null) node['accuracy'] = _lastAccuracy;
+      await ref.update(node);
+
+      // 3) Re-armar el onDisconnect en cada reconexión.
+      _listenConnectionState(ref);
+    } catch (e) {
+      debugPrint('📍 [LocationService] presencia RTDB online falló: $e');
+    }
+  }
+
+  /// Arma el `onDisconnect` que deja al conductor offline + lastSeen cuando el
+  /// servidor detecta que el cliente se cayó (sin app que lo limpie).
+  Future<void> _armOnDisconnect(DatabaseReference ref) async {
+    await ref.onDisconnect().update(<String, dynamic>{
+      'online': false,
+      // `lastSeen` no está en las reglas (sería $other → rechazado). Usamos
+      // `updatedAt` (= now) como marca temporal del último visto, consistente
+      // con el resto del nodo y permitido por las reglas.
+      'updatedAt': ServerValue.timestamp,
+    });
+  }
+
+  /// Suscribe `.info/connected`: cuando RTDB se RECONECTA (value==true tras una
+  /// caída) re-arma el onDisconnect, que el SDK descarta al reconectar.
+  void _listenConnectionState(DatabaseReference presenceRef) {
+    _connectedSub?.cancel();
+    final connectedRef =
+        RtdbService.instance.database.ref('.info/connected');
+    _connectedSub = connectedRef.onValue.listen((event) {
+      final connected = event.snapshot.value == true;
+      if (connected) {
+        // Reconectado: re-armar onDisconnect (best-effort, no crítico).
+        unawaited(_armOnDisconnect(presenceRef).catchError((e) {
+          debugPrint('📍 [LocationService] re-arm onDisconnect falló: $e');
+        }));
+      }
+    });
+  }
+
+  /// Al ponerse offline / logout / dispose: cancela el onDisconnect pendiente,
+  /// suelta el listener de conexión y marca `online=false` explícitamente.
+  /// No crítico: el onDisconnect del servidor es el respaldo.
+  Future<void> _clearRtdbPresence() async {
+    await _connectedSub?.cancel();
+    _connectedSub = null;
+    final ref = _presenceRef;
+    if (ref == null) return;
+    try {
+      await ref.onDisconnect().cancel();
+      await ref.update(<String, dynamic>{
+        'online': false,
+        'updatedAt': ServerValue.timestamp,
+      });
+    } catch (e) {
+      debugPrint('📍 [LocationService] presencia RTDB offline falló: $e');
+    }
+  }
+
   /// Distancia haversine en metros (versión local para evitar import
   /// circular con core/utils/geo_utils que está en kilómetros).
   static double _haversineMeters(
@@ -748,6 +876,9 @@ class DriverLocationService extends ChangeNotifier {
         speed: speed,
         heading: heading,
         stationary: stationary,
+        // Dual-write RTDB (gated por flag dentro del writer): /presence/{aid}/{uid}.
+        uid: _uid,
+        associationId: _associationId,
       );
       debugPrint(
           '📍 [LocationService] push ($lat, $lng) acc=${accuracy?.toStringAsFixed(0)}m'
@@ -783,6 +914,8 @@ class DriverLocationService extends ChangeNotifier {
     }
     _driverId = null;
     _userId = null;
+    _uid = null;
+    _associationId = null;
     _initialized = false;
     _lastLatitude = null;
     _lastLongitude = null;
@@ -793,8 +926,14 @@ class DriverLocationService extends ChangeNotifier {
   @override
   void dispose() {
     _stopGps();
+    // Marcar offline en RTDB + soltar onDisconnect antes de morir (fire-and-forget:
+    // dispose es síncrono). El onDisconnect del servidor es el respaldo si esto
+    // no alcanza a completar.
+    unawaited(_clearRtdbPresence());
     _driverId = null;
     _userId = null;
+    _uid = null;
+    _associationId = null;
     super.dispose();
   }
 }

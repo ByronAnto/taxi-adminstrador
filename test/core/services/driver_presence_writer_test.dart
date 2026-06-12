@@ -1,4 +1,3 @@
-import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:fake_cloud_firestore/fake_cloud_firestore.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:taxi_jipijapa/core/constants/app_constants.dart';
@@ -70,5 +69,29 @@ void main() {
     final data = await readDoc();
     expect(data['isActive'], false);
     expect(data['status'], AppConstants.statusOffline);
+  });
+
+  test(
+      'flag presenceEnabled OFF (default): aun pasando uid/associationId, el push '
+      'NO toca RTDB y la escritura Firestore se completa', () async {
+    // Con el flag de presencia en false (default del RtdbService, no
+    // inicializado en tests), `_maybePushRtdb` retorna ANTES de resolver
+    // ninguna instancia FirebaseDatabase. Por eso este push no lanza pese a no
+    // haber RTDB real en el entorno de test → el camino Firestore queda intacto.
+    await writer.pushLocation(
+      driverId,
+      -0.1291,
+      -78.4994,
+      online: true,
+      status: AppConstants.statusFree,
+      accuracy: 8,
+      uid: 'u1',
+      associationId: 'jipijapa',
+    );
+
+    final data = await readDoc();
+    expect(data['currentLatitude'], -0.1291);
+    expect(data['isActive'], true);
+    expect(data['status'], AppConstants.statusFree);
   });
 }

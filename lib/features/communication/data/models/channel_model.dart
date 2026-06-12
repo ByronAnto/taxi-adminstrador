@@ -43,6 +43,37 @@ class ChannelModel {
     this.defaultForRoles = const [],
   });
 
+  /// Devuelve una copia del canal con el lock del PTT SOBREESCRITO por los
+  /// valores efímeros provenientes de RTDB (`/channelLocks`).
+  ///
+  /// A diferencia de [copyWith], aquí los tres campos del lock se ASIGNAN
+  /// explícitamente (incluyendo `null`), porque el nodo RTDB es la fuente de
+  /// verdad del lock cuando el flag está ON: si no hay speaker, deben quedar
+  /// en null (estado "nadie habla"), y `speakerLockedAt` puede ser null
+  /// momentáneamente mientras el ServerValue.timestamp se resuelve sin que
+  /// se herede un valor viejo de Firestore.
+  ChannelModel withLock({
+    required String? currentSpeakerId,
+    required String? currentSpeakerName,
+    required DateTime? speakerLockedAt,
+  }) {
+    return ChannelModel(
+      uid: uid,
+      associationId: associationId,
+      name: name,
+      description: description,
+      type: type,
+      createdBy: createdBy,
+      memberIds: memberIds,
+      isActive: isActive,
+      createdAt: createdAt,
+      currentSpeakerId: currentSpeakerId,
+      currentSpeakerName: currentSpeakerName,
+      speakerLockedAt: speakerLockedAt,
+      defaultForRoles: defaultForRoles,
+    );
+  }
+
   /// True si este canal es el default para [role] (admin/operadora/conductor).
   bool isDefaultForRole(String role) => defaultForRoles.contains(role);
 
