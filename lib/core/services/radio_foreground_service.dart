@@ -5,7 +5,6 @@ import 'package:flutter_foreground_task/flutter_foreground_task.dart';
 import 'package:logger/logger.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-import '../../spike/livekit_isolate_spike.dart';
 import 'connectivity_service.dart';
 import 'driver_location_service.dart';
 
@@ -36,7 +35,6 @@ class RadioForegroundService {
   bool _locationActive = false;
   VoidCallback? _connListener;
   bool _showingOfflineNotif = false;
-  Timer? _spikeMainTrigger; // SPIKE: trigger main-side (throwaway)
 
   /// Intervalo del tick periódico nativo del FGS. Debe ser claramente menor
   /// que la ventana del cron de presencia (markStaleDriversOffline = 6 min)
@@ -50,14 +48,6 @@ class RadioForegroundService {
   static void _onTaskData(Object data) {
     if (data == _kLocationTickSignal) {
       unawaited(DriverLocationService.instance.nativeHeartbeatPulse());
-    } else if (data == kSpikeNeedToken) {
-      // SPIKE: el handler del FGS pide el token; lo obtenemos en el main
-      // (autenticado) y se lo mandamos al isolate.
-      unawaited(spikeProvideTokenToHandler());
-    } else if (data is String && data.startsWith('[SPIKE]')) {
-      // SPIKE: cualquier log desde el isolate del FGS → debugPrint (lo sube
-      // RemoteLogService).
-      debugPrint('📻 $data');
     }
   }
 
@@ -102,12 +92,6 @@ class RadioForegroundService {
     // la señal y aquí la convertimos en un pulso de ubicación real.
     FlutterForegroundTask.removeTaskDataCallback(_onTaskData);
     FlutterForegroundTask.addTaskDataCallback(_onTaskData);
-    // SPIKE: disparador del lado MAIN cada 10s (robusto, no depende del
-    // onStart del handler). Mientras el FGS corra, intenta conectar el spike.
-    _spikeMainTrigger?.cancel();
-    _spikeMainTrigger = Timer.periodic(const Duration(seconds: 10), (_) {
-      if (_isRunning) unawaited(spikeProvideTokenToHandler());
-    });
     _attachConnectivityMonitor();
     _recoverIfZombie();
     _logger.i('RadioForegroundService initialized');
@@ -447,23 +431,9 @@ void _radioTaskCallback() {
 /// Task handler mínimo — la lógica real la maneja el BLoC/Firestore
 /// que ya está corriendo en el main isolate.
 class _RadioTaskHandler extends TaskHandler {
-  Timer? _spikeRetry;
-
   @override
   Future<void> onStart(DateTime timestamp, TaskStarter starter) async {
     // El servicio arrancó. Los streams de Firestore siguen activos.
-    // SPIKE: pedir al main el token para conectar LiveKit EN ESTE isolate.
-    // Reintento cada 8s hasta conectar (robusto ante carreras de arranque).
-    unawaited(spikeHttpLog('HANDLER.onStart fired @ $timestamp'));
-    FlutterForegroundTask.sendDataToMain('$kSpikeLogPrefix HANDLER.onStart fired');
-    FlutterForegroundTask.sendDataToMain(kSpikeNeedToken);
-    _spikeRetry = Timer.periodic(const Duration(seconds: 8), (_) {
-      if (spikeConnected()) {
-        _spikeRetry?.cancel();
-        return;
-      }
-      FlutterForegroundTask.sendDataToMain(kSpikeNeedToken);
-    });
   }
 
   @override
@@ -477,33 +447,17 @@ class _RadioTaskHandler extends TaskHandler {
     // Esta es la red de seguridad anti-Doze: el FGS nativo mantiene un wakelock
     // y este callback sigue disparando en background profundo, donde los `Timer`
     // de Dart del isolate principal quedan congelados.
-    unawaited(spikeHttpLog('HANDLER.onRepeatEvent tick @ $timestamp'));
     FlutterForegroundTask.sendDataToMain(_kLocationTickSignal);
-    // SPIKE backstop: si el FGS ya venía corriendo (onStart no disparó) y aún
-    // no conectó, pedir token aquí también.
-    if (!spikeConnected()) {
-      FlutterForegroundTask.sendDataToMain(kSpikeNeedToken);
-    }
   }
 
   @override
   Future<void> onDestroy(DateTime timestamp) async {
     // Limpieza al detener el servicio.
-    // SPIKE: cerrar la conexión LiveKit del isolate.
-    _spikeRetry?.cancel();
-    await spikeHandlerDisconnect();
   }
 
   @override
   void onReceiveData(Object data) {
-    // SPIKE: confirmar que main→handler (sendDataToTask) ENTREGA.
-    unawaited(spikeHttpLog('HANDLER.onReceiveData: ${data.runtimeType}'));
-    FlutterForegroundTask.sendDataToMain(
-        '$kSpikeLogPrefix HANDLER.onReceiveData: ${data.runtimeType}');
-    // El main mandó {spike: connect/error, url, token, ...}.
-    if (data is Map) {
-      unawaited(spikeHandlerConnect(data));
-    }
+    // Sin uso actual (el main no envía datos al handler).
   }
 
   @override
