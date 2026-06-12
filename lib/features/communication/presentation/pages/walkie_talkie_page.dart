@@ -121,6 +121,25 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// transmitido.
   bool _pttCancelled = false;
 
+  // ── Anti-spam del PTT (estilo Zello) ──
+  // Bug 2026-06-12: clicks rápidos al botón encimaban unmute/mute + beeps y
+  // el mic quedaba PEGADO (logs: 60 beeps en 8 s + TimeoutException 30 s).
+  // Dos defensas:
+  //  1. `_pttOpsInFlight`: un press nuevo se IGNORA mientras el press o el
+  //     release anterior siguen procesándose (guard en vuelo). El release
+  //     nunca se bloquea — soltar SIEMPRE libera el mic.
+  //  2. Rate-limit: una transmisión que dura < [_pttEmptyMax] es un "mensaje
+  //     vacío"; [_pttEmptyLimit] vacíos dentro de la ventana deslizante
+  //     [_pttSpamWindow] bloquean el PTT por [_pttBlockTime] con aviso
+  //     (igual que Zello). Una transmisión válida limpia el contador.
+  int _pttOpsInFlight = 0;
+  DateTime? _pttPressedAt;
+  final List<DateTime> _emptyPttPresses = [];
+  DateTime? _pttBlockedUntil;
+  static const Duration _pttSpamWindow = Duration(seconds: 8);
+  static const Duration _pttEmptyMax = Duration(seconds: 1);
+  static const int _pttEmptyLimit = 4;
+  static const Duration _pttBlockTime = Duration(seconds: 15);
 
   /// Estado de la grabación local del audio del canal (historial 24h).
   String? _recordingEntryId;
@@ -1944,6 +1963,27 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   }
 
   Future<void> _startPtt(CommunicationLoaded state) async {
+    // ── Rate-limit estilo Zello: ¿estamos en castigo? ──
+    final blockedUntil = _pttBlockedUntil;
+    if (blockedUntil != null) {
+      if (DateTime.now().isBefore(blockedUntil)) {
+        _showPttBlockedWarning(blockedUntil);
+        return;
+      }
+      _pttBlockedUntil = null; // castigo cumplido
+    }
+    // ── Guard en vuelo: el press/release anterior sigue procesándose ──
+    // (clicks rápidos encimaban unmute/mute + beeps → mic pegado).
+    if (_pttOpsInFlight > 0) return;
+    _pttOpsInFlight++;
+    try {
+      await _startPttInner(state);
+    } finally {
+      _pttOpsInFlight--;
+    }
+  }
+
+  Future<void> _startPttInner(CommunicationLoaded state) async {
     final user = _currentUser;
     if (user == null || state.activeChannelId == null) return;
     if (_isRecording) return; // Prevent double-start
@@ -1985,6 +2025,7 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     // Esto le confirma al usuario que el botón registró el press.
     // Sin esto, el botón se sentía "muerto" durante los ~2s del grace.
     HapticFeedback.mediumImpact();
+    _pttPressedAt = DateTime.now(); // para medir si la transmisión fue "vacía"
     setState(() {
       _isRecording = true;
       _recordingSeconds = 0;
@@ -2185,6 +2226,59 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   }
 
   Future<void> _stopPtt(CommunicationLoaded state) async {
+    // El release NUNCA se bloquea (soltar siempre libera el mic), pero sí
+    // cuenta como operación en vuelo para que un press inmediato no se
+    // encime con el muteMic pendiente.
+    final pressedAt = _pttPressedAt;
+    _pttPressedAt = null;
+    final wasEmpty = pressedAt != null &&
+        DateTime.now().difference(pressedAt) < _pttEmptyMax;
+    _pttOpsInFlight++;
+    try {
+      await _stopPttInner(state);
+    } finally {
+      _pttOpsInFlight--;
+    }
+    _registerPttUsage(wasEmpty);
+  }
+
+  /// Contabiliza el uso del PTT para el rate-limit estilo Zello: los
+  /// "mensajes vacíos" (< [_pttEmptyMax]) se acumulan en una ventana
+  /// deslizante; al llegar a [_pttEmptyLimit] se castiga con
+  /// [_pttBlockTime]. Una transmisión válida limpia el contador.
+  void _registerPttUsage(bool wasEmpty) {
+    if (!wasEmpty) {
+      _emptyPttPresses.clear(); // habló de verdad → redención
+      return;
+    }
+    final now = DateTime.now();
+    _emptyPttPresses.add(now);
+    _emptyPttPresses
+        .removeWhere((t) => now.difference(t) > _pttSpamWindow);
+    if (_emptyPttPresses.length >= _pttEmptyLimit) {
+      _emptyPttPresses.clear();
+      _pttBlockedUntil = now.add(_pttBlockTime);
+      debugPrint('🚫 PTT rate-limit: $_pttEmptyLimit mensajes vacíos en '
+          '${_pttSpamWindow.inSeconds}s → bloqueado ${_pttBlockTime.inSeconds}s');
+      _showPttBlockedWarning(_pttBlockedUntil!);
+    }
+  }
+
+  /// Aviso de castigo del rate-limit (estilo Zello).
+  void _showPttBlockedWarning(DateTime until) {
+    if (!mounted) return;
+    final secs = until.difference(DateTime.now()).inSeconds + 1;
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(
+        content: Text(
+            '⏳ Muchos toques seguidos sin hablar. Espera $secs s para volver a transmitir.'),
+        backgroundColor: AppTheme.warningColor,
+        duration: const Duration(seconds: 3),
+      ));
+  }
+
+  Future<void> _stopPttInner(CommunicationLoaded state) async {
     final user = _currentUser;
     if (user == null || state.activeChannelId == null) return;
 

@@ -134,7 +134,35 @@ class PttBeepService {
     await _player.setReleaseMode(ReleaseMode.stop);
   }
 
+  /// Guard reentrante: si ya hay un beep en curso, el nuevo se DROPEA en vez
+  /// de encimar stop()+play() sobre el AudioPlayer compartido. Bug
+  /// 2026-06-12: clicks rápidos al PTT atascaban el player (play() nunca
+  /// completaba → TimeoutException de 30 s de audioplayers) y el churn de
+  /// audio focus degradaba el estado del mic.
+  bool _playing = false;
+
+  /// Timeout corto para las llamadas al AudioPlayer: un player atascado debe
+  /// fallar en 2 s, no colgar 30 s reteniendo el audio focus.
+  static const Duration _playerCallTimeout = Duration(seconds: 2);
+
   Future<void> _play({
+    Uint8List? bytes,
+    String? filePath,
+    required int soundId,
+  }) async {
+    if (_playing) {
+      debugPrint('🔔 PttBeepService: beep dropeado (player ocupado)');
+      return;
+    }
+    _playing = true;
+    try {
+      await _playGuarded(bytes: bytes, filePath: filePath, soundId: soundId);
+    } finally {
+      _playing = false;
+    }
+  }
+
+  Future<void> _playGuarded({
     Uint8List? bytes,
     String? filePath,
     required int soundId,
@@ -173,11 +201,15 @@ class PttBeepService {
     if (fp == null && b == null) return;
     try {
       await _applyContext();
-      await _player.stop();
+      await _player.stop().timeout(_playerCallTimeout);
       if (fp != null) {
-        await _player.play(DeviceFileSource(fp), mode: PlayerMode.lowLatency);
+        await _player
+            .play(DeviceFileSource(fp), mode: PlayerMode.lowLatency)
+            .timeout(_playerCallTimeout);
       } else {
-        await _player.play(BytesSource(b!), mode: PlayerMode.mediaPlayer);
+        await _player
+            .play(BytesSource(b!), mode: PlayerMode.mediaPlayer)
+            .timeout(_playerCallTimeout);
       }
       debugPrint('🔔 PttBeepService: beep via AudioPlayer fallback');
     } catch (e) {
