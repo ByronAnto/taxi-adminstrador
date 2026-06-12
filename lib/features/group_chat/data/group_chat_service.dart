@@ -17,8 +17,16 @@ class GroupChatService {
           .collection('groupMessages');
 
   /// Stream de los últimos ~200 mensajes, más nuevos primero.
+  ///
+  /// Filtro 24h en el QUERY (no solo confiar en el cron de purga): así ni el
+  /// backlog del servidor ni la caché local de Firestore pueden mostrar
+  /// mensajes vencidos. El cutoff se fija al abrir el stream, suficiente
+  /// porque la pantalla recrea el stream en cada apertura.
   Stream<List<GroupMessageModel>> stream(String aid) {
+    final cutoff = Timestamp.fromDate(
+        DateTime.now().subtract(const Duration(hours: 24)));
     return _col(aid)
+        .where('createdAt', isGreaterThan: cutoff)
         .orderBy('createdAt', descending: true)
         .limit(200)
         .snapshots()

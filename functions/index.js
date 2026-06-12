@@ -3844,6 +3844,41 @@ async function _runFetchQuitoEvents(apiKey) {
     } catch (e) {
       console.warn(`fetchQuitoEvents: error enviando push: ${e.message}`);
     }
+
+    // Además del push (efímero), dejar el DETALLE en la campana 🔔: la página
+    // y el badge de notificaciones leen la colección `notifications` filtrando
+    // por associationId, así que escribimos un doc por asociación.
+    // status="dispatched" para que dispatchScheduledNotifications NO lo vuelva
+    // a enviar (el push ya salió arriba). Id determinístico → idempotente si
+    // el cron reintenta.
+    try {
+      const assocs = await db.collection("associations").select().get();
+      const batch = db.batch();
+      for (const a of assocs.docs) {
+        const ref = db
+          .collection("notifications")
+          .doc(`quito-events-${dateKey}-${a.id}`);
+        batch.set(ref, {
+          associationId: a.id,
+          title,
+          body,
+          audience: "all",
+          scheduledAt: Timestamp.fromMillis(now.getTime()),
+          status: "dispatched",
+          dispatchedAt: FieldValue.serverTimestamp(),
+          createdAt: FieldValue.serverTimestamp(),
+          createdBy: "system:fetchQuitoEvents",
+          expiresAt: expireAt,
+          data: { type: "quito_events", date: dateKey },
+        }, { merge: true });
+      }
+      await batch.commit();
+      console.log(
+        `fetchQuitoEvents: campana actualizada en ${assocs.size} asociaciones`,
+      );
+    } catch (e) {
+      console.warn(`fetchQuitoEvents: error escribiendo campana: ${e.message}`);
+    }
   }
 
   return { ok: true, dateKey, count: events.length, notified };
