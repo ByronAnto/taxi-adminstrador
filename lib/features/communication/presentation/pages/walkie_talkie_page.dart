@@ -2174,6 +2174,15 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     // de parked. En el path parked ya escribimos el lock antes para
     // dispararle a los listeners el resumeFromPark() en paralelo.
     if (!mounted) return;
+    // CARRERA (bug 2026-06-12, visto en campo): si el dedo se levantó
+    // DURANTE los awaits previos (permiso/ensureMicReady), _stopPtt ya corrió
+    // y ya mandó su unlock. Si seguimos, el lock de ESTE press llega DESPUÉS
+    // del unlock → el canal queda "ocupado" para los demás sin que nadie
+    // transmita (hasta el expiry de 35 s). Abortamos ANTES de lockear.
+    if (_pttCancelled || !_isRecording) {
+      _cleanupRecordingState();
+      return;
+    }
     if (!wasParked) {
       context.read<CommunicationBloc>().add(
             PttLockRequested(
@@ -2187,6 +2196,23 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     // ── AGORA: Desmutear mic → audio en tiempo real a todos ──
     try {
       await _voice.unmuteMic();
+      // Misma carrera al otro lado del unmute: si soltó mientras
+      // desmuteábamos, el mute del _stopPtt pudo quedar ANTES que este
+      // unmute en la cola → mic abierto sin dedo. Garantizar mic OFF y
+      // lock liberado.
+      if (_pttCancelled) {
+        await _voice.muteMic();
+        if (mounted) {
+          context.read<CommunicationBloc>().add(
+                PttUnlockRequested(
+                  channelId: state.activeChannelId!,
+                  userId: user.uid,
+                ),
+              );
+        }
+        _cleanupRecordingState();
+        return;
+      }
     } catch (e) {
       _recordingTimer?.cancel();
       _durationTimer?.cancel();
