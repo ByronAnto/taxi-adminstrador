@@ -329,6 +329,14 @@ class LiveKitVoiceProvider implements VoiceProvider {
           // auto-reconnect y se rindió → RoomDisconnected es definitivo).
           if (_intentionalDisconnect) {
             _isReconnecting = false;
+          } else if (e.reason == lk.DisconnectReason.duplicateIdentity) {
+            // Otra conexión con NUESTRA identity nos sacó de la sala (misma
+            // cuenta en otro dispositivo o sesión vieja retenida en el server).
+            // Reintentar agresivo produce ping-pong de kicks (visto en logs
+            // remotos 2026-06-12): backoff largo fijo para ceder la sala.
+            _log('duplicateIdentity → reintento lento (30s)');
+            _scheduleReconnect(channelId,
+                delayOverride: const Duration(seconds: 30));
           } else {
             _scheduleReconnect(channelId);
           }
@@ -345,7 +353,12 @@ class LiveKitVoiceProvider implements VoiceProvider {
           if (t is lk.RemoteAudioTrack) _applyVolumeToTrack(t);
         });
 
-      await room.connect(t.url, t.token);
+      // Acotado: sin timeout, un server caído/red colgada deja este await
+      // congelado para siempre (la UI queda "conectando…" eterna y el overlay
+      // PTT inutilizable). 12s cubre de sobra señalización + ICE vía TURN.
+      await room
+          .connect(t.url, t.token)
+          .timeout(const Duration(seconds: 12));
       // Ruta de audio MEDIA + ALTAVOZ. Por defecto flutter_webrtc rutea el audio
       // recibido al stream VOICE_CALL (MODE_IN_COMMUNICATION): se oye bajo y NO
       // sube con el volumen MULTIMEDIA que el conductor pone al máximo. Forzamos
@@ -529,13 +542,14 @@ class LiveKitVoiceProvider implements VoiceProvider {
   /// queda en 10s) tras un RoomDisconnected NO intencional. Idempotente: si ya
   /// hay un timer pendiente, no encola otro. Se cancela en cuanto el usuario
   /// sale a propósito ([_cancelReconnect]).
-  void _scheduleReconnect(String channelId) {
+  void _scheduleReconnect(String channelId, {Duration? delayOverride}) {
     if (_intentionalDisconnect) return;
     if (_reconnectTimer != null && _reconnectTimer!.isActive) return;
     _isReconnecting = true;
-    final delay = _reconnectAttempt < _reconnectBackoff.length
-        ? _reconnectBackoff[_reconnectAttempt]
-        : _reconnectBackoff.last;
+    final delay = delayOverride ??
+        (_reconnectAttempt < _reconnectBackoff.length
+            ? _reconnectBackoff[_reconnectAttempt]
+            : _reconnectBackoff.last);
     _log('Reconexión programada en ${delay.inSeconds}s '
         '(intento ${_reconnectAttempt + 1}) → canal $channelId');
     _reconnectTimer = Timer(delay, () async {
@@ -643,6 +657,10 @@ class LiveKitVoiceProvider implements VoiceProvider {
         _isMicPublishing = target;
       } catch (e) {
         _log('setMic($target): $e');
+        // Resincronizar con el estado REAL del SDK: si el cambio falló, el
+        // flag no puede quedar mintiendo (quickPttStart decide con él si el
+        // PTT "agarró" o no).
+        _isMicPublishing = lp.isMicrophoneEnabled();
         if (target) _onError?.call('unmuteMic: $e');
       }
     });
