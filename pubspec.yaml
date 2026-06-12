@@ -69,13 +69,13 @@ dependencies:
   permission_handler: ^11.4.0
 
   # Background / Foreground Service (Radio en segundo plano)
-  flutter_foreground_task: ^8.10.0
+  flutter_foreground_task: ^9.2.2
 
   # UI
-  flutter_svg: ^2.1.0
+  flutter_svg: ^2.3.0
   cached_network_image: ^3.4.1
   shimmer: ^3.0.0
-  fl_chart: ^0.70.2
+  fl_chart: ^1.2.0
   image_picker: ^1.1.2
   intl: ^0.20.2
   badges: ^3.1.2
@@ -87,9 +87,9 @@ dependencies:
   logger: ^2.5.0
   url_launcher: ^6.3.1
   share_plus: ^10.1.4
-  flutter_local_notifications: ^18.0.1
+  flutter_local_notifications: ^21.0.0
   timeago: ^3.7.0
-  flutter_native_splash: ^2.4.6
+  flutter_native_splash: ^2.4.8
 
   # Reportes (PDF A4 + Excel)
   pdf: ^3.11.3
