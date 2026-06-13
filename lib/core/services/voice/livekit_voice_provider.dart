@@ -4,7 +4,7 @@ import 'package:cloud_functions/cloud_functions.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart'
-    show AndroidAudioConfiguration, Helper;
+    show AndroidAudioConfiguration, Helper, WebRTC;
 import 'package:livekit_client/livekit_client.dart' as lk;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -202,6 +202,15 @@ class LiveKitVoiceProvider implements VoiceProvider {
     try {
       // bypass=true: MODE_NORMAL → mic libre para otras apps. Idempotente con
       // el init de main(); si ya se inicializó, no-op.
+      //
+      // DEFENSIVO: si el init de main() falló, este es el PRIMER initialize y
+      // el AudioDeviceModule hornea aquí sus AudioAttributes. Sin el config
+      // explícito quedaría USAGE_VOICE_COMMUNICATION → audio por el auricular
+      // (bug 2026-06-12). Mismo orden que main(): webrtc con MEDIA primero.
+      await WebRTC.initialize(options: {
+        'bypassVoiceProcessing': true,
+        'androidAudioConfiguration': AndroidAudioConfiguration.media.toMap(),
+      });
       await lk.LiveKitClient.initialize(bypassVoiceProcessing: true);
     } catch (e) {
       _log('LiveKitClient.initialize: $e');

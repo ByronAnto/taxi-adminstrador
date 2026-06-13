@@ -20,6 +20,7 @@ import 'core/services/fcm_token_service.dart';
 import 'core/services/local_audio_history_service.dart';
 import 'core/services/ptt_beep_service.dart';
 import 'core/services/overlay_ptt_service.dart';
+import 'package:flutter_webrtc/flutter_webrtc.dart' as rtc;
 import 'package:livekit_client/livekit_client.dart' as lk;
 import 'core/services/radio_power_service.dart';
 import 'core/services/radio_foreground_service.dart';
@@ -110,7 +111,22 @@ Future<void> _bootstrap() async {
   // (decisión de Byron: prioridad mic libre sobre cancelación de ruido). Sin
   // AGC/NS de WebRTC; se compensa con boost de volumen + altavoz forzado. La
   // cancelación de ruido queda como alternativa a evaluar (Krisp u otra).
+  //
+  // ORDEN CRÍTICO (bug "audio bajito por el auricular", 2026-06-12): el
+  // AudioDeviceModule nativo se crea en el PRIMER initialize de flutter_webrtc
+  // y HORNEA ahí los AudioAttributes del playout — el default es
+  // USAGE_VOICE_COMMUNICATION → el audio del radio salía por el auricular con
+  // el volumen de llamada (los forzados en runtime solo cambian el audio
+  // focus, no el player ya creado: evidencia dumpsys en Xiaomi y Pixel). Por
+  // eso inicializamos flutter_webrtc NOSOTROS primero con usage MEDIA
+  // (altavoz + volumen multimedia); el initialize de LiveKit a continuación
+  // es no-op a nivel factory (mFactory != null) pero configura el resto del
+  // SDK (Native.bypassVoiceProcessing).
   try {
+    await rtc.WebRTC.initialize(options: {
+      'bypassVoiceProcessing': true,
+      'androidAudioConfiguration': rtc.AndroidAudioConfiguration.media.toMap(),
+    });
     await lk.LiveKitClient.initialize(bypassVoiceProcessing: true);
   } catch (e) {
     debugPrint('LiveKitClient.initialize falló: $e');
