@@ -5358,9 +5358,19 @@ exports.onTripAssignmentChanged = onDocumentWritten(
     const origen = after.pickupAddress || "";
     const bodyAsignada = origen ? `${cliente} · ${origen}` : cliente;
 
+    // Solo despachos que el conductor NO está vigilando ameritan push:
+    // 'webCliente' (portal web) y 'apkOperadora' (operadora asigna con
+    // dirección de recogida). Las de calle/cola/manual NO suenan: ahí el
+    // conductor ya está presente o la creó él mismo (decisión Byron 2026-06-12).
+    const PUSHABLE_SOURCES = ["webCliente", "apkOperadora"];
+
     // CREATE → asignación inicial.
     if (!before) {
-      if (after.driverId && after.status !== "cancelado") {
+      if (
+        after.driverId &&
+        after.status !== "cancelado" &&
+        PUSHABLE_SOURCES.includes(after.source)
+      ) {
         await _sendFcmToUid(
           after.driverId,
           { title: "Carrera asignada", body: bodyAsignada },
@@ -5369,7 +5379,11 @@ exports.onTripAssignmentChanged = onDocumentWritten(
           console.warn(`[onTripAssignmentChanged] asignación: ${e.message}`),
         );
         console.log(
-          `[onTripAssignmentChanged] trip ${tripId} asignado → push a ${after.driverId}`,
+          `[onTripAssignmentChanged] trip ${tripId} (${after.source}) asignado → push a ${after.driverId}`,
+        );
+      } else if (after.driverId && after.status !== "cancelado") {
+        console.log(
+          `[onTripAssignmentChanged] trip ${tripId} origen '${after.source}' → SIN push (no es web/operadora)`,
         );
       }
       return;
@@ -5378,7 +5392,9 @@ exports.onTripAssignmentChanged = onDocumentWritten(
     // UPDATE → cancelación (transición a cancelado).
     if (before.status !== "cancelado" && after.status === "cancelado") {
       const target = after.driverId || before.driverId;
-      if (target) {
+      // Solo avisamos cancelación si también habríamos avisado la asignación
+      // (web/operadora): en calle/cola el conductor ya está al tanto.
+      if (target && PUSHABLE_SOURCES.includes(after.source)) {
         await _sendFcmToUid(
           target,
           { title: "Carrera cancelada", body: bodyAsignada },
@@ -5397,7 +5413,8 @@ exports.onTripAssignmentChanged = onDocumentWritten(
     if (
       before.driverId &&
       after.driverId &&
-      before.driverId !== after.driverId
+      before.driverId !== after.driverId &&
+      PUSHABLE_SOURCES.includes(after.source)
     ) {
       await _sendFcmToUid(
         after.driverId,

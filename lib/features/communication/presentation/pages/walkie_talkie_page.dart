@@ -10,6 +10,7 @@ import '../../../../core/constants/app_constants.dart';
 import '../../../../core/theme/app_theme.dart';
 import '../../../../core/widgets/state_views.dart';
 import '../../../../core/services/agora_service.dart';
+import '../../../../core/services/ptt_gate.dart';
 import '../../../../core/services/voice/voice_provider.dart';
 import '../../../../core/services/voice/voice_provider_factory.dart';
 import '../../../../core/services/connectivity_service.dart';
@@ -121,25 +122,9 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   /// transmitido.
   bool _pttCancelled = false;
 
-  // ── Anti-spam del PTT (estilo Zello) ──
-  // Bug 2026-06-12: clicks rápidos al botón encimaban unmute/mute + beeps y
-  // el mic quedaba PEGADO (logs: 60 beeps en 8 s + TimeoutException 30 s).
-  // Dos defensas:
-  //  1. `_pttOpsInFlight`: un press nuevo se IGNORA mientras el press o el
-  //     release anterior siguen procesándose (guard en vuelo). El release
-  //     nunca se bloquea — soltar SIEMPRE libera el mic.
-  //  2. Rate-limit: una transmisión que dura < [_pttEmptyMax] es un "mensaje
-  //     vacío"; [_pttEmptyLimit] vacíos dentro de la ventana deslizante
-  //     [_pttSpamWindow] bloquean el PTT por [_pttBlockTime] con aviso
-  //     (igual que Zello). Una transmisión válida limpia el contador.
-  int _pttOpsInFlight = 0;
-  DateTime? _pttPressedAt;
-  final List<DateTime> _emptyPttPresses = [];
-  DateTime? _pttBlockedUntil;
-  static const Duration _pttSpamWindow = Duration(seconds: 8);
-  static const Duration _pttEmptyMax = Duration(seconds: 1);
-  static const int _pttEmptyLimit = 4;
-  static const Duration _pttBlockTime = Duration(seconds: 15);
+  // Anti-spam del PTT (guard en vuelo + rate-limit estilo Zello) ahora vive en
+  // [PttGate.instance] — COMPARTIDO con el botón flotante del overlay para que
+  // ambos botones tengan el mismo comportamiento (decisión Byron 2026-06-12).
 
   /// Estado de la grabación local del audio del canal (historial 24h).
   String? _recordingEntryId;
@@ -1963,23 +1948,18 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   }
 
   Future<void> _startPtt(CommunicationLoaded state) async {
-    // ── Rate-limit estilo Zello: ¿estamos en castigo? ──
-    final blockedUntil = _pttBlockedUntil;
-    if (blockedUntil != null) {
-      if (DateTime.now().isBefore(blockedUntil)) {
-        _showPttBlockedWarning(blockedUntil);
-        return;
+    // Portón compartido: guard en vuelo + rate-limit (mismo que el flotante).
+    final decision = PttGate.instance.beginPress();
+    if (!decision.allowed) {
+      if (decision.status == PttStartStatus.blocked) {
+        _showPttBlockedWarning(decision.blockedSeconds);
       }
-      _pttBlockedUntil = null; // castigo cumplido
+      return; // inFlight → ignorar en silencio (ruido de dedo)
     }
-    // ── Guard en vuelo: el press/release anterior sigue procesándose ──
-    // (clicks rápidos encimaban unmute/mute + beeps → mic pegado).
-    if (_pttOpsInFlight > 0) return;
-    _pttOpsInFlight++;
     try {
       await _startPttInner(state);
     } finally {
-      _pttOpsInFlight--;
+      PttGate.instance.endOp();
     }
   }
 
@@ -2025,7 +2005,6 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
     // Esto le confirma al usuario que el botón registró el press.
     // Sin esto, el botón se sentía "muerto" durante los ~2s del grace.
     HapticFeedback.mediumImpact();
-    _pttPressedAt = DateTime.now(); // para medir si la transmisión fue "vacía"
     setState(() {
       _isRecording = true;
       _recordingSeconds = 0;
@@ -2254,46 +2233,20 @@ class _WalkieTalkiePageState extends State<WalkieTalkiePage>
   Future<void> _stopPtt(CommunicationLoaded state) async {
     // El release NUNCA se bloquea (soltar siempre libera el mic), pero sí
     // cuenta como operación en vuelo para que un press inmediato no se
-    // encime con el muteMic pendiente.
-    final pressedAt = _pttPressedAt;
-    _pttPressedAt = null;
-    final wasEmpty = pressedAt != null &&
-        DateTime.now().difference(pressedAt) < _pttEmptyMax;
-    _pttOpsInFlight++;
+    // encime con el muteMic pendiente. El portón compartido mide si fue vacía.
+    final wasEmpty = PttGate.instance.beginRelease();
     try {
       await _stopPttInner(state);
     } finally {
-      _pttOpsInFlight--;
+      PttGate.instance.endOp();
     }
-    _registerPttUsage(wasEmpty);
-  }
-
-  /// Contabiliza el uso del PTT para el rate-limit estilo Zello: los
-  /// "mensajes vacíos" (< [_pttEmptyMax]) se acumulan en una ventana
-  /// deslizante; al llegar a [_pttEmptyLimit] se castiga con
-  /// [_pttBlockTime]. Una transmisión válida limpia el contador.
-  void _registerPttUsage(bool wasEmpty) {
-    if (!wasEmpty) {
-      _emptyPttPresses.clear(); // habló de verdad → redención
-      return;
-    }
-    final now = DateTime.now();
-    _emptyPttPresses.add(now);
-    _emptyPttPresses
-        .removeWhere((t) => now.difference(t) > _pttSpamWindow);
-    if (_emptyPttPresses.length >= _pttEmptyLimit) {
-      _emptyPttPresses.clear();
-      _pttBlockedUntil = now.add(_pttBlockTime);
-      debugPrint('🚫 PTT rate-limit: $_pttEmptyLimit mensajes vacíos en '
-          '${_pttSpamWindow.inSeconds}s → bloqueado ${_pttBlockTime.inSeconds}s');
-      _showPttBlockedWarning(_pttBlockedUntil!);
-    }
+    final blockSecs = PttGate.instance.registerUsage(wasEmpty);
+    if (blockSecs != null) _showPttBlockedWarning(blockSecs);
   }
 
   /// Aviso de castigo del rate-limit (estilo Zello).
-  void _showPttBlockedWarning(DateTime until) {
+  void _showPttBlockedWarning(int secs) {
     if (!mounted) return;
-    final secs = until.difference(DateTime.now()).inSeconds + 1;
     ScaffoldMessenger.of(context)
       ..hideCurrentSnackBar()
       ..showSnackBar(SnackBar(

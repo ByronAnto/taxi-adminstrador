@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
 import 'ptt_beep_service.dart';
+import 'ptt_gate.dart';
 import 'voice/voice_provider.dart';
 import 'voice/voice_provider_factory.dart';
 
@@ -179,6 +180,21 @@ class OverlayPttService {
     }
     _activeChannelId = channelId;
 
+    // Portón compartido con el botón de la pantalla: guard en vuelo +
+    // rate-limit estilo Zello. Así el flotante hereda TODAS las mejoras del
+    // mic (decisión Byron 2026-06-12).
+    final decision = PttGate.instance.beginPress();
+    if (!decision.allowed) {
+      if (decision.status == PttStartStatus.blocked) {
+        _log('PTT flotante bloqueado por rate-limit (${decision.blockedSeconds}s)');
+        await _updateButtonState('error');
+        Future.delayed(const Duration(milliseconds: 1500), () async {
+          if (!_isPttActive) await _updateButtonState('idle');
+        });
+      }
+      return; // inFlight → ignorar en silencio
+    }
+
     _isPttActive = true;
     _log('PTT DOWN → unmute mic (canal=$channelId, '
         'engineInChannel=${_agoraService.isInChannel})');
@@ -197,6 +213,8 @@ class OverlayPttService {
       Future.delayed(const Duration(milliseconds: 1500), () async {
         if (!_isPttActive) await _updateButtonState('idle');
       });
+    } finally {
+      PttGate.instance.endOp();
     }
   }
 
@@ -205,6 +223,7 @@ class OverlayPttService {
   Future<void> _handlePttUp() async {
     _log('PTT UP → mute mic (instantáneo)');
     _isPttActive = false;
+    final wasEmpty = PttGate.instance.beginRelease();
 
     try {
       await _agoraService.quickPttStop();
@@ -217,6 +236,18 @@ class OverlayPttService {
       try {
         await _updateButtonState('idle');
       } catch (_) {}
+    } finally {
+      PttGate.instance.endOp();
+    }
+
+    // Rate-limit: si esta transmisión fue "vacía" y se llenó el cupo, castigar.
+    final blockSecs = PttGate.instance.registerUsage(wasEmpty);
+    if (blockSecs != null) {
+      _log('PTT flotante: rate-limit activado ($blockSecs s)');
+      await _updateButtonState('error');
+      Future.delayed(const Duration(milliseconds: 1500), () async {
+        if (!_isPttActive) await _updateButtonState('idle');
+      });
     }
   }
 
