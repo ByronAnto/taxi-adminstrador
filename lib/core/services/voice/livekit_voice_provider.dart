@@ -350,7 +350,14 @@ class LiveKitVoiceProvider implements VoiceProvider {
         ..on<lk.TrackSubscribedEvent>((e) {
           // Aplica el volumen/mute actual a cada audio remoto que entra.
           final t = e.track;
-          if (t is lk.RemoteAudioTrack) _applyVolumeToTrack(t);
+          if (t is lk.RemoteAudioTrack) {
+            _applyVolumeToTrack(t);
+            // BUG audio bajo (Xiaomi/Pixel 2026-06-12): al arrancar el playout
+            // de un track remoto, webrtc puede voltear la ruta a
+            // communication/auricular → se oye bajito por el earpiece. Cada
+            // track nuevo re-fuerza MEDIA + altavoz.
+            unawaited(_forceMediaAudioRoute());
+          }
         });
 
       // Acotado: sin timeout, un server caído/red colgada deja este await
@@ -655,6 +662,11 @@ class LiveKitVoiceProvider implements VoiceProvider {
       try {
         await lp.setMicrophoneEnabled(target);
         _isMicPublishing = target;
+        // El (un)publish del mic toca la sesión de audio nativa y puede
+        // voltear la ruta a communication/auricular (audio remoto bajito por
+        // el earpiece — visto en Xiaomi y Pixel). Re-forzar MEDIA + altavoz
+        // tras cada transición del PTT.
+        unawaited(_forceMediaAudioRoute());
       } catch (e) {
         _log('setMic($target): $e');
         // Resincronizar con el estado REAL del SDK: si el cambio falló, el
