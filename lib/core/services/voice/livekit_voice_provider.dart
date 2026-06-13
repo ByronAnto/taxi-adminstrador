@@ -264,6 +264,11 @@ class LiveKitVoiceProvider implements VoiceProvider {
     // salida intencional para que un eventual RoomDisconnected futuro sí dispare
     // la auto-reconexión.
     _intentionalDisconnect = false;
+    // Hoisted para poder DISPONER la Room en el catch si connect falla/timeoutea
+    // (si no, queda huérfana conectándose en background → participante fantasma
+    // → duplicateIdentity, la tormenta del 2026-06-12).
+    lk.Room? room;
+    lk.EventsListener<lk.RoomEvent>? listener;
     try {
       await _ensureSdkInit(); // bypassVoiceProcessing ANTES de conectar
       await _hydrateVolume(); // recupera la ganancia persistida (cold-start)
@@ -282,7 +287,7 @@ class LiveKitVoiceProvider implements VoiceProvider {
       // Cambiando de canal (o reconectando): cierra la sala previa.
       await _teardownRoom();
 
-      final room = lk.Room(
+      room = lk.Room(
         roomOptions: const lk.RoomOptions(
           adaptiveStream: true,
           dynacast: true,
@@ -307,7 +312,7 @@ class LiveKitVoiceProvider implements VoiceProvider {
         ),
       );
 
-      final listener = room.createListener();
+      listener = room.createListener();
       listener
         ..on<lk.RoomReconnectingEvent>((e) {
           // El SDK detectó pérdida de conexión y está reconectando solo
@@ -327,6 +332,17 @@ class LiveKitVoiceProvider implements VoiceProvider {
           }());
         })
         ..on<lk.RoomDisconnectedEvent>((e) {
+          // GUARDA ANTI-TORMENTA (bug 2026-06-12, Xiaomi WiFi): ignorar los
+          // eventos de una Room que YA fue reemplazada por un re-join. Sin
+          // esto, una Room vieja que emite `duplicateIdentity` tras ser
+          // sustituida dispara una reconexión que MATA a la Room buena →
+          // cascada de duplicateIdentity. Solo la Room activa (`_room`) puede
+          // gobernar el estado/reconexión; si ya hay otra activa, esta es
+          // obsoleta y se descarta en silencio.
+          if (_room != null && !identical(room, _room)) {
+            _log('RoomDisconnected de Room obsoleta (${e.reason}) — ignorado');
+            return;
+          }
           _isInChannel = false;
           _isMicPublishing = false;
           // Permite re-join: limpia el target salvo que sea un cierre limpio.
@@ -351,7 +367,7 @@ class LiveKitVoiceProvider implements VoiceProvider {
           }
         })
         ..on<lk.ActiveSpeakersChangedEvent>((e) {
-          final lp = room.localParticipant;
+          final lp = room!.localParticipant;
           final speaking =
               lp != null && e.speakers.any((s) => s.sid == lp.sid);
           _onLocalVoiceActivity?.call(speaking);
@@ -406,6 +422,21 @@ class LiveKitVoiceProvider implements VoiceProvider {
       _log('❌ joinChannel: $e');
       _isInChannel = false;
       if (_targetChannelId == channelId) _targetChannelId = null;
+      // No dejar Rooms huérfanas: si esta Room falló al conectar y NO llegó a
+      // ser la activa, hay que disponerla — si no, sigue intentando conectar
+      // en background y registra un participante fantasma con nuestra identity
+      // → duplicateIdentity contra la próxima Room buena.
+      if (room != null && !identical(room, _room)) {
+        try {
+          await listener?.dispose();
+        } catch (_) {}
+        try {
+          await room.disconnect();
+        } catch (_) {}
+        try {
+          await room.dispose();
+        } catch (_) {}
+      }
       _onError?.call('joinChannel: $e');
       rethrow;
     }
